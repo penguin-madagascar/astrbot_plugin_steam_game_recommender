@@ -1,0 +1,56 @@
+{
+  "rawg_api_key": {
+    "type": "string",
+    "description": "RAWG API Key。",
+    "hint": "前往 https://rawg.io/apidocs 获取。MVP 必填；留空时 /游戏推荐 和 /游戏详情 会返回配置提示。",
+    "obvious_hint": true,
+    "default": ""
+  },
+  "igdb_client_id": {
+    "type": "string",
+    "description": "IGDB Client ID。",
+    "hint": "MVP 暂不调用，预留给后续数据源。",
+    "default": ""
+  },
+  "igdb_client_secret": {
+    "type": "string",
+    "description": "IGDB Client Secret。",
+    "hint": "MVP 暂不调用，预留给后续数据源。",
+    "default": ""
+  },
+  "itad_api_key": {
+    "type": "string",
+    "description": "IsThereAnyDeal API Key。",
+    "hint": "MVP 暂不调用，预留给后续价格数据源。",
+    "default": ""
+  },
+  "default_region": {
+    "type": "string",
+    "description": "默认地区代码。",
+    "hint": "MVP 仅用于文案提示；RAWG 不提供实时地区价格。",
+    "default": "CN"
+  },
+  "max_results": {
+    "type": "int",
+    "description": "默认推荐数量上限。",
+    "default": 5
+  },
+  "cache_ttl_hours": {
+    "type": "int",
+    "description": "RAWG 查询缓存有效期（小时）。",
+    "default": 24
+  },
+  "llm_provider_id": {
+    "type": "string",
+    "description": "用于偏好解析和结果解释的 LLM 提供商。",
+    "hint": "留空时尝试使用当前会话模型；调用失败会降级为关键词解析和规则格式化。",
+    "_special": "select_provider",
+    "default": ""
+  },
+  "timeout_seconds": {
+    "type": "int",
+    "description": "HTTP 请求超时时间。",
+    "default": 15
+  }
+}
+

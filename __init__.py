@@ -1,0 +1,2 @@
+"""AstrBot game recommender plugin."""
+
