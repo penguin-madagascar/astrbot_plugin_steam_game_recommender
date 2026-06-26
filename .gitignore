@@ -1,7 +1,15 @@
 __pycache__/
 *.py[cod]
+.DS_Store
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.coverage
+htmlcov/
 .venv/
+dist/
+build/
+*.egg-info/
 rawg_cache.sqlite3
+*.sqlite*
+data/

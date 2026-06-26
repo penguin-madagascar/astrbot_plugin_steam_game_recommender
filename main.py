@@ -21,10 +21,10 @@ from .services.steam_price_bridge import SteamPriceBridge
 from .storage.repository import SQLiteCacheRepository
 
 PLUGIN_NAME = "astrbot_plugin_game_recommender"
-PLUGIN_VERSION = "0.3.0"
+PLUGIN_VERSION = "0.3.1"
 PLUGIN_DESCRIPTION = (
-    "无需 API Key 可运行，基于 Steam/RAWG 数据、规则排序和"
-    "可选 Steam 价格增强的自然语言游戏推荐插件。"
+    "默认无需 API Key 即可基于 Steam/PC 公开数据推荐游戏；"
+    "填写 RAWG API Key 后支持 PlayStation、Xbox、Nintendo Switch 候选召回与筛选。"
 )
 
 
