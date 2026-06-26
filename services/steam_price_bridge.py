@@ -39,6 +39,10 @@ else:
     PRICE_PLUGIN_IMPORT_ERROR = None
 
 ServiceFactory = Callable[[dict[str, Any], Any], Any]
+DEFAULT_PRICE_LOOKUP_LIMIT = 5
+DEFAULT_HISTORY_DAYS = 720
+DEFAULT_GLOBAL_PRICE_LIMIT = 10
+DEFAULT_LANGUAGE = "schinese"
 
 
 class SteamPriceBridge:
@@ -48,14 +52,11 @@ class SteamPriceBridge:
         config: Any,
         service_factory: ServiceFactory | None = None,
     ) -> None:
-        self.enabled = safe_bool(config.get("enable_steam_price_enrichment"), True)
-        self.default_country = normalize_country(
-            str(config.get("steam_price_country") or config.get("default_region") or "CN")
-        )
-        self.lookup_limit = max(safe_int(config.get("steam_price_lookup_limit"), 5), 0)
+        self.default_country = normalize_country(str(config.get("default_region") or "CN"))
+        self.lookup_limit = DEFAULT_PRICE_LOOKUP_LIMIT
         self.service: Any | None = None
 
-        if not self.enabled or client is None:
+        if client is None:
             return
 
         factory = service_factory or default_service_factory()
@@ -67,16 +68,16 @@ class SteamPriceBridge:
         price_config = {
             "default_country": self.default_country,
             "default_history_country": self.default_country,
-            "default_language": str(config.get("steam_price_language") or "schinese"),
-            "history_days": safe_int(config.get("steam_price_history_days"), 720),
-            "global_price_limit": safe_int(config.get("steam_price_global_price_limit"), 10),
+            "default_language": DEFAULT_LANGUAGE,
+            "history_days": DEFAULT_HISTORY_DAYS,
+            "global_price_limit": DEFAULT_GLOBAL_PRICE_LIMIT,
             "show_api_links": False,
             "llm_name_retry_count": 0,
         }
         self.service = factory(price_config, client)
 
     def is_available(self) -> bool:
-        return self.enabled and self.service is not None
+        return self.service is not None
 
     async def enrich_ranked_games(
         self,
@@ -277,23 +278,6 @@ def normalize_country(value: str) -> str:
         return parse_country(value) or "CN"
     text = value.strip()
     return text.upper() if len(text) == 2 and text.isalpha() else "CN"
-
-
-def safe_bool(value: Any, default: bool) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() not in {"0", "false", "no", "off", "关闭"}
-    return bool(value)
-
-
-def safe_int(value: Any, default: int) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
 
 
 def is_steam_details(value: Any) -> bool:

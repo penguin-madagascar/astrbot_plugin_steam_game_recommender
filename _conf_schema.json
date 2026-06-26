@@ -5,52 +5,17 @@
     "hint": "留空时使用 Steam 公开数据源；填写后增强多平台候选召回和 RAWG 游戏资料。",
     "default": ""
   },
-  "igdb_client_id": {
-    "type": "string",
-    "description": "IGDB Client ID。",
-    "hint": "MVP 暂不调用，预留给后续数据源。",
-    "default": ""
-  },
-  "igdb_client_secret": {
-    "type": "string",
-    "description": "IGDB Client Secret。",
-    "hint": "MVP 暂不调用，预留给后续数据源。",
-    "default": ""
-  },
-  "itad_api_key": {
-    "type": "string",
-    "description": "IsThereAnyDeal API Key。",
-    "hint": "MVP 暂不调用，预留给后续价格数据源。",
-    "default": ""
-  },
   "default_region": {
     "type": "string",
     "description": "默认地区代码。",
-    "hint": "用于 Steam 价格增强的默认地区；RAWG 本身不提供实时地区价格。",
+    "hint": "用于 Steam 公开数据源和 Steam 价格增强的默认地区，建议使用 CN、US、JP 等两字母代码。",
     "default": "CN"
   },
-  "enable_steam_price_enrichment": {
-    "type": "bool",
-    "description": "是否在安装 steam_price_heybox 插件时增强 Steam 当前价和史低。",
-    "hint": "关闭后 /gamerec 和 /gamedesc 只展示游戏资料，不补充 Steam 价格。",
-    "default": true
-  },
-  "steam_price_country": {
+  "steam_price_heybox_notice": {
     "type": "string",
-    "description": "Steam 价格查询默认地区代码。",
-    "hint": "留空时沿用 default_region，建议使用 CN、US、JP 等两字母代码。",
-    "default": "CN"
-  },
-  "steam_price_history_days": {
-    "type": "int",
-    "description": "小黑盒历史价格查询天数。",
-    "default": 720
-  },
-  "steam_price_lookup_limit": {
-    "type": "int",
-    "description": "每次推荐最多补充价格的游戏数量。",
-    "hint": "限制外部查询次数，推荐保持 1-10。",
-    "default": 5
+    "description": "Steam 价格增强提示。",
+    "hint": "无需填写；安装 astrbot_plugin_steam_price_heybox 后会自动启用价格增强，未安装时只返回游戏推荐和详情。",
+    "default": "无需填写；安装 astrbot_plugin_steam_price_heybox 后自动补充当前价、史低和跨区价格。"
   },
   "max_results": {
     "type": "int",

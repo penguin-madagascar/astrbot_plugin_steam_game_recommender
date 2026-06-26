@@ -7,7 +7,7 @@
 - `/gamerec <自然语言需求>`：根据平台、类型、排除项、人数、预算、语言、难度、氛围等偏好推荐游戏；兼容 alias：`/游戏推荐`。
 - `/gamedesc <游戏名>`：查询游戏基础资料，并在可用时补充 Steam 价格；兼容 alias：`/游戏详情`。
 - 使用 SQLite 缓存 Steam/RAWG 响应，减少重复请求。
-- IGDB、IsThereAnyDeal client 已预留骨架，首版不调用。
+- 价格查询全部通过 `astrbot_plugin_steam_price_heybox`；本插件不直接接入第三方价格 API。
 
 ## 安装
 
@@ -28,12 +28,9 @@ pip install -r requirements.txt
 - `llm_provider_id`：用于偏好解析和结果解释；留空时尝试当前会话模型，失败会自动降级。
 - `max_results`：默认推荐数量，范围 1-10。
 - `cache_ttl_hours`：Steam/RAWG 缓存有效期。
-- `default_region`：默认地区代码。
-- `enable_steam_price_enrichment`：是否启用 Steam 价格增强，默认开启。
-- `steam_price_country`：Steam 价格查询地区，默认 `CN`。
-- `steam_price_history_days`：小黑盒历史价格查询天数，默认 `720`。
-- `steam_price_lookup_limit`：每次推荐最多补充价格的游戏数量，默认 `5`。
-- `igdb_client_id`、`igdb_client_secret`、`itad_api_key`：预留字段，MVP 不调用。
+- `default_region`：默认地区代码，用于 Steam 公开数据源和 Steam 价格增强。
+- `timeout_seconds`：HTTP 请求超时时间。
+- `steam_price_heybox_notice`：dashboard 静态提示字段，无需填写；安装 `astrbot_plugin_steam_price_heybox` 后自动启用价格增强。
 
 ## 示例
 
@@ -44,7 +41,7 @@ pip install -r requirements.txt
 
 ## 限制说明
 
-- 价格增强依赖可导入的 `astrbot_plugin_steam_price_heybox`；该插件未安装或查询失败时，只展示游戏推荐结果。
+- 价格增强依赖可导入的 `astrbot_plugin_steam_price_heybox`；该插件未安装、不可导入或查询失败时，只展示游戏推荐结果。
 - 未配置 `rawg_api_key` 时主要覆盖 Steam/PC；Switch、PlayStation、Xbox 的平台覆盖有限，结果中会提示。
 - 预算会参与软排序：当前价在预算内会加分，超预算会提示，但不会直接过滤候选。
 - Steam/RAWG 的中文支持数据都可能不完整；结果中未确认时会显示“不确定”或提醒以商店页面为准。

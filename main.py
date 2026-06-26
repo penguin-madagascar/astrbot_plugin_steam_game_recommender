@@ -63,12 +63,8 @@ class GameRecommenderPlugin(Star):
             client=self.http_client,
             cache=self.cache,
             cache_ttl_hours=safe_int(self.config.get("cache_ttl_hours"), 24),
-            default_country=str(
-                self.config.get("steam_price_country")
-                or self.config.get("default_region")
-                or "CN"
-            ),
-            language=str(self.config.get("steam_price_language") or "schinese"),
+            default_country=str(self.config.get("default_region") or "CN"),
+            language="schinese",
         )
         self.game_source = (
             self.rawg_client if self.rawg_client.is_configured() else self.steam_client
@@ -76,6 +72,15 @@ class GameRecommenderPlugin(Star):
         self.preference_parser = PreferenceParser(context, self.provider_id)
         self.recommender = GameRecommender(self.game_source, max_results=self.max_results)
         self.price_bridge = SteamPriceBridge(self.http_client, self.config)
+        if self.price_bridge.is_available():
+            logger.info(
+                "Detected astrbot_plugin_steam_price_heybox; Steam price enrichment enabled."
+            )
+        else:
+            logger.info(
+                "astrbot_plugin_steam_price_heybox is not available; "
+                "game recommendations continue without price enrichment."
+            )
 
     async def terminate(self) -> None:
         await self.http_client.aclose()

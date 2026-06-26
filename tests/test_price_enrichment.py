@@ -73,6 +73,36 @@ class CommandRegistrationTest(unittest.TestCase):
         self.assertEqual(rawg_config["default"], "")
         self.assertNotIn("必填", rawg_config["hint"])
 
+    def test_dashboard_hides_price_plugin_runtime_settings(self) -> None:
+        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+
+        self.assertIn("steam_price_heybox_notice", schema)
+        for removed_key in (
+            "itad" + "_api_key",
+            "enable_steam_price_enrichment",
+            "steam_price_country",
+            "steam_price_history_days",
+            "steam_price_lookup_limit",
+        ):
+            self.assertNotIn(removed_key, schema)
+
+    def test_repository_no_longer_mentions_itad(self) -> None:
+        ignored_parts = {".git", ".venv", "__pycache__"}
+        searched_suffixes = {".py", ".json", ".md", ".yaml", ".toml", ".txt"}
+        markers = ("Itad" + "Client", "IsThereAny" + "Deal", "itad" + "_api_key")
+        offenders = []
+
+        for path in ROOT.rglob("*"):
+            if any(part in ignored_parts for part in path.parts):
+                continue
+            if path.is_file() and path.suffix in searched_suffixes:
+                text = path.read_text(encoding="utf-8")
+                for marker in markers:
+                    if marker in text:
+                        offenders.append(f"{path.relative_to(ROOT)}:{marker}")
+
+        self.assertEqual(offenders, [])
+
 
 class PriceFormattingTest(unittest.TestCase):
     def test_price_summary_is_json_serializable(self) -> None:
@@ -115,8 +145,8 @@ class PriceFormattingTest(unittest.TestCase):
 
 
 class PriceBridgeTest(unittest.IsolatedAsyncioTestCase):
-    async def test_disabled_bridge_leaves_games_unchanged(self) -> None:
-        bridge = SteamPriceBridge(client=None, config={"enable_steam_price_enrichment": False})
+    async def test_missing_http_client_leaves_games_unchanged(self) -> None:
+        bridge = SteamPriceBridge(client=None, config={})
         games = [RankedGame(title="Test Game", score=10)]
 
         enriched = await bridge.enrich_ranked_games(games, GamePreference(budget=100))
@@ -125,10 +155,33 @@ class PriceBridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enriched[0].title, "Test Game")
         self.assertIsNone(enriched[0].price_summary)
 
+    async def test_bridge_uses_default_region_and_internal_price_defaults(self) -> None:
+        captured_config = {}
+
+        def factory(price_config, _client):
+            captured_config.update(price_config)
+            return FakePriceService()
+
+        bridge = SteamPriceBridge(
+            client=object(),
+            config={"default_region": "us"},
+            service_factory=factory,
+        )
+
+        self.assertTrue(bridge.is_available())
+        self.assertEqual(bridge.lookup_limit, 5)
+        self.assertEqual(captured_config["default_country"], "US")
+        self.assertEqual(captured_config["default_history_country"], "US")
+        self.assertEqual(captured_config["default_language"], "schinese")
+        self.assertEqual(captured_config["history_days"], 720)
+        self.assertEqual(captured_config["global_price_limit"], 10)
+        self.assertFalse(captured_config["show_api_links"])
+        self.assertEqual(captured_config["llm_name_retry_count"], 0)
+
     async def test_lookup_builds_summary_from_price_service(self) -> None:
         bridge = SteamPriceBridge(
             client=object(),
-            config={"steam_price_country": "CN"},
+            config={"default_region": "CN"},
             service_factory=lambda _config, _client: FakePriceService(),
         )
 
