@@ -3,17 +3,8 @@ from __future__ import annotations
 import re
 
 from ..storage.models import GamePreference
-
-REFERENCE_GAME_PROFILES = {
-    "双人成行": {
-        "title": "It Takes Two",
-        "genres_like": ["co-op", "local co-op", "puzzle", "adventure", "casual", "platformer"],
-    },
-    "it takes two": {
-        "title": "It Takes Two",
-        "genres_like": ["co-op", "local co-op", "puzzle", "adventure", "casual", "platformer"],
-    },
-}
+from .reference_data import REFERENCE_PROFILES
+from .reference_resolver import alias_for_title, extract_reference_titles
 
 
 def infer_preference_from_text(text: str) -> GamePreference:
@@ -79,9 +70,9 @@ def infer_preference_from_text(text: str) -> GamePreference:
 
     reference_like = extract_reference_games(text)
     for reference in reference_like:
-        profile = REFERENCE_GAME_PROFILES.get(reference.lower())
+        profile = reference_profile(reference)
         if profile:
-            genres_like.extend(profile["genres_like"])
+            genres_like.extend(profile.genres_like)
 
     return GamePreference(
         platforms=platforms,
@@ -119,18 +110,17 @@ def merge_text_preference(preference: GamePreference, text: str) -> GamePreferen
 
 
 def extract_reference_games(text: str) -> list[str]:
-    references: list[str] = []
-    for match in re.finditer(r"类似([^，。,.；;]+)", text):
-        raw = re.split(r"但|不过|别|不要|且|并且", match.group(1).strip(), maxsplit=1)[0].strip()
-        if raw:
-            references.append(normalize_reference_game(raw))
-    return merge_lists([], references)
+    return merge_lists([], [normalize_reference_game(item) for item in extract_reference_titles(text)])
 
 
 def normalize_reference_game(value: str) -> str:
-    key = re.sub(r"\s+", " ", value).strip().lower()
-    profile = REFERENCE_GAME_PROFILES.get(key)
-    return str(profile["title"]) if profile else value
+    alias = alias_for_title(value)
+    return alias.canonical_title if alias else value
+
+
+def reference_profile(value: str):
+    alias = alias_for_title(value)
+    return REFERENCE_PROFILES.get(alias.rawg_slug) if alias else None
 
 
 def keyword_hits(text: str, mapping: dict[str, tuple[str, ...]]) -> list[str]:

@@ -6,6 +6,11 @@ from astrbot_plugin_game_recommender.services.preference_rules import (
     infer_preference_from_text,
     merge_text_preference,
 )
+from astrbot_plugin_game_recommender.services.reference_resolver import (
+    ReferenceGameResolver,
+    normalize_reference_title,
+)
+from astrbot_plugin_game_recommender.storage.models import GameCandidate
 from astrbot_plugin_game_recommender.storage.models import GamePreference
 
 
@@ -54,6 +59,70 @@ class PreferenceRulesTest(unittest.TestCase):
         self.assertEqual(merged.difficulty, "easy")
         self.assertIn("horror", merged.genres_dislike)
         self.assertIn("it takes two", merged.reference_games_like)
+
+
+class ReferenceGameResolverTest(unittest.IsolatedAsyncioTestCase):
+    async def test_chinese_alias_resolves_to_rawg_entity_without_sentence_special_case(self) -> None:
+        resolver = ReferenceGameResolver(FakeGameSource([]))
+
+        resolved = await resolver.resolve_reference_games(
+            "像《双人成行》一样的合作游戏",
+            GamePreference(reference_games_like=["双人成行"]),
+        )
+
+        self.assertEqual(len(resolved), 1)
+        self.assertEqual(resolved[0].canonical_title, "It Takes Two")
+        self.assertEqual(resolved[0].rawg_slug, "it-takes-two")
+        self.assertGreaterEqual(resolved[0].confidence, 0.88)
+        self.assertEqual(resolved[0].source, "alias")
+
+    async def test_english_and_edition_suffixes_normalize_to_same_reference(self) -> None:
+        resolver = ReferenceGameResolver(FakeGameSource([]))
+
+        resolved = await resolver.resolve_reference_games(
+            "接近 It Takes Two - Friend's Pass",
+            GamePreference(),
+        )
+
+        self.assertEqual(resolved[0].canonical_title, "It Takes Two")
+        self.assertEqual(
+            normalize_reference_title("《It Takes Two - Friend's Pass》"),
+            normalize_reference_title("it takes two"),
+        )
+
+    async def test_unknown_reference_uses_rawg_title_search_when_alias_is_missing(self) -> None:
+        source = FakeGameSource(
+            [
+                GameCandidate(
+                    title="Mystery Farm",
+                    rawg_id=12345,
+                    raw_url="https://rawg.io/games/mystery-farm",
+                    genres=["Simulation"],
+                    tags=["Co-op", "Casual"],
+                )
+            ]
+        )
+
+        resolved = await ReferenceGameResolver(source).resolve_reference_games(
+            "类似 Mystery Farm 的轻松合作游戏",
+            GamePreference(),
+        )
+
+        self.assertEqual(resolved[0].canonical_title, "Mystery Farm")
+        self.assertEqual(resolved[0].rawg_slug, "mystery-farm")
+        self.assertGreaterEqual(resolved[0].confidence, 0.70)
+        self.assertEqual(resolved[0].source, "rawg")
+        self.assertEqual(source.calls[0]["search"], "Mystery Farm")
+
+
+class FakeGameSource:
+    def __init__(self, games: list[GameCandidate]) -> None:
+        self.games = games
+        self.calls: list[dict] = []
+
+    async def search_games(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.games
 
 
 if __name__ == "__main__":

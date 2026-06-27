@@ -80,6 +80,7 @@ class GamePreference(BaseModel):
     genres_dislike: list[str] = Field(default_factory=list)
     reference_games_like: list[str] = Field(default_factory=list)
     reference_games_dislike: list[str] = Field(default_factory=list)
+    resolved_reference_games: list["ResolvedReferenceGame"] = Field(default_factory=list)
     players: int | None = None
     budget: float | None = None
     language: str | None = None
@@ -139,6 +140,39 @@ class GamePreference(BaseModel):
         extra = "ignore"
 
 
+class ResolvedReferenceGame(BaseModel):
+    raw_text: str
+    normalized_title: str
+    canonical_title: str
+    rawg_id: int | None = None
+    rawg_slug: str | None = None
+    confidence: float = 0.0
+    source: str = "text"
+    genres: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    platforms: list[str] = Field(default_factory=list)
+    stores: list[str] = Field(default_factory=list)
+
+    @validator("genres", "tags", "platforms", "stores", pre=True)
+    def _normalize_lists(cls, value: Any) -> list[str]:
+        return split_text_list(value)
+
+    @validator("raw_text", "normalized_title", "canonical_title", "rawg_slug", "source", pre=True)
+    def _normalize_text(cls, value: Any) -> str:
+        return re.sub(r"\s+", " ", str(value or "")).strip()
+
+    @validator("confidence", pre=True)
+    def _normalize_confidence(cls, value: Any) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = 0.0
+        return min(max(number, 0.0), 1.0)
+
+    class Config:
+        extra = "ignore"
+
+
 class GameCandidate(BaseModel):
     title: str
     platforms: list[str] = Field(default_factory=list)
@@ -153,6 +187,8 @@ class GameCandidate(BaseModel):
     score: float = 0.0
     reasons: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    source_reasons: list[str] = Field(default_factory=list)
+    source_warnings: list[str] = Field(default_factory=list)
     rawg_id: int | None = None
     description: str | None = None
 
@@ -160,7 +196,7 @@ class GameCandidate(BaseModel):
     def _normalize_lists(cls, value: Any) -> list[str]:
         return split_text_list(value)
 
-    @validator("reasons", "warnings", pre=True)
+    @validator("reasons", "warnings", "source_reasons", "source_warnings", pre=True)
     def _normalize_display_lists(cls, value: Any) -> list[str]:
         return split_display_list(value)
 
@@ -209,3 +245,9 @@ class RankedGame(GameCandidate):
         data["warnings"] = warnings
         validator = getattr(cls, "model_validate", None)
         return validator(data) if validator else cls.parse_obj(data)
+
+
+try:
+    GamePreference.model_rebuild()
+except AttributeError:  # pydantic v1
+    GamePreference.update_forward_refs(ResolvedReferenceGame=ResolvedReferenceGame)
