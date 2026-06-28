@@ -18,6 +18,7 @@ from .services.formatter import (
 from .services.message_delivery import build_forward_message_chain
 from .services.preference_parser import PreferenceParser
 from .services.recommender import GameRecommender, adapt_preference_for_steam_source
+from .services.recommendation_limits import effective_result_limit
 from .services.steam_price_bridge import SteamPriceBridge
 from .storage.repository import SQLiteCacheRepository
 
@@ -109,8 +110,9 @@ class GameRecommenderPlugin(Star):
             preference = await self.preference_parser.parse_preference(event, text)
             if not self.rawg_client.is_configured():
                 adapt_preference_for_steam_source(preference)
+            result_limit = effective_result_limit(self.max_results, preference.result_count)
             candidate_pool_size = (
-                max(self.max_results * 3, preference.result_count or self.max_results)
+                max(result_limit * 3, result_limit)
                 if preference.budget is not None or self.price_bridge.is_available()
                 else None
             )
@@ -125,7 +127,7 @@ class GameRecommenderPlugin(Star):
                 self.provider_id,
                 preference,
                 ranked_games,
-                limit=self.max_results,
+                limit=result_limit,
             )
         except RawgConfigurationError as exc:
             yield event.plain_result(str(exc))
