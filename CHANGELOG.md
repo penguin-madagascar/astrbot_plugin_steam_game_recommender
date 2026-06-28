@@ -1,6 +1,6 @@
-# Changelog
+# 更新日志
 
-## Unreleased
+## 未发布
 
 - 新增通用参考游戏归一：支持“类似/像/接近 X”表达，通过别名索引、RAWG 标题 fallback、置信度评分和可维护画像解析参考游戏。
 - 改进推荐召回：在宽泛 RAWG 标签查询前优先执行参考画像种子搜索，避免相似合作游戏被无关高分游戏挤掉。
@@ -11,7 +11,7 @@
 
 ## 0.3.1 - 2026-06-28
 
-- Improved keyword preference fallback for platform, two-player, budget, language, horror exclusion, difficulty, and reference-game hints.
-- Strengthened filtering and de-duplication for DLC, single-player-only candidates, repeated editions, and disliked genres.
-- Added Steam price enrichment through the optional sibling `astrbot_plugin_steam_price_heybox` plugin.
-- Fixed recommendation reason formatting so values such as `RAWG 评分 4.8/5` are not split on `/`.
+- 改进关键词偏好兜底：覆盖平台、双人、预算、语言、恐怖排除、难度和参考游戏线索。
+- 强化 DLC、纯单人候选、重复版本和不喜欢类型的过滤与去重。
+- 通过可选的 sibling 插件 `astrbot_plugin_steam_price_heybox` 增加 Steam 价格增强。
+- 修复推荐理由格式化，避免 `RAWG 评分 4.8/5` 这类内容被 `/` 拆开。

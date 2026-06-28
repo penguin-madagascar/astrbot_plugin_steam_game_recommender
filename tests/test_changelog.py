@@ -13,9 +13,19 @@ class ChangelogTest(unittest.TestCase):
 
         self.assertTrue(changelog.exists())
         text = changelog.read_text(encoding="utf-8")
-        self.assertIn("## Unreleased", text)
+        self.assertIn("# 更新日志", text)
+        self.assertIn("## 未发布", text)
         self.assertIn("## 0.3.1", text)
         self.assertIn("参考游戏归一", text)
+        for english_phrase in (
+            "# Changelog",
+            "## Unreleased",
+            "Improved keyword",
+            "Strengthened filtering",
+            "Added Steam price",
+            "Fixed recommendation",
+        ):
+            self.assertNotIn(english_phrase, text)
 
 
 if __name__ == "__main__":
