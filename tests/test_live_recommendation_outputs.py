@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import re
@@ -28,6 +30,67 @@ from astrbot_plugin_game_recommender.storage.repository import SQLiteCacheReposi
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = ROOT.parent
+
+
+def load_test_env(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
+        parsed = parse_env_line(raw_line)
+        if parsed is None:
+            continue
+        key, value = parsed
+        os.environ.setdefault(key, value)
+
+
+def parse_env_line(line: str) -> tuple[str, str] | None:
+    text = line.strip()
+    if not text or text.startswith("#") or "=" not in text:
+        return None
+    key, value = text.split("=", 1)
+    key = key.strip()
+    if not key:
+        return None
+    return key, unquote_env_value(value.strip())
+
+
+def unquote_env_value(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def normalize_secret(value: Any, name: str) -> str:
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            return text
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                return item.strip()
+    raise AssertionError(f"{name} is missing or invalid")
+
+
+def live_timeout_seconds(config: dict[str, Any]) -> int:
+    override = os.getenv("GAME_RECOMMENDER_LIVE_TIMEOUT_SECONDS")
+    if override:
+        return max(int(override), 1)
+    try:
+        configured = int(config.get("timeout_seconds") or 0)
+    except (TypeError, ValueError):
+        configured = 0
+    return max(configured, 60)
+
+
+def restore_env(key: str, value: str | None) -> None:
+    if value is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = value
+
+
+load_test_env(ROOT / "tests/.env")
 LIVE_ENABLED = os.getenv("GAME_RECOMMENDER_LIVE_TESTS") == "1"
 
 LIVE_INPUTS = [
@@ -52,6 +115,75 @@ LIVE_INPUTS = [
 ]
 
 
+class LiveTestHelperTest(unittest.TestCase):
+    def test_normalize_secret_accepts_string_and_key_pool(self) -> None:
+        self.assertEqual(normalize_secret(" sk-direct ", "LLM API key"), "sk-direct")
+        self.assertEqual(normalize_secret(["", " sk-from-list "], "LLM API key"), "sk-from-list")
+
+    def test_normalize_secret_rejects_empty_or_invalid_values(self) -> None:
+        for value in ("", [], ["", "  "], [123], None):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(AssertionError, "LLM API key"):
+                    normalize_secret(value, "LLM API key")
+
+    def test_load_test_env_reads_values_without_overriding_existing_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / ".env"
+            path.write_text(
+                "\n".join(
+                    [
+                        "# local live test settings",
+                        "GAME_RECOMMENDER_CONFIG=/tmp/game.json",
+                        "EXISTING_VALUE=from_file",
+                        "QUOTED_VALUE=\"quoted text\"",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            old_config = os.environ.pop("GAME_RECOMMENDER_CONFIG", None)
+            old_existing = os.environ.get("EXISTING_VALUE")
+            old_quoted = os.environ.pop("QUOTED_VALUE", None)
+            os.environ["EXISTING_VALUE"] = "from_env"
+            try:
+                load_test_env(path)
+                self.assertEqual(os.environ["GAME_RECOMMENDER_CONFIG"], "/tmp/game.json")
+                self.assertEqual(os.environ["EXISTING_VALUE"], "from_env")
+                self.assertEqual(os.environ["QUOTED_VALUE"], "quoted text")
+            finally:
+                restore_env("GAME_RECOMMENDER_CONFIG", old_config)
+                restore_env("EXISTING_VALUE", old_existing)
+                restore_env("QUOTED_VALUE", old_quoted)
+
+    def test_live_timeout_uses_longer_default_and_env_override(self) -> None:
+        old_timeout = os.environ.pop("GAME_RECOMMENDER_LIVE_TIMEOUT_SECONDS", None)
+        try:
+            self.assertEqual(live_timeout_seconds({"timeout_seconds": 15}), 60)
+            os.environ["GAME_RECOMMENDER_LIVE_TIMEOUT_SECONDS"] = "90"
+            self.assertEqual(live_timeout_seconds({"timeout_seconds": 15}), 90)
+        finally:
+            restore_env("GAME_RECOMMENDER_LIVE_TIMEOUT_SECONDS", old_timeout)
+
+    def test_emit_live_result_prints_one_scenario_messages(self) -> None:
+        result = LiveScenarioResult(
+            text="测试输入",
+            messages=["总体说明", "1. 《测试游戏》\n层级：推荐"],
+            chain=None,
+            rawg_calls=[],
+            steam_calls=[],
+            llm_calls=1,
+        )
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            emit_live_result(2, result)
+
+        output = buffer.getvalue()
+        self.assertIn("Live 场景 2", output)
+        self.assertIn("测试输入", output)
+        self.assertIn("总体说明", output)
+        self.assertIn("《测试游戏》", output)
+
+
 @unittest.skipUnless(LIVE_ENABLED, "set GAME_RECOMMENDER_LIVE_TESTS=1 to run live I/O tests")
 class LiveRecommendationOutputTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -72,7 +204,7 @@ class LiveRecommendationOutputTest(unittest.IsolatedAsyncioTestCase):
 
         self.temp_dir = tempfile.TemporaryDirectory()
         self.http_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(int(self.plugin_config.get("timeout_seconds") or 30)),
+            timeout=httpx.Timeout(live_timeout_seconds(self.plugin_config)),
             follow_redirects=True,
             headers={"User-Agent": "astrbot_plugin_game_recommender/live-test"},
         )
@@ -108,25 +240,27 @@ class LiveRecommendationOutputTest(unittest.IsolatedAsyncioTestCase):
         self.temp_dir.cleanup()
 
     async def test_live_natural_language_inputs_generate_forward_records(self) -> None:
-        results: list[LiveScenarioResult] = []
-        for text in LIVE_INPUTS:
-            results.append(await self.run_live_scenario(text))
-
-        self.assertEqual(len(results), 18)
-        self.assertGreaterEqual(self.context.llm_call_count, len(LIVE_INPUTS))
-        for result in results:
+        first_titles: list[str] = []
+        for index, text in enumerate(LIVE_INPUTS, start=1):
+            try:
+                result = await self.run_live_scenario(text)
+            except Exception as exc:
+                emit_live_failure(index, text, exc)
+                raise
+            emit_live_result(index, result)
             assert_forward_record_shape(self, result)
             assert_no_unbounded_rawg_queries(self, result.rawg_calls)
+            if index == 1:
+                first_titles = recommendation_titles(result.messages)[:5]
 
-        first = results[0]
-        titles = recommendation_titles(first.messages)[:5]
-        joined_titles = "\n".join(titles).lower()
+        self.assertGreaterEqual(self.context.llm_call_count, len(LIVE_INPUTS))
+        joined_titles = "\n".join(first_titles).lower()
         for banned in ("witcher", "batman", "persona"):
-            self.assertNotIn(banned, joined_titles, first.summary())
+            self.assertNotIn(banned, joined_titles)
         expected_similar = ("split fiction", "unravel two", "overcooked", "moving out", "keywe")
         self.assertTrue(
             any(name in joined_titles for name in expected_similar),
-            first.summary(),
+            f"first scenario titles={first_titles!r}",
         )
 
     async def run_live_scenario(self, text: str) -> "LiveScenarioResult":
@@ -183,6 +317,26 @@ class LiveScenarioResult:
         )
 
 
+def emit_live_result(index: int, result: LiveScenarioResult) -> None:
+    print(f"\n=== Live 场景 {index}: {result.text} ===", flush=True)
+    for node_index, message in enumerate(result.messages, start=1):
+        print(f"\n--- 节点 {node_index} ---\n{message}", flush=True)
+    print(
+        "\n--- 调用摘要 ---\n"
+        f"LLM 调用：{result.llm_calls}；RAWG 查询：{len(result.rawg_calls)}；"
+        f"Steam 查询：{len(result.steam_calls)}",
+        flush=True,
+    )
+
+
+def emit_live_failure(index: int, text: str, exc: Exception) -> None:
+    print(
+        f"\n=== Live 场景 {index}: {text} ===\n"
+        f"执行失败：{type(exc).__name__}: {exc}",
+        flush=True,
+    )
+
+
 class RecordingGameSource:
     def __init__(self, wrapped: Any) -> None:
         self.wrapped = wrapped
@@ -204,9 +358,19 @@ class OpenAICompatibleLiveContext:
         self.client = client
         self.provider = enabled_provider(cmd_config, provider_id)
         self.source = provider_source(cmd_config, self.provider)
-        self.model = str(self.provider.get("model") or "").strip()
-        self.api_base = str(self.source.get("api_base") or "https://api.openai.com/v1").rstrip("/")
-        self.api_key = str(self.source.get("key") or "").strip()
+        self.model = (
+            os.getenv("GAME_RECOMMENDER_LIVE_LLM_MODEL", "").strip()
+            or str(self.provider.get("model") or "").strip()
+        )
+        self.api_base = (
+            os.getenv("GAME_RECOMMENDER_LIVE_LLM_API_BASE", "").strip()
+            or str(self.source.get("api_base") or "https://api.openai.com/v1")
+        ).rstrip("/")
+        self.api_key = normalize_secret(
+            os.getenv("GAME_RECOMMENDER_LIVE_LLM_API_KEY")
+            or self.source.get("key"),
+            "LLM API key",
+        )
         self.llm_call_count = 0
         self.llm_attempt_count = 0
         self.llm_failures: list[str] = []
