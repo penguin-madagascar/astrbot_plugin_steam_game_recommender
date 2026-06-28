@@ -28,6 +28,11 @@ REFERENCE_ALIASES: dict[str, ReferenceAlias] = {
         canonical_title="It Takes Two",
         aliases=("It Takes Two", "双人成行", "雙人成行"),
     ),
+    "stardew-valley": ReferenceAlias(
+        rawg_slug="stardew-valley",
+        canonical_title="Stardew Valley",
+        aliases=("Stardew Valley", "星露谷物语", "星露谷物語", "星露谷"),
+    ),
 }
 
 REFERENCE_PROFILES: dict[str, ReferenceProfile] = {
@@ -80,6 +85,62 @@ REFERENCE_PROFILES: dict[str, ReferenceProfile] = {
             ),
             "overcooked all you can eat": (
                 "节奏偏忙乱，可能比 It Takes Two 更考验配合",
+            ),
+        },
+    ),
+    "stardew-valley": ReferenceProfile(
+        rawg_slug="stardew-valley",
+        genres_like=(
+            "simulation",
+            "casual",
+            "rpg",
+            "co-op",
+            "multiplayer",
+            "farming",
+            "crafting",
+            "building",
+            "management",
+            "relaxing",
+        ),
+        required_tags=("co-op", "farming"),
+        seed_titles=(
+            "Farm Together 2",
+            "Roots of Pacha",
+            "Sun Haven",
+            "Dinkum",
+            "Fae Farm",
+            "My Time at Sandrock",
+            "Core Keeper",
+        ),
+        seed_notes={
+            "farm together 2": (
+                "参考画像种子：多人农场经营、低压力种田循环接近 Stardew Valley",
+            ),
+            "roots of pacha": (
+                "参考画像种子：合作农场生活、采集制作和村落经营接近 Stardew Valley",
+            ),
+            "sun haven": (
+                "参考画像种子：多人农场生活、制作探索和轻 RPG 养成接近 Stardew Valley",
+            ),
+            "dinkum": (
+                "参考画像种子：多人采集、建造、经营和休闲生活模拟",
+            ),
+            "fae farm": (
+                "参考画像种子：合作农场、制作和轻松生活模拟",
+            ),
+            "my time at sandrock": (
+                "参考画像种子：制作经营、城镇委托和生活模拟，节奏更偏工坊建造",
+            ),
+            "core keeper": (
+                "参考画像种子：多人采集、建造和农场养成，探索战斗占比更高",
+            ),
+        },
+        seed_warnings={
+            "core keeper": (
+                "地下探索和战斗占比较高，可能不如 Stardew Valley 轻松",
+            ),
+            "my time at sandrock": (
+                "多人内容和主线体验需按具体版本确认",
             ),
         },
     ),

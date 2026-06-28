@@ -7,6 +7,8 @@ from astrbot_plugin_game_recommender.services.recommender import (
     GameRecommender,
     dedupe_candidates,
 )
+from astrbot_plugin_game_recommender.services.game_facts import build_game_facts
+from astrbot_plugin_game_recommender.services.tiered_ranker import build_ranked_game
 from astrbot_plugin_game_recommender.storage.models import GameCandidate, GamePreference
 
 
@@ -157,6 +159,228 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Persona 5 Royal", titles)
         self.assertNotIn("Warhammer 40,000: Dawn of War - Definitive Edition", titles)
 
+    async def test_stardew_like_request_prioritizes_farming_coop_games(self) -> None:
+        source = SearchAwareFakeGameSource(
+            generic_games=[
+                GameCandidate(
+                    title="Chess",
+                    platforms=["PC"],
+                    genres=["Puzzle", "Casual", "Simulation"],
+                    tags=["Split Screen", "Remote Play Together", "Simplified Chinese"],
+                    rating=4.4,
+                    stores=["Steam"],
+                ),
+                GameCandidate(
+                    title="Monster Prom 3: Monster Roadtrip",
+                    platforms=["PC"],
+                    genres=["Casual", "Strategy", "Simulation"],
+                    tags=["Co-op", "Online Co-op"],
+                    rating=4.4,
+                    stores=["Steam"],
+                ),
+                GameCandidate(
+                    title="Stardew Valley",
+                    platforms=["PC"],
+                    genres=["Simulation", "RPG"],
+                    tags=["Co-op", "Farming", "Crafting", "Simplified Chinese"],
+                    rating=4.4,
+                    stores=["Steam"],
+                ),
+                GameCandidate(
+                    title="Minecraft",
+                    platforms=["PC"],
+                    genres=["Simulation"],
+                    tags=["Multiplayer", "Crafting", "Building", "Simplified Chinese"],
+                    rating=4.4,
+                    stores=[],
+                ),
+                GameCandidate(
+                    title="Factorio",
+                    platforms=["PC"],
+                    genres=["Strategy", "Simulation"],
+                    tags=["Co-op", "Automation", "Management", "Simplified Chinese"],
+                    rating=4.4,
+                    stores=["Steam"],
+                ),
+                GameCandidate(
+                    title="Baldur's Gate III",
+                    platforms=["PC"],
+                    genres=["RPG", "Strategy"],
+                    tags=[
+                        "Co-op",
+                        "Online Co-op",
+                        "Local Co-op",
+                        "Split Screen",
+                        "Story Rich",
+                        "Simplified Chinese",
+                    ],
+                    rating=5.0,
+                    metacritic=96,
+                    stores=["Steam"],
+                ),
+                GameCandidate(
+                    title="Divinity: Original Sin 2",
+                    platforms=["PC"],
+                    genres=["RPG", "Strategy"],
+                    tags=[
+                        "Co-op",
+                        "Online Co-op",
+                        "Local Co-op",
+                        "Split Screen",
+                        "Turn-Based",
+                        "Simplified Chinese",
+                    ],
+                    rating=5.0,
+                    metacritic=95,
+                    stores=["Steam"],
+                ),
+            ],
+            search_games={
+                "Sun Haven": [
+                    farming_coop_game(
+                        "Sun Haven",
+                        tags=["Co-op", "Online Co-op", "Farming", "Crafting", "Fantasy", "Simplified Chinese"],
+                        rating=4.1,
+                    )
+                ],
+                "Roots of Pacha": [
+                    farming_coop_game(
+                        "Roots of Pacha",
+                        tags=["Co-op", "Online Co-op", "Farming", "Crafting", "Relaxing", "Simplified Chinese"],
+                        rating=4.2,
+                    )
+                ],
+                "Farm Together 2": [
+                    farming_coop_game(
+                        "Farm Together 2",
+                        tags=["Co-op", "Online Co-op", "Farming", "Management", "Casual", "Simplified Chinese"],
+                        rating=4.3,
+                    )
+                ],
+                "Dinkum": [
+                    farming_coop_game(
+                        "Dinkum",
+                        tags=["Co-op", "Online Co-op", "Farming", "Crafting", "Building", "Simplified Chinese"],
+                        rating=4.0,
+                    )
+                ],
+                "Fae Farm": [
+                    farming_coop_game(
+                        "Fae Farm",
+                        tags=["Co-op", "Online Co-op", "Farming", "Crafting", "Relaxing", "Simplified Chinese"],
+                        rating=3.9,
+                    )
+                ],
+            },
+        )
+        preference = GamePreference(
+            platforms=["steam"],
+            genres_like=[
+                "simulation",
+                "casual",
+                "rpg",
+                "co-op",
+                "local co-op",
+                "multiplayer",
+                "farming",
+                "management",
+                "crafting",
+                "building",
+                "relaxing",
+            ],
+            genres_dislike=["horror"],
+            reference_games_like=["星露谷物语"],
+            players=2,
+            language="中文",
+            difficulty="easy",
+            result_count=5,
+        )
+
+        ranked = await GameRecommender(source, max_results=5).recommend(
+            preference,
+            candidate_pool_size=10,
+        )
+
+        titles = [game.title for game in ranked[:5]]
+        self.assertEqual(
+            titles,
+            ["Farm Together 2", "Roots of Pacha", "Sun Haven", "Dinkum", "Fae Farm"],
+        )
+        self.assertNotIn("Stardew Valley", titles)
+        self.assertNotIn("Chess", titles)
+        self.assertNotIn("Monster Prom 3: Monster Roadtrip", titles)
+        self.assertNotIn("Minecraft", titles)
+        self.assertNotIn("Baldur's Gate III", titles)
+        self.assertNotIn("Divinity: Original Sin 2", titles)
+
+    async def test_stardew_profile_does_not_treat_generic_coop_games_as_strong_match(self) -> None:
+        preference = GamePreference(
+            platforms=["steam"],
+            genres_like=[
+                "simulation",
+                "casual",
+                "rpg",
+                "co-op",
+                "local co-op",
+                "multiplayer",
+                "farming",
+                "management",
+                "crafting",
+                "building",
+                "relaxing",
+            ],
+            reference_games_like=["Stardew Valley"],
+            players=2,
+            language="中文",
+            difficulty="easy",
+        )
+        generic_games = [
+            GameCandidate(
+                title="Baldur's Gate III",
+                platforms=["PC"],
+                genres=["RPG", "Strategy"],
+                tags=[
+                    "Co-op",
+                    "Online Co-op",
+                    "Local Co-op",
+                    "Multiplayer",
+                    "Split Screen",
+                    "Story Rich",
+                    "Simplified Chinese",
+                ],
+                rating=5.0,
+                metacritic=96,
+                stores=["Steam"],
+            ),
+            GameCandidate(
+                title="Factorio",
+                platforms=["PC"],
+                genres=["Strategy", "Simulation"],
+                tags=[
+                    "Co-op",
+                    "Online Co-op",
+                    "Multiplayer",
+                    "Crafting",
+                    "Building",
+                    "Management",
+                    "Simplified Chinese",
+                ],
+                rating=5.0,
+                metacritic=90,
+                stores=["Steam"],
+            ),
+        ]
+
+        for candidate in generic_games:
+            with self.subTest(candidate=candidate.title):
+                facts = build_game_facts(candidate, preference)
+                ranked = build_ranked_game(candidate, preference, facts)
+
+                self.assertIsNotNone(ranked)
+                assert ranked is not None
+                self.assertLess(ranked.facts.reference_similarity, 0.75)
+                self.assertNotEqual(ranked.tier, "strong")
+
     async def test_explicit_preferences_do_not_fall_back_to_empty_rawg_query(self) -> None:
         source = FakeGameSource([co_op_game("Unravel Two")])
         preference = GamePreference(
@@ -223,6 +447,21 @@ def co_op_game(
         tags=tags or ["Co-op", "Local Co-op", "Puzzle", "Casual", "Simplified Chinese"],
         rating=rating,
         stores=["Steam", "Nintendo Store"],
+    )
+
+
+def farming_coop_game(
+    title: str,
+    tags: list[str],
+    rating: float = 4.1,
+) -> GameCandidate:
+    return GameCandidate(
+        title=title,
+        platforms=["PC"],
+        genres=["Simulation", "Casual", "RPG"],
+        tags=tags,
+        rating=rating,
+        stores=["Steam"],
     )
 
 

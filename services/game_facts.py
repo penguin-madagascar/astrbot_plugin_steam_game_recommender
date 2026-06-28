@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from ..storage.models import GameCandidate, GameFacts, GamePreference
+from .platforms import is_switch2_only, platform_families_for, platform_matches
+from .reference_data import REFERENCE_PROFILES, ReferenceProfile
+from .reference_resolver import alias_for_title, reference_profile_for
 
-STEAM_ALIASES = ("steam", "pc", "windows")
-SWITCH_ALIASES = ("nintendo switch", "switch", "nintendo store")
-SWITCH2_ALIASES = ("nintendo switch 2", "switch 2")
 HORROR_TERMS = ("horror", "恐怖", "psychological horror")
 SINGLEPLAYER_TERMS = ("single-player", "singleplayer", "single player", "单人")
 MULTIPLAYER_TERMS = ("multiplayer", "多人")
@@ -14,6 +14,19 @@ ONLINE_COOP_TERMS = ("online co-op", "online coop", "在线合作")
 SPLIT_SCREEN_TERMS = ("split screen", "shared/split screen")
 REMOTE_PLAY_TERMS = ("remote play together", "远程同乐")
 CHINESE_TERMS = ("simplified chinese", "traditional chinese", "chinese", "中文", "简体中文")
+BROAD_REFERENCE_TERMS = {
+    "action",
+    "adventure",
+    "casual",
+    "co-op",
+    "coop",
+    "local co-op",
+    "multiplayer",
+    "online co-op",
+    "rpg",
+    "simulation",
+    "strategy",
+}
 
 
 def build_game_facts(
@@ -57,6 +70,11 @@ def build_game_facts(
             1 for term in preference.genres_like if term and term.lower() in combined_haystack
         )
         reference_similarity = min(like_hits / 5, 0.8)
+        reference_similarity = apply_reference_profile_specificity(
+            reference_similarity,
+            combined_haystack,
+            preference,
+        )
         if has_coop and any(term in combined_haystack for term in ("puzzle", "adventure", "platformer", "casual")):
             reference_similarity = max(reference_similarity, 0.55)
         elif has_coop:
@@ -110,45 +128,64 @@ def build_game_facts(
         singleplayer_only=singleplayer,
         horror=contains_any(combined_haystack, HORROR_TERMS),
         chinese=contains_any(combined_haystack, CHINESE_TERMS),
-        switch2_only=switch2_only(candidate),
+        switch2_only=is_switch2_only(candidate.platforms),
         reference_similarity=reference_similarity,
         confidence=confidence,
     )
 
 
-def platform_families_for(
-    candidate: GameCandidate,
-    steam_candidate: GameCandidate | None = None,
-) -> list[str]:
-    text = haystack(candidate, include_tags=False)
-    if steam_candidate:
-        text = f"{text} | {haystack(steam_candidate, include_tags=False)}"
-    families: list[str] = []
-    if contains_any(text, STEAM_ALIASES):
-        families.append("steam")
-    if contains_any(text, SWITCH_ALIASES) or contains_any(text, SWITCH2_ALIASES):
-        families.append("nintendo switch")
-    if contains_any(text, ("playstation", "ps4", "ps5")):
-        families.append("playstation")
-    if contains_any(text, ("xbox", "xbox one", "xbox series")):
-        families.append("xbox")
-    return dedupe(families)
+def apply_reference_profile_specificity(
+    similarity: float,
+    text: str,
+    preference: GamePreference,
+) -> float:
+    required_terms = reference_required_specific_terms(preference)
+    if required_terms and not any(term in text for term in required_terms):
+        return min(similarity, 0.55)
+
+    specific_terms = reference_specific_terms(preference)
+    if not specific_terms:
+        return similarity
+
+    hits = [term for term in specific_terms if term in text]
+    if not hits:
+        return min(similarity, 0.55)
+    return max(similarity, min(0.70 + len(hits) * 0.05, 0.85))
 
 
-def platform_matches(requested: str, families: list[str]) -> bool:
-    key = requested.lower()
-    if key in {"pc", "steam"}:
-        return "steam" in families
-    if key == "nintendo switch":
-        return "nintendo switch" in families
-    return key in families
+def reference_required_specific_terms(preference: GamePreference) -> list[str]:
+    terms: list[str] = []
+    for profile in active_reference_profiles(preference):
+        for term in profile.required_tags:
+            key = term.lower()
+            if key not in BROAD_REFERENCE_TERMS:
+                terms.append(key)
+    return dedupe(terms)
 
 
-def switch2_only(candidate: GameCandidate) -> bool:
-    text = " | ".join(candidate.platforms).lower()
-    return "switch 2" in text and "nintendo switch" not in {
-        platform.lower() for platform in candidate.platforms
-    }
+def reference_specific_terms(preference: GamePreference) -> list[str]:
+    terms: list[str] = []
+    for profile in active_reference_profiles(preference):
+        for term in (*profile.genres_like, *profile.required_tags):
+            key = term.lower()
+            if key not in BROAD_REFERENCE_TERMS:
+                terms.append(key)
+    return dedupe(terms)
+
+
+def active_reference_profiles(preference: GamePreference) -> list[ReferenceProfile]:
+    profiles: list[ReferenceProfile] = []
+    for entity in preference.resolved_reference_games:
+        profile = reference_profile_for(entity)
+        if profile:
+            profiles.append(profile)
+    for title in preference.reference_games_like:
+        alias = alias_for_title(title)
+        if alias:
+            profile = REFERENCE_PROFILES.get(alias.rawg_slug)
+            if profile:
+                profiles.append(profile)
+    return dedupe_profiles(profiles)
 
 
 def haystack(game: GameCandidate | None, include_tags: bool = True) -> str:
@@ -177,4 +214,14 @@ def dedupe(values: list[str]) -> list[str]:
         if value and key not in seen:
             result.append(value)
             seen.add(key)
+    return result
+
+
+def dedupe_profiles(values: list[ReferenceProfile]) -> list[ReferenceProfile]:
+    result: list[ReferenceProfile] = []
+    seen: set[str] = set()
+    for value in values:
+        if value.rawg_slug not in seen:
+            result.append(value)
+            seen.add(value.rawg_slug)
     return result

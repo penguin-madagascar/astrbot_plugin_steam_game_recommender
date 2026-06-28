@@ -60,6 +60,37 @@ class PreferenceRulesTest(unittest.TestCase):
         self.assertIn("horror", merged.genres_dislike)
         self.assertIn("it takes two", merged.reference_games_like)
 
+    def test_text_platforms_override_llm_platform_hallucinations(self) -> None:
+        llm_preference = GamePreference(
+            platforms=["steam", "playstation", "nintendo switch"],
+            result_count=5,
+        )
+
+        merged = merge_text_preference(
+            llm_preference,
+            "推荐几个适合 Switch 和 Steam 的双人游戏，类似双人成行。",
+        )
+
+        self.assertEqual(merged.platforms, ["steam", "nintendo switch"])
+
+    def test_pc_and_steam_are_distinct_platform_preferences(self) -> None:
+        pc_preference = infer_preference_from_text("我想找 PC 和 Xbox 都能玩的合作射击游戏")
+        steam_preference = infer_preference_from_text("Steam 上有没有双人合作游戏")
+
+        self.assertIn("pc", pc_preference.platforms)
+        self.assertNotIn("steam", pc_preference.platforms)
+        self.assertIn("steam", steam_preference.platforms)
+
+    def test_explicit_text_count_overrides_llm_default_count(self) -> None:
+        llm_preference = GamePreference(result_count=5)
+
+        merged = merge_text_preference(
+            llm_preference,
+            "想找 3 款 PC/Steam 上可以和朋友线上合作的轻松解谜游戏",
+        )
+
+        self.assertEqual(merged.result_count, 3)
+
 
 class ReferenceGameResolverTest(unittest.IsolatedAsyncioTestCase):
     async def test_chinese_alias_resolves_to_rawg_entity_without_sentence_special_case(self) -> None:
@@ -73,6 +104,20 @@ class ReferenceGameResolverTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(resolved), 1)
         self.assertEqual(resolved[0].canonical_title, "It Takes Two")
         self.assertEqual(resolved[0].rawg_slug, "it-takes-two")
+        self.assertGreaterEqual(resolved[0].confidence, 0.88)
+        self.assertEqual(resolved[0].source, "alias")
+
+    async def test_stardew_chinese_alias_resolves_to_reference_profile(self) -> None:
+        resolver = ReferenceGameResolver(FakeGameSource([]))
+
+        resolved = await resolver.resolve_reference_games(
+            "类似星露谷物语的多人种田经营游戏",
+            GamePreference(reference_games_like=["星露谷物语"]),
+        )
+
+        self.assertEqual(len(resolved), 1)
+        self.assertEqual(resolved[0].canonical_title, "Stardew Valley")
+        self.assertEqual(resolved[0].rawg_slug, "stardew-valley")
         self.assertGreaterEqual(resolved[0].confidence, 0.88)
         self.assertEqual(resolved[0].source, "alias")
 
