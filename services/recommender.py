@@ -137,7 +137,7 @@ class GameRecommender:
             ordering="-relevance",
         )
         for result in results:
-            if title_similarity(candidate.title, result.title) >= 0.72:
+            if title_similarity(candidate.title, result.title) >= 0.82:
                 return result
         return None
 

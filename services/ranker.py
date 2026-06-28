@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 from ..storage.models import GameCandidate, GamePreference
-
-PLATFORM_MATCHERS = {
-    "steam": ("steam", "pc", "windows"),
-    "pc": ("pc", "windows", "steam"),
-    "nintendo switch": ("nintendo switch", "switch", "nintendo"),
-    "playstation": ("playstation", "ps4", "ps5", "playstation store"),
-    "xbox": ("xbox", "xbox one", "xbox series"),
-}
+from .platforms import (
+    candidate_matches_any_platform as game_matches_any_platform,
+    candidate_matches_platform as game_matches_platform,
+    is_switch2_only,
+    matched_requested_platforms,
+)
 
 DISLIKE_ALIASES = {
     "horror": ("horror", "恐怖", "心理恐怖"),
@@ -139,31 +137,11 @@ def score_game(game: GameCandidate, preference: GamePreference) -> tuple[float, 
     return score, dedupe(reasons), dedupe(warnings)
 
 
-def matched_requested_platforms(game: GameCandidate, requested: list[str]) -> list[str]:
-    return [platform for platform in requested if game_matches_platform(game, platform)]
-
-
-def game_matches_any_platform(game: GameCandidate, requested: list[str]) -> bool:
-    return not requested or bool(matched_requested_platforms(game, requested))
-
-
-def game_matches_platform(game: GameCandidate, requested: str) -> bool:
-    aliases = PLATFORM_MATCHERS.get(requested.lower(), (requested.lower(),))
-    haystack = game_haystack(game, include_stores=True)
-    return match_any(haystack, aliases)
-
-
 def platform_family_warnings(game: GameCandidate, requested: list[str]) -> list[str]:
     warnings: list[str] = []
     if "nintendo switch" not in requested:
         return warnings
-    platforms = [platform.lower() for platform in game.platforms]
-    has_switch_2 = any("switch 2" in platform for platform in platforms)
-    has_switch_1 = any(
-        platform in {"nintendo switch", "switch"} or platform.endswith(" nintendo switch")
-        for platform in platforms
-    )
-    if has_switch_2 and not has_switch_1:
+    if is_switch2_only(game.platforms):
         warnings.append("Nintendo 侧为 Switch 2，不是原版 Switch；请按设备确认版本")
     return warnings
 
@@ -226,7 +204,7 @@ def cooperative_play_detail(game: GameCandidate) -> str:
 def game_haystack(game: GameCandidate, include_stores: bool = False) -> str:
     values = [game.title, *game.platforms, *game.genres, *game.tags]
     if include_stores:
-        values.extend(game.stores)
+        values.extend([*game.stores, game.raw_url or ""])
     return " | ".join(str(item).lower() for item in values if item)
 
 

@@ -61,12 +61,13 @@ class FilteringTest(unittest.TestCase):
         games = [
             GameCandidate(title="Switch Only", platforms=["Nintendo Switch"]),
             GameCandidate(title="Scary PC", platforms=["PC"], tags=["Horror"]),
-            GameCandidate(title="Safe PC", platforms=["PC"], tags=["Co-op"]),
+            GameCandidate(title="PC Only", platforms=["PC"], tags=["Co-op"]),
+            GameCandidate(title="Safe Steam", platforms=["PC"], tags=["Co-op"], stores=["Steam"]),
         ]
 
         filtered = recommender._filter_candidates(games, preference)
 
-        self.assertEqual([game.title for game in filtered], ["Safe PC"])
+        self.assertEqual([game.title for game in filtered], ["Safe Steam"])
 
 
 if __name__ == "__main__":

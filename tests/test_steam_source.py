@@ -66,7 +66,7 @@ class GameRecommenderSourceTest(unittest.IsolatedAsyncioTestCase):
             [
                 GameCandidate(title="Switch Only", platforms=["Nintendo Switch"]),
                 GameCandidate(title="Scary PC", platforms=["PC"], tags=["Horror"]),
-                GameCandidate(title="Safe PC", platforms=["PC"], tags=["Co-op"]),
+                GameCandidate(title="Safe Steam", platforms=["PC"], tags=["Co-op"], stores=["Steam"]),
             ]
         )
         recommender = GameRecommender(source, max_results=5)
@@ -75,13 +75,13 @@ class GameRecommenderSourceTest(unittest.IsolatedAsyncioTestCase):
             GamePreference(platforms=["steam"], genres_dislike=["horror"])
         )
 
-        self.assertEqual([game.title for game in ranked], ["Safe PC"])
+        self.assertEqual([game.title for game in ranked], ["Safe Steam"])
         self.assertGreaterEqual(len(source.calls), 1)
 
     async def test_steam_fallback_adapts_non_steam_platform_preferences(self) -> None:
         source = FakeGameSource(
             [
-                GameCandidate(title="Safe PC", platforms=["PC"], tags=["Co-op"]),
+                GameCandidate(title="Safe Steam", platforms=["PC"], tags=["Co-op"], stores=["Steam"]),
             ]
         )
         preference = GamePreference(platforms=["nintendo switch"], genres_like=["co-op"])
@@ -91,7 +91,7 @@ class GameRecommenderSourceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(preference.platforms, ["steam"])
         self.assertIn(STEAM_FALLBACK_WARNING, preference.parse_warnings)
-        self.assertEqual([game.title for game in ranked], ["Safe PC"])
+        self.assertEqual([game.title for game in ranked], ["Safe Steam"])
 
 
 def steam_detail_payload() -> dict[str, Any]:
