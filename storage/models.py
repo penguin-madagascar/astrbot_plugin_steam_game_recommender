@@ -189,6 +189,10 @@ class GameCandidate(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     source_reasons: list[str] = Field(default_factory=list)
     source_warnings: list[str] = Field(default_factory=list)
+    tier: str = ""
+    fit_points: list[str] = Field(default_factory=list)
+    risk_points: list[str] = Field(default_factory=list)
+    facts: "GameFacts" = Field(default_factory=lambda: GameFacts())
     rawg_id: int | None = None
     description: str | None = None
 
@@ -196,13 +200,57 @@ class GameCandidate(BaseModel):
     def _normalize_lists(cls, value: Any) -> list[str]:
         return split_text_list(value)
 
-    @validator("reasons", "warnings", "source_reasons", "source_warnings", pre=True)
+    @validator(
+        "reasons",
+        "warnings",
+        "source_reasons",
+        "source_warnings",
+        "fit_points",
+        "risk_points",
+        pre=True,
+    )
     def _normalize_display_lists(cls, value: Any) -> list[str]:
         return split_display_list(value)
 
     @validator("title", pre=True)
     def _normalize_title(cls, value: Any) -> str:
         return re.sub(r"\s+", " ", str(value or "")).strip()
+
+    class Config:
+        extra = "ignore"
+
+
+class GameFacts(BaseModel):
+    platform_families: list[str] = Field(default_factory=list)
+    matched_platforms: list[str] = Field(default_factory=list)
+    missing_platforms: list[str] = Field(default_factory=list)
+    coop_modes: list[str] = Field(default_factory=list)
+    data_sources: list[str] = Field(default_factory=list)
+    hard_blocks: list[str] = Field(default_factory=list)
+    has_coop: bool = False
+    has_local_coop: bool = False
+    has_online_coop: bool = False
+    has_split_screen: bool = False
+    has_remote_play: bool = False
+    ordinary_multiplayer: bool = False
+    singleplayer_only: bool = False
+    horror: bool = False
+    chinese: bool = False
+    switch2_only: bool = False
+    reference_similarity: float = 0.0
+    confidence: float = 0.0
+
+    @validator("platform_families", "matched_platforms", "missing_platforms", "coop_modes", "data_sources", "hard_blocks", pre=True)
+    def _normalize_lists(cls, value: Any) -> list[str]:
+        return split_display_list(value)
+
+    @validator("reference_similarity", "confidence", pre=True)
+    def _normalize_float(cls, value: Any) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = 0.0
+        return min(max(number, 0.0), 1.0)
 
     class Config:
         extra = "ignore"
@@ -249,5 +297,9 @@ class RankedGame(GameCandidate):
 
 try:
     GamePreference.model_rebuild()
+    GameCandidate.model_rebuild()
+    RankedGame.model_rebuild()
 except AttributeError:  # pydantic v1
     GamePreference.update_forward_refs(ResolvedReferenceGame=ResolvedReferenceGame)
+    GameCandidate.update_forward_refs(GameFacts=GameFacts)
+    RankedGame.update_forward_refs(GameFacts=GameFacts)

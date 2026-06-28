@@ -2,14 +2,13 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from ..clients.rawg import RAWG_GENRE_SLUGS, RAWG_TAG_SLUGS
 from ..storage.models import GameCandidate, GamePreference, RankedGame
+from .game_facts import build_game_facts
 from .ranker import (
     game_has_disliked_term,
     game_matches_any_platform,
     has_singleplayer_only_signal,
     has_multiplayer_signal,
-    score_game,
 )
 from .reference_data import ReferenceProfile
 from .reference_resolver import (
@@ -18,6 +17,8 @@ from .reference_resolver import (
     reference_profile_for,
     title_similarity,
 )
+from .search_plan import SearchQuery, build_search_plan
+from .tiered_ranker import build_ranked_game, sort_ranked_games
 
 STEAM_FALLBACK_WARNING = (
     "未配置 RAWG API Key，当前使用 Steam 公开数据源，主要覆盖 Steam/PC；"
@@ -40,8 +41,14 @@ class GameSource(Protocol):
 
 
 class GameRecommender:
-    def __init__(self, game_source: GameSource, max_results: int = 5) -> None:
+    def __init__(
+        self,
+        game_source: GameSource,
+        max_results: int = 5,
+        steam_source: GameSource | None = None,
+    ) -> None:
         self.game_source = game_source
+        self.steam_source = steam_source
         self.max_results = min(max(max_results, 1), 10)
 
     async def recommend(
@@ -54,9 +61,12 @@ class GameRecommender:
         filtered = self._filter_candidates(candidates, preference)
         ranked: list[RankedGame] = []
         for candidate in filtered:
-            score, reasons, warnings = score_game(candidate, preference)
-            ranked.append(RankedGame.from_candidate(candidate, score, reasons, warnings))
-        ranked.sort(key=lambda item: item.score, reverse=True)
+            steam_candidate = await self._find_steam_candidate(candidate)
+            facts = build_game_facts(candidate, preference, steam_candidate)
+            game = build_ranked_game(candidate, preference, facts)
+            if game is not None:
+                ranked.append(game)
+        ranked = sort_ranked_games(ranked)
         limit = candidate_pool_size or preference.result_count or self.max_results
         return ranked[: min(max(limit, 1), 30)]
 
@@ -83,58 +93,53 @@ class GameRecommender:
     async def _recall_candidates(self, preference: GamePreference) -> list[GameCandidate]:
         candidates: list[GameCandidate] = []
         page_size = max(self.max_results * 4, 20)
-
-        candidates.extend(await self._recall_reference_seed_candidates(preference))
-
-        genre_terms = [term for term in preference.genres_like if term in RAWG_GENRE_SLUGS]
-        tag_terms = [term for term in preference.genres_like if term in RAWG_TAG_SLUGS]
-        if preference.players and preference.players >= 2:
-            tag_terms.extend(["co-op", "multiplayer"])
-        if genre_terms or tag_terms:
-            candidates.extend(
-                await self.game_source.search_games(
-                    platforms=preference.platforms,
-                    genres=genre_terms[:3],
-                    tags=tag_terms[:4],
-                    page_size=page_size,
-                    ordering="-rating",
+        for query in build_search_plan(
+            preference,
+            preference.resolved_reference_games,
+            page_size=page_size,
+        ):
+            results = await self._execute_search_query(query)
+            if query.source == "seed":
+                results = annotate_seed_query_results(
+                    results,
+                    query.search or "",
+                    preference,
                 )
-            )
-
-        if not candidates:
-            query = fallback_search_query(preference)
-            candidates.extend(
-                await self.game_source.search_games(
-                    search=query,
-                    platforms=preference.platforms,
-                    page_size=page_size,
-                    ordering="-rating",
-                )
-            )
-
+            candidates.extend(results)
         return dedupe_candidates(candidates)
 
-    async def _recall_reference_seed_candidates(
+    async def _execute_search_query(self, query: SearchQuery) -> list[GameCandidate]:
+        source = (
+            self.steam_source
+            if query.source == "steam" and self.steam_source is not None
+            else self.game_source
+        )
+        return await source.search_games(
+            search=query.search,
+            platforms=query.platforms,
+            genres=query.genres,
+            tags=query.tags,
+            page_size=query.page_size,
+            ordering=query.ordering,
+        )
+
+    async def _find_steam_candidate(
         self,
-        preference: GamePreference,
-    ) -> list[GameCandidate]:
-        candidates: list[GameCandidate] = []
-        for entity in preference.resolved_reference_games:
-            if entity.confidence < 0.70:
-                continue
-            profile = reference_profile_for(entity)
-            if not profile:
-                continue
-            for seed in profile.seed_titles:
-                results = await self.game_source.search_games(
-                    search=seed,
-                    page_size=5,
-                    ordering="-relevance",
-                )
-                candidates.extend(
-                    annotate_seed_candidates(results, seed, profile, entity.canonical_title)
-                )
-        return candidates
+        candidate: GameCandidate,
+    ) -> GameCandidate | None:
+        if self.steam_source is None:
+            return None
+        if not has_steam_signal(candidate):
+            return None
+        results = await self.steam_source.search_games(
+            search=candidate.title,
+            page_size=3,
+            ordering="-relevance",
+        )
+        for result in results:
+            if title_similarity(candidate.title, result.title) >= 0.72:
+                return result
+        return None
 
     def _filter_candidates(
         self,
@@ -204,6 +209,14 @@ def fallback_search_query(preference: GamePreference) -> str:
         return "co-op multiplayer"
     if preference.genres_like:
         return " ".join(preference.genres_like[:2])
+    if preference.platforms:
+        return " ".join(preference.platforms)
+    if preference.budget is not None:
+        return "discounted games"
+    if preference.language:
+        return "chinese games"
+    if preference.difficulty:
+        return "casual games"
     if preference.mood:
         return preference.mood
     return "popular games"
@@ -284,8 +297,33 @@ def annotate_seed_candidates(
     return result
 
 
+def annotate_seed_query_results(
+    candidates: list[GameCandidate],
+    seed_title: str,
+    preference: GamePreference,
+) -> list[GameCandidate]:
+    for entity in preference.resolved_reference_games:
+        if entity.confidence < 0.70:
+            continue
+        profile = reference_profile_for(entity)
+        if not profile or seed_title not in profile.seed_titles:
+            continue
+        return annotate_seed_candidates(
+            candidates,
+            seed_title,
+            profile,
+            entity.canonical_title,
+        )
+    return candidates
+
+
 def has_reference_seed_signal(candidate: GameCandidate) -> bool:
     return any("参考画像种子" in reason for reason in candidate.source_reasons)
+
+
+def has_steam_signal(candidate: GameCandidate) -> bool:
+    haystack = " | ".join([*candidate.platforms, *candidate.stores]).lower()
+    return any(term in haystack for term in ("steam", "pc", "windows"))
 
 
 def append_unique(values: list[str], text: str) -> None:

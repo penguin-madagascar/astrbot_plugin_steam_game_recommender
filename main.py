@@ -71,7 +71,11 @@ class GameRecommenderPlugin(Star):
             self.rawg_client if self.rawg_client.is_configured() else self.steam_client
         )
         self.preference_parser = PreferenceParser(context, self.provider_id)
-        self.recommender = GameRecommender(self.game_source, max_results=self.max_results)
+        self.recommender = GameRecommender(
+            self.game_source,
+            max_results=self.max_results,
+            steam_source=self.steam_client,
+        )
         self.price_bridge = SteamPriceBridge(self.http_client, self.config)
         if self.price_bridge.is_available():
             logger.info(

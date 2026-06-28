@@ -14,6 +14,8 @@ if TYPE_CHECKING:
     from astrbot.api.star import Context
 
 from ..storage.models import GameCandidate, GamePreference, GamePriceSummary, RankedGame
+from .explanation_builder import validate_polished_points
+from .tiered_ranker import TIER_LABELS
 
 DISCLAIMER = (
     "以下推荐基于当前可查询到的数据，价格和平台信息可能因地区变化。"
@@ -46,6 +48,7 @@ def format_recommendation_messages(
             f"一句话结论：优先看前 {count} 款，"
             "它们和你的平台、类型、游玩人数与参考游戏偏好最接近。"
         ),
+        tier_summary(ranked_games[:count]),
         DISCLAIMER,
     ]
     if preference.parse_warnings:
@@ -98,22 +101,20 @@ async def format_recommendation_messages_with_llm(
     games = ranked_games[: limit or preference.result_count or 5]
     for index, game in enumerate(games, start=1):
         fallback_block = fallback[index]
+        fit_points = display_points(game.fit_points, game.reasons)
+        risk_points = display_points(game.risk_points, game.warnings)
         payload = {
-            "preference": dump_model(preference),
-            "game": dump_model(game),
-            "fallback_block": fallback_block,
+            "fit_points": fit_points,
+            "risk_points": risk_points,
             "rules": [
-                "只能润色这一款游戏的说明，不能新增或删除游戏。",
-                "第一行必须保持同一个序号和同一个游戏名。",
-                "只能基于 game 字段写事实，不要编造价格、平台、中文支持。",
-                "推荐理由和可能不适合的点都要具体。",
-                "字段为空时写待确认，不要写暂未发现明显不适合点。",
+                "只返回 JSON 对象，字段为 fit_points 和 risk_points。",
+                "只能改写给定点位，不得新增平台、价格、中文、玩法等事实。",
+                "不得删除任何 risk_points。",
             ],
         }
         prompt = (
-            "请用中文润色单款游戏推荐块，保持固定字段结构："
-            "名称、平台、推荐理由、可能不适合的点、购买/价格、数据来源/不确定项。"
-            "只返回这一款游戏的文本块。\n"
+            "请在不新增事实的前提下润色推荐点位。"
+            "只返回 JSON，不要返回 Markdown。\n"
             f"数据 JSON：{json.dumps(payload, ensure_ascii=False)}"
         )
         try:
@@ -121,42 +122,50 @@ async def format_recommendation_messages_with_llm(
                 chat_provider_id=resolved_provider,
                 prompt=prompt,
                 system_prompt=(
-                    "你只能改写给定 JSON 中的事实，不得补充外部知识或猜测。"
+                    "你只能改写给定 JSON 中的点位，不得补充外部知识或猜测。"
                 ),
             )
             text = str(getattr(response, "completion_text", "") or "").strip()
         except Exception as exc:
             logger.warning(f"游戏推荐条目 LLM 格式化失败，使用规则 formatter：{exc}")
             text = ""
-        messages.append(
-            text if valid_game_message(text, index, game.title) else fallback_block
-        )
+        polished = validate_polished_points(text, fit_points, risk_points)
+        if polished.fit_points == fit_points and polished.risk_points == risk_points:
+            messages.append(fallback_block)
+        else:
+            messages.append(
+                "\n".join(
+                    format_game_block(
+                        index,
+                        copy_game_with_points(game, polished.fit_points, polished.risk_points),
+                    )
+                )
+            )
     return messages
 
 
 def format_game_block(index: int, game: RankedGame) -> list[str]:
     platforms = "、".join(game.platforms) if game.platforms else "不确定"
-    reasons = (
-        "；".join(game.reasons[:4])
-        if game.reasons
-        else "RAWG 数据与偏好有一定匹配"
+    tier = TIER_LABELS.get(getattr(game, "tier", ""), "")
+    reasons = "；".join(display_points(game.fit_points, game.reasons)[:5]) or (
+        "当前数据与偏好有一定匹配，但具体玩法仍需以商店页面确认"
     )
-    warnings = (
-        "；".join(game.warnings[:4])
-        if game.warnings
-        else "仍需以商店页面确认平台版本、中文支持和实时价格"
+    warnings = "；".join(display_points(game.risk_points, game.warnings)[:5]) or (
+        "仍需以商店页面确认平台版本、中文支持和实时价格"
     )
     stores = "、".join(game.stores[:4]) if game.stores else "不确定"
     uncertain = uncertain_fields(game)
     lines = [
         f"{index}. 《{game.title}》",
+        *([f"   层级：{tier}"] if tier else []),
         f"   平台：{platforms}",
         f"   推荐理由：{reasons}",
         f"   可能不适合的点：{warnings}",
     ]
-    if game.price_summary:
-        lines.append(f"   价格：{format_price_summary(game.price_summary)}")
-        links = format_price_links(game.price_summary)
+    price_summary = getattr(game, "price_summary", None)
+    if price_summary:
+        lines.append(f"   价格：{format_price_summary(price_summary)}")
+        links = format_price_links(price_summary)
         if links:
             lines.append(f"   购买链接：{links}")
     else:
@@ -209,13 +218,14 @@ def format_game_detail(game: GameCandidate, price_summary: GamePriceSummary | No
     return "\n".join(lines)
 
 
-def uncertain_fields(game: RankedGame) -> str:
+def uncertain_fields(game: RankedGame | GameCandidate) -> str:
     fields = []
     if not game.stores:
         fields.append("购买渠道")
-    if not game.price_summary:
+    if not getattr(game, "price_summary", None):
         fields.append("实时价格")
-    if not any("中文" in reason or "chinese" in reason.lower() for reason in game.reasons):
+    points = display_points(getattr(game, "fit_points", []), game.reasons)
+    if not any("中文" in reason or "chinese" in reason.lower() for reason in points):
         fields.append("中文支持")
     return "、".join(fields)
 
@@ -253,6 +263,44 @@ def format_price_links(summary: GamePriceSummary) -> str:
 def dump_model(model: Any) -> dict[str, Any]:
     dumper = getattr(model, "model_dump", None)
     return dumper() if dumper else model.dict()
+
+
+def tier_summary(games: list[RankedGame]) -> str:
+    counts = {key: 0 for key in TIER_LABELS}
+    for game in games:
+        if game.tier in counts:
+            counts[game.tier] += 1
+    parts = [
+        f"{label} {counts[key]} 款"
+        for key, label in TIER_LABELS.items()
+        if counts[key]
+    ]
+    return "分层统计：" + ("；".join(parts) if parts else "未分层")
+
+
+def display_points(primary: list[str], secondary: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in [*primary, *secondary]:
+        key = value.lower()
+        if value and key not in seen:
+            result.append(value)
+            seen.add(key)
+    return result
+
+
+def copy_game_with_points(
+    game: RankedGame,
+    fit_points: list[str],
+    risk_points: list[str],
+) -> RankedGame:
+    data = dump_model(game)
+    data["fit_points"] = fit_points
+    data["risk_points"] = risk_points
+    data["reasons"] = fit_points
+    data["warnings"] = risk_points
+    validator = getattr(game.__class__, "model_validate", None)
+    return validator(data) if validator else game.__class__.parse_obj(data)
 
 
 async def resolve_provider_id(
