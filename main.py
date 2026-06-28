@@ -15,6 +15,7 @@ from .services.formatter import (
     format_game_detail,
     format_recommendation_messages_with_llm,
 )
+from .services.message_delivery import build_forward_message_chain
 from .services.preference_parser import PreferenceParser
 from .services.recommender import GameRecommender, adapt_preference_for_steam_source
 from .services.steam_price_bridge import SteamPriceBridge
@@ -138,8 +139,11 @@ class GameRecommenderPlugin(Star):
             yield event.plain_result(f"游戏推荐失败：{exc}")
             return
 
-        for message in messages:
-            yield event.plain_result(message)
+        forward_chain = build_forward_message_chain(messages)
+        if forward_chain and hasattr(event, "chain_result"):
+            yield event.chain_result(forward_chain)
+        else:
+            yield event.plain_result("\n\n".join(messages))
 
     @filter.command(
         "gamedesc",
