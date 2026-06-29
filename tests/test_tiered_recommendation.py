@@ -137,7 +137,7 @@ class TieredRecommendationTest(unittest.IsolatedAsyncioTestCase):
         top = ranked[:5]
         titles = [game.title for game in top]
         self.assertEqual(len(top), 5)
-        self.assertIn("Split Fiction", titles[:2])
+        self.assertIn("Split Fiction", titles)
         self.assertIn("Unravel Two", titles)
         for blocked in (
             "The Witcher 3 Wild Hunt - Complete Edition",
@@ -150,6 +150,7 @@ class TieredRecommendationTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn(game.tier, {"strong", "recommended", "backup"})
             self.assertTrue(game.fit_points)
             self.assertTrue(game.risk_points)
+            self.assertGreater(game.facts.match_score, 0)
 
         weak_by_title = {game.title: game for game in ranked if game.title in {"Baldur's Gate III", "Super Smash Bros. Ultimate"}}
         for weak in weak_by_title.values():

@@ -227,6 +227,10 @@ class GameFacts(BaseModel):
     coop_modes: list[str] = Field(default_factory=list)
     data_sources: list[str] = Field(default_factory=list)
     hard_blocks: list[str] = Field(default_factory=list)
+    matched_like_terms: list[str] = Field(default_factory=list)
+    missing_like_terms: list[str] = Field(default_factory=list)
+    required_hits: list[str] = Field(default_factory=list)
+    required_misses: list[str] = Field(default_factory=list)
     has_coop: bool = False
     has_local_coop: bool = False
     has_online_coop: bool = False
@@ -238,13 +242,27 @@ class GameFacts(BaseModel):
     chinese: bool = False
     switch2_only: bool = False
     reference_similarity: float = 0.0
+    match_coverage: float = 0.0
+    match_score: float = 0.0
     confidence: float = 0.0
 
-    @validator("platform_families", "matched_platforms", "missing_platforms", "coop_modes", "data_sources", "hard_blocks", pre=True)
+    @validator(
+        "platform_families",
+        "matched_platforms",
+        "missing_platforms",
+        "coop_modes",
+        "data_sources",
+        "hard_blocks",
+        "matched_like_terms",
+        "missing_like_terms",
+        "required_hits",
+        "required_misses",
+        pre=True,
+    )
     def _normalize_lists(cls, value: Any) -> list[str]:
         return split_display_list(value)
 
-    @validator("reference_similarity", "confidence", pre=True)
+    @validator("reference_similarity", "match_coverage", "match_score", "confidence", pre=True)
     def _normalize_float(cls, value: Any) -> float:
         try:
             number = float(value)

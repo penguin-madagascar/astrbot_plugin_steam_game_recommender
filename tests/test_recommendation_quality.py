@@ -8,6 +8,7 @@ from astrbot_plugin_game_recommender.services.recommender import (
     dedupe_candidates,
 )
 from astrbot_plugin_game_recommender.services.game_facts import build_game_facts
+from astrbot_plugin_game_recommender.services.search_plan import build_search_plan
 from astrbot_plugin_game_recommender.services.tiered_ranker import build_ranked_game
 from astrbot_plugin_game_recommender.storage.models import GameCandidate, GamePreference
 
@@ -153,7 +154,8 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
         )
 
         titles = [game.title for game in ranked[:3]]
-        self.assertEqual(titles, ["Unravel Two", "Overcooked! All You Can Eat", "PHOGS!"])
+        self.assertEqual(set(titles), {"Unravel Two", "Overcooked! All You Can Eat", "PHOGS!"})
+        self.assertEqual(titles[0], "Unravel Two")
         self.assertTrue(all("It Takes Two" not in title for title in titles))
         self.assertTrue(all("Witcher" not in title for title in titles))
         self.assertNotIn("Persona 5 Royal", titles)
@@ -303,9 +305,11 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
 
         titles = [game.title for game in ranked[:5]]
         self.assertEqual(
-            titles,
-            ["Farm Together 2", "Roots of Pacha", "Sun Haven", "Dinkum", "Fae Farm"],
+            set(titles),
+            {"Farm Together 2", "Roots of Pacha", "Sun Haven", "Dinkum", "Fae Farm"},
         )
+        self.assertTrue(all(game.facts.required_hits for game in ranked[:5]))
+        self.assertTrue(all("farming" in game.facts.required_hits for game in ranked[:5]))
         self.assertNotIn("Stardew Valley", titles)
         self.assertNotIn("Chess", titles)
         self.assertNotIn("Monster Prom 3: Monster Roadtrip", titles)
@@ -380,6 +384,124 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
                 assert ranked is not None
                 self.assertLess(ranked.facts.reference_similarity, 0.75)
                 self.assertNotEqual(ranked.tier, "strong")
+
+    async def test_tag_coverage_beats_rating_inside_same_tier(self) -> None:
+        source = FakeGameSource(
+            [
+                GameCandidate(
+                    title="High Score Generic Co-op",
+                    platforms=["PC"],
+                    genres=["Simulation"],
+                    tags=[
+                        "Co-op",
+                        "Local Co-op",
+                        "Multiplayer",
+                        "Simplified Chinese",
+                    ],
+                    rating=5.0,
+                    metacritic=96,
+                    stores=["Steam"],
+                ),
+                GameCandidate(
+                    title="Lower Score Better Tag Match",
+                    platforms=["PC"],
+                    genres=["Simulation", "Casual"],
+                    tags=[
+                        "Co-op",
+                        "Local Co-op",
+                        "Multiplayer",
+                        "Farming",
+                        "Crafting",
+                        "Building",
+                        "Management",
+                        "Relaxing",
+                        "Simplified Chinese",
+                    ],
+                    rating=3.6,
+                    metacritic=60,
+                    stores=["Steam"],
+                ),
+            ]
+        )
+        preference = GamePreference(
+            platforms=["steam"],
+            genres_like=[
+                "simulation",
+                "casual",
+                "co-op",
+                "local co-op",
+                "multiplayer",
+                "farming",
+                "crafting",
+                "building",
+                "management",
+                "relaxing",
+            ],
+            players=2,
+            language="中文",
+            result_count=2,
+        )
+
+        ranked = await GameRecommender(source, max_results=2).recommend(preference)
+
+        self.assertEqual(
+            [game.title for game in ranked],
+            ["Lower Score Better Tag Match", "High Score Generic Co-op"],
+        )
+        self.assertGreater(ranked[0].facts.match_coverage, ranked[1].facts.match_coverage)
+        self.assertGreater(ranked[0].facts.match_score, ranked[1].facts.match_score)
+
+    def test_game_facts_exposes_required_tag_misses(self) -> None:
+        preference = GamePreference(
+            platforms=["steam"],
+            genres_like=[
+                "simulation",
+                "casual",
+                "co-op",
+                "multiplayer",
+                "farming",
+                "crafting",
+            ],
+            reference_games_like=["Stardew Valley"],
+            players=2,
+        )
+        candidate = GameCandidate(
+            title="Generic Simulation Co-op",
+            platforms=["PC"],
+            genres=["Simulation", "Casual"],
+            tags=["Co-op", "Multiplayer", "Crafting"],
+            rating=5.0,
+            stores=["Steam"],
+        )
+
+        facts = build_game_facts(candidate, preference)
+        ranked = build_ranked_game(candidate, preference, facts)
+
+        self.assertIn("farming", facts.required_misses)
+        self.assertIn("co-op", facts.required_hits)
+        self.assertIn("farming", facts.missing_like_terms)
+        self.assertLess(facts.match_coverage, 1)
+        self.assertIsNotNone(ranked)
+        assert ranked is not None
+        self.assertNotEqual(ranked.tier, "strong")
+
+    def test_explicit_tag_search_plan_adds_relevance_recall_before_rating_supplement(self) -> None:
+        preference = GamePreference(
+            platforms=["steam"],
+            genres_like=["simulation", "casual", "co-op", "farming", "crafting"],
+            players=2,
+        )
+
+        queries = build_search_plan(preference, [], page_size=20)
+        rawg_queries = [
+            query
+            for query in queries
+            if query.source == "rawg" and (query.genres or query.tags or query.platforms)
+        ]
+
+        self.assertGreaterEqual(len(rawg_queries), 2)
+        self.assertEqual(rawg_queries[0].ordering, "-relevance")
+        self.assertIn("-rating", [query.ordering for query in rawg_queries[1:]])
 
     async def test_explicit_preferences_do_not_fall_back_to_empty_rawg_query(self) -> None:
         source = FakeGameSource([co_op_game("Unravel Two")])

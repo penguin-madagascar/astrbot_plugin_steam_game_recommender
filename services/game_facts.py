@@ -14,6 +14,27 @@ ONLINE_COOP_TERMS = ("online co-op", "online coop", "在线合作")
 SPLIT_SCREEN_TERMS = ("split screen", "shared/split screen")
 REMOTE_PLAY_TERMS = ("remote play together", "远程同乐")
 CHINESE_TERMS = ("simplified chinese", "traditional chinese", "chinese", "中文", "简体中文")
+TERM_ALIASES = {
+    "co-op": (
+        *COOP_TERMS,
+        *LOCAL_COOP_TERMS,
+        *ONLINE_COOP_TERMS,
+        *SPLIT_SCREEN_TERMS,
+        *REMOTE_PLAY_TERMS,
+    ),
+    "coop": (
+        *COOP_TERMS,
+        *LOCAL_COOP_TERMS,
+        *ONLINE_COOP_TERMS,
+        *SPLIT_SCREEN_TERMS,
+        *REMOTE_PLAY_TERMS,
+    ),
+    "local co-op": (*LOCAL_COOP_TERMS, *SPLIT_SCREEN_TERMS, "remote play together"),
+    "online co-op": (*ONLINE_COOP_TERMS, "co-op", "coop"),
+    "multiplayer": (*MULTIPLAYER_TERMS, *COOP_TERMS, *LOCAL_COOP_TERMS, *ONLINE_COOP_TERMS),
+    "relaxing": ("relaxing", "cozy", "chill", "轻松", "休闲"),
+    "casual": ("casual", "family friendly", "relaxing", "休闲", "轻松"),
+}
 BROAD_REFERENCE_TERMS = {
     "action",
     "adventure",
@@ -61,15 +82,37 @@ def build_game_facts(
     if ordinary_multiplayer:
         coop_modes.append("普通多人")
 
+    like_terms = dedupe(preference.genres_like)
+    matched_like_terms = [
+        term for term in like_terms if term_matches(combined_haystack, term)
+    ]
+    missing_like_terms = [
+        term for term in like_terms if term not in matched_like_terms
+    ]
+    required_terms = reference_required_terms(preference)
+    required_hits = [
+        term for term in required_terms if term_matches(combined_haystack, term)
+    ]
+    required_misses = [
+        term for term in required_terms if term not in required_hits
+    ]
+    match_coverage = len(matched_like_terms) / len(like_terms) if like_terms else 0.0
+    required_coverage = (
+        len(required_hits) / len(required_terms) if required_terms else 1.0
+    )
+
     source_reasons = " | ".join(candidate.source_reasons).lower()
+    match_score = (
+        match_coverage if not required_terms else match_coverage * 0.75 + required_coverage * 0.25
+    )
+    if "参考画像种子" in source_reasons:
+        match_score = max(match_score, 0.95)
+
     reference_similarity = 0.0
     if "参考画像种子" in source_reasons:
         reference_similarity = 1.0
     else:
-        like_hits = sum(
-            1 for term in preference.genres_like if term and term.lower() in combined_haystack
-        )
-        reference_similarity = min(like_hits / 5, 0.8)
+        reference_similarity = min(match_score, 0.85)
         reference_similarity = apply_reference_profile_specificity(
             reference_similarity,
             combined_haystack,
@@ -119,6 +162,10 @@ def build_game_facts(
         coop_modes=coop_modes,
         data_sources=data_sources,
         hard_blocks=hard_blocks,
+        matched_like_terms=matched_like_terms,
+        missing_like_terms=missing_like_terms,
+        required_hits=required_hits,
+        required_misses=required_misses,
         has_coop=has_coop,
         has_local_coop=has_local,
         has_online_coop=has_online,
@@ -130,6 +177,8 @@ def build_game_facts(
         chinese=contains_any(combined_haystack, CHINESE_TERMS),
         switch2_only=is_switch2_only(candidate.platforms),
         reference_similarity=reference_similarity,
+        match_coverage=match_coverage,
+        match_score=match_score,
         confidence=confidence,
     )
 
@@ -140,17 +189,24 @@ def apply_reference_profile_specificity(
     preference: GamePreference,
 ) -> float:
     required_terms = reference_required_specific_terms(preference)
-    if required_terms and not any(term in text for term in required_terms):
+    if required_terms and not any(term_matches(text, term) for term in required_terms):
         return min(similarity, 0.55)
 
     specific_terms = reference_specific_terms(preference)
     if not specific_terms:
         return similarity
 
-    hits = [term for term in specific_terms if term in text]
+    hits = [term for term in specific_terms if term_matches(text, term)]
     if not hits:
         return min(similarity, 0.55)
     return max(similarity, min(0.70 + len(hits) * 0.05, 0.85))
+
+
+def reference_required_terms(preference: GamePreference) -> list[str]:
+    terms: list[str] = []
+    for profile in active_reference_profiles(preference):
+        terms.extend(term.lower() for term in profile.required_tags)
+    return dedupe(terms)
 
 
 def reference_required_specific_terms(preference: GamePreference) -> list[str]:
@@ -199,6 +255,14 @@ def haystack(game: GameCandidate | None, include_tags: bool = True) -> str:
 
 def contains_any(text: str, terms: tuple[str, ...]) -> bool:
     return any(term in text for term in terms)
+
+
+def term_matches(text: str, term: str) -> bool:
+    key = term.lower().strip()
+    if not key:
+        return False
+    aliases = TERM_ALIASES.get(key, (key,))
+    return contains_any(text, aliases)
 
 
 def add_if(values: list[str], condition: bool, text: str) -> None:

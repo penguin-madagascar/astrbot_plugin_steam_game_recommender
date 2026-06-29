@@ -48,11 +48,23 @@ def build_search_plan(
     if preference.players and preference.players >= 2:
         tag_terms.extend(["co-op", "multiplayer"])
     if genre_terms or tag_terms or preference.platforms:
+        structured_genres = genre_terms[:3]
+        structured_tags = dedupe(tag_terms)[:4]
         queries.append(
             SearchQuery(
                 platforms=preference.platforms,
-                genres=genre_terms[:3],
-                tags=dedupe(tag_terms)[:4],
+                genres=structured_genres,
+                tags=structured_tags,
+                page_size=page_size,
+                ordering="-relevance",
+                source="rawg",
+            )
+        )
+        queries.append(
+            SearchQuery(
+                platforms=preference.platforms,
+                genres=structured_genres,
+                tags=structured_tags,
                 page_size=page_size,
                 ordering="-rating",
                 source="rawg",

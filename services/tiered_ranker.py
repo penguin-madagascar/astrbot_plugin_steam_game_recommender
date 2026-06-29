@@ -63,11 +63,21 @@ def is_hard_blocked(
 
 def classify_tier(facts: GameFacts, preference: GamePreference) -> str:
     all_platforms = not preference.platforms or not facts.missing_platforms
-    strong_similarity = facts.reference_similarity >= 0.75
-    medium_similarity = facts.reference_similarity >= 0.45
-    if facts.has_coop and strong_similarity and all_platforms:
+    needs_multiplayer = bool(preference.players and preference.players >= 2)
+    play_mode_ok = not needs_multiplayer or facts.has_coop
+    strong_match = (
+        facts.match_coverage >= 0.70
+        or facts.match_score >= 0.82
+        or facts.reference_similarity >= 0.85
+    )
+    medium_match = (
+        facts.match_coverage >= 0.40
+        or facts.match_score >= 0.45
+        or facts.reference_similarity >= 0.45
+    )
+    if play_mode_ok and not facts.required_misses and strong_match and all_platforms:
         return "strong"
-    if facts.has_coop and (strong_similarity or medium_similarity):
+    if play_mode_ok and not facts.required_misses and medium_match:
         return "recommended"
     return "backup"
 
@@ -79,7 +89,9 @@ def score_candidate(
     tier: str,
 ) -> float:
     score = {"strong": 300.0, "recommended": 200.0, "backup": 100.0}[tier]
-    score += facts.reference_similarity * 45
+    score += facts.match_score * 80
+    score += facts.match_coverage * 25
+    score += facts.reference_similarity * 20
     score += len(facts.matched_platforms) * 12
     if preference.platforms and not facts.missing_platforms:
         score += 18
@@ -95,9 +107,9 @@ def score_candidate(
         if any(mode in facts.coop_modes for mode in ("本地合作", "分屏/同屏")):
             score += 4
     if candidate.rating is not None:
-        score += min(max(candidate.rating, 0), 5) * 2
+        score += min(max(candidate.rating, 0), 5) * 0.75
     if candidate.metacritic is not None:
-        score += min(max(candidate.metacritic, 0), 100) / 25
+        score += min(max(candidate.metacritic, 0), 100) / 80
     score += facts.confidence * 10
     return score
 
@@ -109,6 +121,8 @@ def build_fit_points(
 ) -> list[str]:
     points: list[str] = []
     points.extend(candidate.source_reasons)
+    if facts.matched_like_terms:
+        points.append(f"需求命中：{'、'.join(facts.matched_like_terms[:6])}")
     if facts.has_coop:
         source = "Steam 分类" if "Steam" in facts.data_sources else "标签"
         modes = "、".join(facts.coop_modes) if facts.coop_modes else "合作"
@@ -122,7 +136,7 @@ def build_fit_points(
     if facts.chinese:
         points.append("Steam/标签信息确认支持中文")
     if candidate.rating is not None:
-        points.append(f"RAWG 评分 {candidate.rating:.1f}/5")
+        points.append(f"口碑参考：RAWG 评分 {candidate.rating:.1f}/5")
     return dedupe(points)
 
 
@@ -134,6 +148,10 @@ def build_risk_points(
     risks: list[str] = []
     if tier == "backup":
         risks.append("与参考游戏的相似度较弱，仅作为备选")
+    if facts.required_misses:
+        risks.append(f"核心标签未确认：{'、'.join(facts.required_misses[:4])}")
+    elif facts.missing_like_terms and tier != "strong":
+        risks.append(f"部分偏好标签未确认：{'、'.join(facts.missing_like_terms[:4])}")
     if facts.missing_platforms:
         risks.append(f"未确认支持平台：{'、'.join(facts.missing_platforms)}")
     if facts.switch2_only:
@@ -148,7 +166,16 @@ def build_risk_points(
 
 
 def sort_ranked_games(games: list[RankedGame]) -> list[RankedGame]:
-    return sorted(games, key=lambda game: (TIER_ORDER.get(game.tier, 9), -game.score, game.title))
+    return sorted(
+        games,
+        key=lambda game: (
+            TIER_ORDER.get(game.tier, 9),
+            -game.facts.match_score,
+            -game.facts.match_coverage,
+            -game.score,
+            game.title,
+        ),
+    )
 
 
 def copy_ranked_game(game: RankedGame, update: dict) -> RankedGame:
