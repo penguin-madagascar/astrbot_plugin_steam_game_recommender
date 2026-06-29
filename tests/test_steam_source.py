@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from typing import Any
 
-from astrbot_plugin_game_recommender.clients.steam import SteamClient
+from astrbot_plugin_game_recommender.clients.steam import SteamApiError, SteamClient
 
 
 class SteamClientTest(unittest.IsolatedAsyncioTestCase):
@@ -77,6 +77,48 @@ class SteamClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary.recent_positive_ratio, 0.78)
         self.assertTrue(any(key.startswith("steam:") for key in cache.keys))
 
+    async def test_owned_games_use_web_api_key_and_cache_playtime(self) -> None:
+        cache = MemoryCache()
+        http_client = FakeHttpClient(
+            {
+                "https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/": {
+                    "response": {
+                        "game_count": 2,
+                        "games": [
+                            {"appid": 123, "name": "Played Game", "playtime_forever": 90},
+                            {"appid": 456, "name": "Unplayed Game", "playtime_forever": 0},
+                        ],
+                    }
+                },
+            }
+        )
+        client = SteamClient(
+            http_client,
+            cache,
+            cache_ttl_hours=24,
+            steam_api_key="STEAM_KEY",
+        )
+
+        games = await client.get_owned_games("76561198000000000")
+
+        self.assertEqual([game.appid for game in games], [123, 456])
+        self.assertEqual(games[0].name, "Played Game")
+        self.assertEqual(games[0].playtime_forever, 90)
+        self.assertEqual(http_client.last_params["key"], "STEAM_KEY")
+        self.assertEqual(http_client.last_params["steamid"], "76561198000000000")
+        self.assertEqual(http_client.last_params["include_appinfo"], 1)
+        self.assertEqual(http_client.last_params["include_played_free_games"], 1)
+
+        await client.get_owned_games("76561198000000000")
+
+        self.assertEqual(http_client.call_count, 1)
+
+    async def test_owned_games_requires_steam_web_api_key(self) -> None:
+        client = SteamClient(FakeHttpClient({}), MemoryCache(), cache_ttl_hours=24)
+
+        with self.assertRaises(SteamApiError):
+            await client.get_owned_games("76561198000000000")
+
 
 def steam_detail_payload() -> dict[str, Any]:
     return {
@@ -107,9 +149,11 @@ class FakeHttpClient:
     def __init__(self, responses: dict[str, dict[str, Any]]) -> None:
         self.responses = responses
         self.call_count = 0
+        self.last_params: dict[str, Any] = {}
 
     async def get(self, url: str, params: dict[str, Any]) -> FakeResponse:
         self.call_count += 1
+        self.last_params = dict(params)
         return FakeResponse(self.responses[url])
 
 

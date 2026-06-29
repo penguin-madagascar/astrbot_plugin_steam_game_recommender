@@ -12,6 +12,12 @@
     "hint": "用于 Steam 公开数据源和 Steam 价格增强的默认地区，建议使用 CN、US、JP 等两字母代码。",
     "default": "CN"
   },
+  "steam_api_key": {
+    "type": "string",
+    "description": "Steam Web API Key",
+    "hint": "用于 /gamerec 显式排除已玩时调用 Steam GetOwnedGames；留空时账号绑定仍可用，但会跳过已玩排除。",
+    "default": ""
+  },
   "steam_price_heybox_notice": {
     "type": "text",
     "description": "Steam 价格增强说明",

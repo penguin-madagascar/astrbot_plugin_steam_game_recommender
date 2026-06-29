@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from pathlib import Path
 import sys
 import types
 import unittest
+from pathlib import Path
 
 api_module = types.ModuleType("astrbot.api")
 api_module.logger = types.SimpleNamespace(
@@ -34,14 +34,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class SteamPeekOnlyMetadataTest(unittest.TestCase):
-    def test_version_is_0_3_2_and_legacy_provider_config_is_removed(self) -> None:
+    def test_version_is_0_4_0_and_legacy_provider_config_is_removed(self) -> None:
         main_text = (ROOT / "main.py").read_text(encoding="utf-8")
         metadata_text = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
         schema_text = (ROOT / "_conf_schema.json").read_text(encoding="utf-8")
         legacy_key = "ra" + "wg_api_key"
 
-        self.assertIn('PLUGIN_VERSION = "0.3.2"', main_text)
-        self.assertIn("version: 0.3.2", metadata_text)
+        self.assertIn('PLUGIN_VERSION = "0.4.0"', main_text)
+        self.assertIn("version: 0.4.0", metadata_text)
         self.assertNotIn(legacy_key, schema_text)
 
     def test_legacy_provider_files_are_removed(self) -> None:

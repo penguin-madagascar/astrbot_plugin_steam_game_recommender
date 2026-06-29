@@ -3,7 +3,7 @@ display_name: 游戏推荐助手
 desc: 默认无需 API Key 即可基于 Steam/PC 公开数据、本地索引和标签相似度推荐游戏，并可通过 Steam 价格查询插件补充当前价和史低。
 short_desc: 无需 API Key 的自然语言游戏推荐。
 author: jiangxingda
-version: 0.3.2
+version: 0.4.0
 repo: https://github.com/penguin-madagascar/astrbot_plugin_game_recommender
 support_platforms:
   - aiocqhttp

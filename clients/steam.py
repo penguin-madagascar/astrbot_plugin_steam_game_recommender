@@ -9,12 +9,13 @@ from typing import Any
 
 import httpx
 
-from ..storage.models import GameCandidate
+from ..storage.models import GameCandidate, SteamOwnedGame
 from ..storage.repository import SQLiteCacheRepository
 
 STEAM_STORE_SEARCH_URL = "https://store.steampowered.com/api/storesearch/"
 STEAM_APP_DETAILS_URL = "https://store.steampowered.com/api/appdetails"
 STEAM_APP_REVIEWS_URL = "https://store.steampowered.com/appreviews/{appid}"
+STEAM_OWNED_GAMES_URL = "https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/"
 STEAM_STORE_BASE_URL = "https://store.steampowered.com/app"
 
 STEAM_GENRE_TERMS = {
@@ -83,12 +84,14 @@ class SteamClient:
         cache_ttl_hours: int = 24,
         default_country: str = "CN",
         language: str = "schinese",
+        steam_api_key: str = "",
     ) -> None:
         self.client = client
         self.cache = cache
         self.cache_ttl_hours = cache_ttl_hours
         self.default_country = default_country.strip().upper() or "CN"
         self.language = language.strip() or "schinese"
+        self.steam_api_key = steam_api_key.strip()
 
     async def search_games(
         self,
@@ -162,6 +165,44 @@ class SteamClient:
             positive_ratio=positive_ratio,
             recent_positive_ratio=positive_ratio,
         )
+
+    def has_web_api_key(self) -> bool:
+        return bool(self.steam_api_key)
+
+    async def get_owned_games(self, steam_id64: str) -> list[SteamOwnedGame]:
+        if not self.steam_api_key:
+            raise SteamApiError("未配置 steam_api_key，无法查询 Steam 游戏库。")
+
+        data = await self._get_json(
+            STEAM_OWNED_GAMES_URL,
+            {
+                "key": self.steam_api_key,
+                "steamid": steam_id64,
+                "include_appinfo": 1,
+                "include_played_free_games": 1,
+                "format": "json",
+            },
+        )
+        response = data.get("response") if isinstance(data, dict) else None
+        games = response.get("games") if isinstance(response, dict) else None
+        if not isinstance(games, list):
+            return []
+
+        owned_games: list[SteamOwnedGame] = []
+        for item in games:
+            if not isinstance(item, dict):
+                continue
+            appid = optional_int(item.get("appid"))
+            if not appid:
+                continue
+            owned_games.append(
+                SteamOwnedGame(
+                    appid=appid,
+                    name=optional_text(item.get("name")),
+                    playtime_forever=optional_int(item.get("playtime_forever")) or 0,
+                )
+            )
+        return owned_games
 
     async def _get_json(self, url: str, params: dict[str, Any]) -> Any:
         cache_key = self._cache_key(url, params)

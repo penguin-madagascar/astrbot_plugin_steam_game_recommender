@@ -147,6 +147,37 @@ class GamePreference(BaseModel):
         extra = "ignore"
 
 
+class AccountBinding(BaseModel):
+    chat_platform: str = "default"
+    chat_user_id: str
+    provider: str
+    account_id: str
+    account_kind: str
+    display_value: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: float | None = None
+    updated_at: float | None = None
+
+    @validator(
+        "chat_platform",
+        "chat_user_id",
+        "provider",
+        "account_id",
+        "account_kind",
+        "display_value",
+        pre=True,
+    )
+    def _normalize_required_text(cls, value: Any) -> str:
+        return re.sub(r"\s+", " ", str(value or "")).strip()
+
+    @validator("chat_platform")
+    def _default_platform(cls, value: str) -> str:
+        return value or "default"
+
+    class Config:
+        extra = "ignore"
+
+
 class ResolvedReferenceGame(BaseModel):
     raw_text: str
     normalized_title: str
@@ -226,6 +257,27 @@ class GameCandidate(BaseModel):
     @validator("title", pre=True)
     def _normalize_title(cls, value: Any) -> str:
         return re.sub(r"\s+", " ", str(value or "")).strip()
+
+    class Config:
+        extra = "ignore"
+
+
+class SteamOwnedGame(BaseModel):
+    appid: int
+    name: str | None = None
+    playtime_forever: int = 0
+
+    @validator("appid", "playtime_forever", pre=True)
+    def _normalize_int(cls, value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    @validator("name", pre=True)
+    def _normalize_name(cls, value: Any) -> str | None:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        return text or None
 
     class Config:
         extra = "ignore"
