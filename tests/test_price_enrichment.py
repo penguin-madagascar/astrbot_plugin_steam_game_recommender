@@ -204,10 +204,17 @@ class PriceFormattingTest(unittest.TestCase):
         )
 
         self.assertEqual(len(messages), 3)
-        self.assertIn("一句话结论", messages[0])
+        self.assertNotIn("一句话结论：", messages[0])
         self.assertNotIn("1. 《Split Fiction》", messages[0])
         self.assertTrue(messages[1].startswith("1. 《Split Fiction》"))
         self.assertTrue(messages[2].startswith("2. 《Unravel Two》"))
+
+    def test_empty_recommendations_do_not_start_with_intro_prefix(self) -> None:
+        messages = format_recommendation_messages(GamePreference(result_count=2), [], limit=2)
+
+        self.assertEqual(len(messages), 1)
+        self.assertFalse(messages[0].startswith("一句话结论："))
+        self.assertIn("当前条件", messages[0])
 
     def test_empty_warnings_do_not_emit_vague_no_issue_placeholder(self) -> None:
         game = RankedGame(

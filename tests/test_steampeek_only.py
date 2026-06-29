@@ -62,6 +62,7 @@ class SteamPeekOnlyPreferenceTest(unittest.TestCase):
               "extra_tags": ["轻松", "解谜", "本地合作"],
               "genres_dislike": ["恐怖"],
               "reference_games_like": ["双人成行"],
+              "reference_search_terms": ["It Takes Two"],
               "players": 2,
               "result_count": 5
             }
@@ -70,6 +71,7 @@ class SteamPeekOnlyPreferenceTest(unittest.TestCase):
 
         self.assertEqual(preference.extra_tags, ["轻松", "解谜", "本地合作"])
         self.assertEqual(preference.reference_games_like, ["双人成行"])
+        self.assertEqual(preference.reference_search_terms, ["It Takes Two"])
 
         profile = build_profile_from_preference(preference)
 

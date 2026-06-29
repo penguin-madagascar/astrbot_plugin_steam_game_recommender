@@ -54,6 +54,41 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("puzzle", ranked[0].facts.matched_like_terms)
         self.assertTrue(any(call["search"] == "双人成行" for call in steam.calls))
 
+    async def test_reference_search_terms_and_tags_find_dark_souls_like_games(self) -> None:
+        cache = MemoryCache()
+        steam = SearchAwareSteamClient(
+            {
+                "黑暗之魂": [],
+                "Dark Souls": [
+                    steam_game("Dark Souls: Remastered", ["Soulslike", "Action", "RPG"])
+                ],
+                "soulslike action rpg": [
+                    steam_game("Mortal Shell", ["Soulslike", "Action", "RPG"]),
+                    steam_game("Generic Action", ["Action"]),
+                ],
+                "soulslike": [steam_game("Salt and Sanctuary", ["Soulslike", "Action", "RPG"])],
+                "action": [steam_game("Action Only", ["Action"])],
+                "rpg": [steam_game("RPG Only", ["RPG"])],
+            }
+        )
+        service = SteamGameIndexService(steam, cache, min_review_count=50)
+
+        ranked = await service.recommend(
+            GamePreference(
+                reference_games_like=["黑暗之魂"],
+                reference_search_terms=["Dark Souls"],
+                extra_tags=["soulslike", "action", "rpg"],
+                result_count=3,
+            ),
+            limit=3,
+        )
+
+        titles = [game.title for game in ranked]
+        self.assertEqual(titles[0], "Mortal Shell")
+        self.assertNotIn("Dark Souls: Remastered", titles)
+        self.assertTrue(any(call["search"] == "Dark Souls" for call in steam.calls))
+        self.assertTrue(any(call["search"] == "soulslike action rpg" for call in steam.calls))
+
     async def test_cached_index_orders_tag_coverage_before_reviews(self) -> None:
         cache = MemoryCache(
             {

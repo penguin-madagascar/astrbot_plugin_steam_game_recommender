@@ -43,14 +43,14 @@ def format_recommendation_messages(
     count = min(limit or preference.result_count or 5, len(ranked_games))
     if not ranked_games:
         return [(
-            "一句话结论：暂时没有找到满足这些硬条件的游戏。\n"
+            "暂时没有找到满足当前条件的游戏。\n"
             f"{DISCLAIMER}\n"
             "可以尝试改用 Steam/PC 请求，或放宽排除标签、人数和类型条件后再查一次。"
         )]
 
     lines = [
         (
-            f"一句话结论：优先看前 {count} 款，"
+            f"优先看前 {count} 款，"
             "它们和你的 Steam 标签、游玩人数与参考游戏偏好最接近。"
         ),
         tier_summary(ranked_games[:count]),

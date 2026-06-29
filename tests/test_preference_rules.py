@@ -100,6 +100,14 @@ class PreferenceRulesTest(unittest.TestCase):
             ["Slay the Spire"],
         )
 
+    def test_dark_souls_like_request_extracts_searchable_soulslike_profile(self) -> None:
+        preference = infer_preference_from_text("类似黑暗之魂的游戏")
+
+        self.assertEqual(preference.reference_games_like, ["黑暗之魂"])
+        self.assertIn("soulslike", preference.extra_tags)
+        self.assertIn("action", preference.extra_tags)
+        self.assertIn("rpg", preference.extra_tags)
+
 
 if __name__ == "__main__":
     unittest.main()

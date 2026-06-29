@@ -4,6 +4,16 @@ import re
 
 from ..storage.models import GamePreference
 
+SOULSLIKE_TERMS = (
+    "魂like",
+    "魂系",
+    "魂类",
+    "类魂",
+    "soulslike",
+    "souls-like",
+    "dark souls",
+)
+
 
 def infer_preference_from_text(text: str) -> GamePreference:
     lower = text.lower()
@@ -37,6 +47,7 @@ def infer_preference_from_text(text: str) -> GamePreference:
             "crafting": ("制作", "crafting"),
             "building": ("建造", "building"),
             "racing": ("赛车", "竞速", "racing"),
+            "soulslike": SOULSLIKE_TERMS,
         },
     )
     genres_dislike = keyword_hits(
@@ -82,6 +93,8 @@ def infer_preference_from_text(text: str) -> GamePreference:
         difficulty = "hard"
 
     reference_like = extract_reference_games(text)
+    if references_imply_soulslike(reference_like):
+        genres_like = merge_lists(genres_like, ["soulslike"])
     extra_tags = keyword_hits(
         lower,
         {
@@ -90,8 +103,12 @@ def infer_preference_from_text(text: str) -> GamePreference:
             "online co-op": ("线上合作", "在线合作", "联机合作", "online co-op"),
             "family": ("亲子", "家庭", "family"),
             "party": ("聚会", "派对", "party"),
+            "soulslike": SOULSLIKE_TERMS,
         },
     )
+    if references_imply_soulslike(reference_like):
+        extra_tags = merge_lists(extra_tags, ["soulslike"])
+    extra_tags = expand_related_extra_tags(extra_tags)
 
     return GamePreference(
         platforms=platforms,
@@ -99,6 +116,7 @@ def infer_preference_from_text(text: str) -> GamePreference:
         extra_tags=extra_tags,
         genres_dislike=genres_dislike,
         reference_games_like=reference_like,
+        reference_search_terms=search_terms_from_reference_titles(reference_like),
         players=players,
         budget=budget,
         language="中文" if "中文" in text or "汉化" in text else None,
@@ -116,6 +134,7 @@ def merge_text_preference(preference: GamePreference, text: str) -> GamePreferen
         "extra_tags",
         "genres_dislike",
         "reference_games_like",
+        "reference_search_terms",
         "reference_games_dislike",
         "parse_warnings",
     ):
@@ -158,6 +177,26 @@ def clean_reference_title(value: str | None) -> str:
         maxsplit=1,
     )[0].strip()
     return text[:80]
+
+
+def search_terms_from_reference_titles(titles: list[str]) -> list[str]:
+    terms = [
+        title
+        for title in titles
+        if re.search(r"[A-Za-z]", title)
+    ]
+    return merge_lists([], terms)
+
+
+def references_imply_soulslike(titles: list[str]) -> bool:
+    return any("魂" in title or "souls" in title.lower() for title in titles)
+
+
+def expand_related_extra_tags(tags: list[str]) -> list[str]:
+    expanded = list(tags)
+    if "soulslike" in expanded:
+        expanded = merge_lists(expanded, ["action", "rpg"])
+    return expanded
 
 
 def extract_result_count(text: str) -> int | None:

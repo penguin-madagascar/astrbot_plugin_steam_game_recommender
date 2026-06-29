@@ -81,7 +81,7 @@ class SteamGameIndexService:
             entries,
             search_terms_for(preference, profile),
             searched,
-            reference_titles=preference.reference_games_like,
+            reference_terms=reference_terms_for(preference),
         )
 
         expanded_profile = build_profile_from_preference(
@@ -92,7 +92,7 @@ class SteamGameIndexService:
             entries,
             search_terms_for(preference, expanded_profile),
             searched,
-            reference_titles=preference.reference_games_like,
+            reference_terms=reference_terms_for(preference),
         )
         entries = dedupe_entries(entries)
         if entries:
@@ -107,9 +107,9 @@ class SteamGameIndexService:
         entries: list[GameCandidate],
         queries: list[str],
         searched: set[str],
-        reference_titles: list[str],
+        reference_terms: list[str],
     ) -> list[GameCandidate]:
-        reference_keys = {normalize_text(title) for title in reference_titles}
+        reference_keys = {normalize_text(title) for title in reference_terms}
         for query in queries:
             key = query.lower()
             if key in searched:
@@ -198,6 +198,7 @@ def reference_candidates(
 def search_terms_for(preference: GamePreference, profile: SteamTagProfile) -> list[str]:
     terms: list[str] = []
     terms.extend(preference.reference_games_like[:3])
+    terms.extend(preference.reference_search_terms[:3])
     include = [tag.replace("_", " ") for tag in profile.include_tags[:6]]
     if include:
         terms.append(" ".join(include[:3]))
@@ -207,6 +208,13 @@ def search_terms_for(preference: GamePreference, profile: SteamTagProfile) -> li
     if not terms:
         terms.append("popular co-op")
     return dedupe_texts(terms)
+
+
+def reference_terms_for(preference: GamePreference) -> list[str]:
+    return dedupe_texts([
+        *preference.reference_games_like,
+        *preference.reference_search_terms,
+    ])
 
 
 def parse_entries(payload: Any) -> list[GameCandidate]:

@@ -80,6 +80,7 @@ class GamePreference(BaseModel):
     extra_tags: list[str] = Field(default_factory=list)
     genres_dislike: list[str] = Field(default_factory=list)
     reference_games_like: list[str] = Field(default_factory=list)
+    reference_search_terms: list[str] = Field(default_factory=list)
     reference_games_dislike: list[str] = Field(default_factory=list)
     resolved_reference_games: list["ResolvedReferenceGame"] = Field(default_factory=list)
     players: int | None = None
@@ -106,6 +107,10 @@ class GamePreference(BaseModel):
     )
     def _normalize_text_lists(cls, value: Any) -> list[str]:
         return split_text_list(value)
+
+    @validator("reference_search_terms", pre=True)
+    def _normalize_reference_search_terms(cls, value: Any) -> list[str]:
+        return split_display_list(value)
 
     @validator("budget", pre=True)
     def _normalize_budget(cls, value: Any) -> float | None:
