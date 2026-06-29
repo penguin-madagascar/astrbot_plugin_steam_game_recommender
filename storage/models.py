@@ -175,15 +175,21 @@ class ResolvedReferenceGame(BaseModel):
 
 class GameCandidate(BaseModel):
     title: str
+    appid: int | None = None
     platforms: list[str] = Field(default_factory=list)
     genres: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     rating: float | None = None
     metacritic: int | None = None
     released: str | None = None
+    release_date: str | None = None
     playtime: int | None = None
     stores: list[str] = Field(default_factory=list)
     raw_url: str | None = None
+    review_total: int | None = None
+    review_positive_ratio: float | None = None
+    review_recent_ratio: float | None = None
+    index_source: str | None = None
     score: float = 0.0
     reasons: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)

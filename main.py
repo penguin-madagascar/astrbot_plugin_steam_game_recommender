@@ -19,6 +19,12 @@ from .services.message_delivery import build_forward_message_chain
 from .services.preference_parser import PreferenceParser
 from .services.recommender import GameRecommender, adapt_preference_for_steam_source
 from .services.recommendation_limits import effective_result_limit
+from .services.steam_index import (
+    STEAM_INDEX_FALLBACK_WARNING,
+    STEAM_INDEX_SCOPE_WARNING,
+    SteamGameIndexService,
+    should_use_steam_index,
+)
 from .services.steam_price_bridge import SteamPriceBridge
 from .storage.repository import SQLiteCacheRepository
 
@@ -77,6 +83,13 @@ class GameRecommenderPlugin(Star):
             max_results=self.max_results,
             steam_source=self.steam_client,
         )
+        self.steam_index = SteamGameIndexService(
+            steam_client=self.steam_client,
+            cache=self.cache,
+            ttl_hours=safe_int(self.config.get("steam_index_ttl_hours"), 168),
+            min_review_count=safe_int(self.config.get("steam_min_review_count"), 50),
+            min_positive_ratio=safe_float(self.config.get("steam_min_positive_ratio"), 0.65),
+        )
         self.price_bridge = SteamPriceBridge(self.http_client, self.config)
         if self.price_bridge.is_available():
             logger.info(
@@ -116,8 +129,9 @@ class GameRecommenderPlugin(Star):
                 if preference.budget is not None or self.price_bridge.is_available()
                 else None
             )
-            ranked_games = await self.recommender.recommend(
+            ranked_games = await self._recommend_with_preferred_source(
                 preference,
+                limit=candidate_pool_size or result_limit,
                 candidate_pool_size=candidate_pool_size,
             )
             ranked_games = await self.price_bridge.enrich_ranked_games(ranked_games, preference)
@@ -192,9 +206,36 @@ class GameRecommenderPlugin(Star):
 
         yield event.plain_result(format_game_detail(game, price_summary))
 
+    async def _recommend_with_preferred_source(
+        self,
+        preference,
+        limit: int,
+        candidate_pool_size: int | None,
+    ):
+        if should_use_steam_index(preference):
+            ranked_games = await self.steam_index.recommend(preference, limit=limit)
+            if ranked_games:
+                return ranked_games
+            if STEAM_INDEX_FALLBACK_WARNING not in preference.parse_warnings:
+                preference.parse_warnings.append(STEAM_INDEX_FALLBACK_WARNING)
+        elif STEAM_INDEX_SCOPE_WARNING not in preference.parse_warnings:
+            preference.parse_warnings.append(STEAM_INDEX_SCOPE_WARNING)
+
+        return await self.recommender.recommend(
+            preference,
+            candidate_pool_size=candidate_pool_size,
+        )
+
 
 def safe_int(value: Any, default: int) -> int:
     try:
         return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def safe_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
     except (TypeError, ValueError):
         return default

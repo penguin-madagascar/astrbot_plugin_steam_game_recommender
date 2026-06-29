@@ -4,6 +4,7 @@ import hashlib
 import html
 import json
 import re
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -13,6 +14,7 @@ from ..storage.repository import SQLiteCacheRepository
 
 STEAM_STORE_SEARCH_URL = "https://store.steampowered.com/api/storesearch/"
 STEAM_APP_DETAILS_URL = "https://store.steampowered.com/api/appdetails"
+STEAM_APP_REVIEWS_URL = "https://store.steampowered.com/appreviews/{appid}"
 STEAM_STORE_BASE_URL = "https://store.steampowered.com/app"
 
 STEAM_GENRE_TERMS = {
@@ -62,6 +64,13 @@ STEAM_TAG_TERMS = {
 
 class SteamApiError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class SteamReviewSummary:
+    total_reviews: int
+    positive_ratio: float | None = None
+    recent_positive_ratio: float | None = None
 
 
 class SteamClient:
@@ -132,6 +141,28 @@ class SteamClient:
             raise SteamApiError(f"Steam 商店返回了无效的游戏资料：appid={appid}")
         return parse_steam_game(appid, data)
 
+    async def get_review_summary(self, appid: int) -> SteamReviewSummary:
+        data = await self._get_json(
+            STEAM_APP_REVIEWS_URL.format(appid=appid),
+            {
+                "json": 1,
+                "language": "all",
+                "purchase_type": "all",
+                "num_per_page": 0,
+            },
+        )
+        summary = data.get("query_summary") if isinstance(data, dict) else None
+        if not isinstance(summary, dict):
+            raise SteamApiError(f"Steam 评测摘要返回了无效数据：appid={appid}")
+        total = optional_int(summary.get("total_reviews")) or 0
+        positive = optional_int(summary.get("total_positive"))
+        positive_ratio = positive / total if total > 0 and positive is not None else None
+        return SteamReviewSummary(
+            total_reviews=total,
+            positive_ratio=positive_ratio,
+            recent_positive_ratio=positive_ratio,
+        )
+
     async def _get_json(self, url: str, params: dict[str, Any]) -> Any:
         cache_key = self._cache_key(url, params)
         cached = await self.cache.get_json(cache_key, self.cache_ttl_hours)
@@ -176,13 +207,16 @@ def parse_steam_game(appid: int, data: dict[str, Any]) -> GameCandidate:
     tags = unique_texts([*categories, *languages])
     metacritic = data.get("metacritic") if isinstance(data.get("metacritic"), dict) else {}
     release = data.get("release_date") if isinstance(data.get("release_date"), dict) else {}
+    release_date = optional_text(release.get("date"))
     return GameCandidate(
+        appid=appid,
         title=str(data.get("name") or f"appid={appid}").strip(),
         platforms=parse_platforms(data.get("platforms")),
         genres=genres,
         tags=tags,
         metacritic=optional_int(metacritic.get("score")),
-        released=optional_text(release.get("date")),
+        released=release_date,
+        release_date=release_date,
         stores=["Steam"],
         raw_url=f"{STEAM_STORE_BASE_URL}/{appid}/",
         description=clean_html_text(
@@ -193,6 +227,7 @@ def parse_steam_game(appid: int, data: dict[str, Any]) -> GameCandidate:
 
 def steam_search_item_to_candidate(appid: int, title: str) -> GameCandidate:
     return GameCandidate(
+        appid=appid,
         title=title,
         platforms=["PC"],
         stores=["Steam"],

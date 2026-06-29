@@ -44,12 +44,14 @@ class SteamClientTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([game.title for game in games], ["Co-op Test Game", "Other Game"])
         first = games[0]
+        self.assertEqual(first.appid, 123)
         self.assertEqual(first.platforms, ["pc", "macos", "linux"])
         self.assertIn("action", first.genres)
         self.assertIn("co-op", first.tags)
         self.assertIn("simplified chinese", first.tags)
         self.assertEqual(first.metacritic, 88)
         self.assertEqual(first.released, "2026 年 1 月 1 日")
+        self.assertEqual(first.release_date, "2026 年 1 月 1 日")
         self.assertEqual(first.raw_url, "https://store.steampowered.com/app/123/")
         self.assertIn("Steam description", first.description or "")
         self.assertTrue(cache.keys)
@@ -58,6 +60,28 @@ class SteamClientTest(unittest.IsolatedAsyncioTestCase):
         await client.search_games(search="co-op", page_size=2)
 
         self.assertEqual(http_client.call_count, 3)
+
+    async def test_review_summary_parses_total_and_recent_positive_ratio(self) -> None:
+        cache = MemoryCache()
+        http_client = FakeHttpClient(
+            {
+                "https://store.steampowered.com/appreviews/123": {
+                    "success": 1,
+                    "query_summary": {
+                        "total_reviews": 100,
+                        "total_positive": 78,
+                    },
+                },
+            }
+        )
+        client = SteamClient(http_client, cache, cache_ttl_hours=24)
+
+        summary = await client.get_review_summary(123)
+
+        self.assertEqual(summary.total_reviews, 100)
+        self.assertEqual(summary.positive_ratio, 0.78)
+        self.assertEqual(summary.recent_positive_ratio, 0.78)
+        self.assertTrue(any(key.startswith("steam:") for key in cache.keys))
 
 
 class GameRecommenderSourceTest(unittest.IsolatedAsyncioTestCase):

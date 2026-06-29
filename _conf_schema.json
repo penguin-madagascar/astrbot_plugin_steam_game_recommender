@@ -32,6 +32,24 @@
     "hint": "每次默认返回的推荐条数，范围 1-10；用户明确要求数量时会优先采用用户数量但不超过该上限。",
     "default": 5
   },
+  "steam_index_ttl_hours": {
+    "type": "int",
+    "description": "Steam 推荐索引缓存有效期（小时）",
+    "hint": "Steam/PC 推荐会优先使用本地索引；超过该时间后会尝试用 Steam 公开数据刷新索引。",
+    "default": 168
+  },
+  "steam_min_review_count": {
+    "type": "int",
+    "description": "Steam 推荐最低评测数量",
+    "hint": "索引推荐中，已知评测数低于该值的候选会被过滤；设置为 0 可关闭该过滤。",
+    "default": 50
+  },
+  "steam_min_positive_ratio": {
+    "type": "float",
+    "description": "Steam 推荐最低好评率",
+    "hint": "索引推荐中，已知好评率低于该值的候选会被过滤；默认 0.65 表示 65%。",
+    "default": 0.65
+  },
   "cache_ttl_hours": {
     "type": "int",
     "description": "游戏数据查询缓存有效期（小时）",
