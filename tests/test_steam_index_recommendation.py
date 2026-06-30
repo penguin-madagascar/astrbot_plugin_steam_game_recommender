@@ -37,6 +37,20 @@ class TagNormalizerTest(unittest.TestCase):
         )
         self.assertEqual(tags, ["co_op", "local_coop", "casual", "puzzle", "horror"])
 
+    def test_maps_specific_mechanic_tags_without_broad_false_positive(self) -> None:
+        normalizer = optional_import("astrbot_plugin_game_recommender.services.tag_normalizer")
+
+        self.assertEqual(normalizer.normalize_tag("Deckbuilding"), "deckbuilding")
+        self.assertEqual(normalizer.normalize_tag("Open World Survival Craft"), "open_world_survival_craft")
+        self.assertEqual(normalizer.normalize_tag("Choices Matter"), "choices_matter")
+
+        terms = normalizer.extract_description_terms(
+            "Includes Steam Trading Cards, profile backgrounds, and soundtrack."
+        )
+
+        self.assertNotIn("deckbuilding", normalizer.canonical_tags_from_terms(terms))
+        self.assertNotIn("card_battler", normalizer.canonical_tags_from_terms(terms))
+
 
 class SimilarityRankerTest(unittest.TestCase):
     def test_high_tag_overlap_beats_high_review_low_overlap(self) -> None:
@@ -119,6 +133,34 @@ class SimilarityRankerTest(unittest.TestCase):
 
 
 class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_enrich_candidate_persists_description_mechanic_tags(self) -> None:
+        index_module = optional_import("astrbot_plugin_game_recommender.services.steam_index")
+        service = index_module.SteamGameIndexService(
+            steam_client=NoLiveSearchSteamClient(),
+            cache=MemoryCache({}),
+            min_review_count=0,
+        )
+
+        enriched = await service.enrich_candidate(
+            GameCandidate(
+                title="Workshop Isles",
+                platforms=["PC"],
+                genres=["Simulation"],
+                tags=["Single-player"],
+                stores=["Steam"],
+                description=(
+                    "A cozy open world survival craft game about automation, "
+                    "base building, and farming with friends."
+                ),
+            )
+        )
+
+        self.assertIn("open_world_survival_craft", enriched.tags)
+        self.assertIn("automation", enriched.tags)
+        self.assertIn("building", enriched.tags)
+        self.assertIn("farming", enriched.tags)
+        self.assertIn("relaxing", enriched.tags)
+
     async def test_recommend_uses_cached_index_without_live_search(self) -> None:
         index_module = optional_import("astrbot_plugin_game_recommender.services.steam_index")
         cache = MemoryCache(

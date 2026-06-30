@@ -8,6 +8,7 @@ from .similarity_ranker import (
     build_profile_from_preference,
     rank_steam_candidates,
 )
+from .tag_normalizer import candidate_canonical_tags
 
 STEAM_INDEX_CACHE_KEY = "steam_index:entries"
 STEAM_INDEX_FALLBACK_WARNING = (
@@ -134,6 +135,13 @@ class SteamGameIndexService:
     async def enrich_candidate(self, candidate: GameCandidate) -> GameCandidate:
         data = dump_model(candidate)
         data["index_source"] = "steam_index"
+        canonical_tags = candidate_canonical_tags(candidate)
+        if canonical_tags:
+            data["tags"] = dedupe_texts([*(data.get("tags") or []), *canonical_tags])
+            reasons = list(data.get("source_reasons") or [])
+            if "tag_enrichment:steam_detail" not in reasons:
+                reasons.append("tag_enrichment:steam_detail")
+            data["source_reasons"] = reasons
         appid = data.get("appid")
         if appid is not None and hasattr(self.steam_client, "get_review_summary"):
             try:
