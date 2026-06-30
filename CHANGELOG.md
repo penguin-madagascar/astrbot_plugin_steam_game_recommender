@@ -3,7 +3,7 @@
 ## 未发布
 
 - 新增 `/accountbind`（alias `/账号绑定`），支持为当前聊天用户绑定 SteamID64 或 Steam 好友码，并使用 SQLite 保存可扩展账号绑定记录。
-- `/gamerec` 支持在显式写出“排除已玩/过滤已玩”等需求时，读取绑定 Steam 游戏库并排除已有且有游玩时长的候选。
+- `/gamerec` 支持 `排除已有` / `exclude-owned` 和 `仅查看已有` / `only-owned` 两个互斥库过滤参数。
 - 新增 `steam_api_key` 配置，用于 Steam Web API `GetOwnedGames`；未配置或游戏库不可见时会降级为原推荐流程。
 
 ## 0.3.2 - 2026-06-29

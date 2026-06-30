@@ -20,7 +20,15 @@ from .services.formatter import (
     format_recommendation_messages_with_llm,
 )
 from .services.message_delivery import build_forward_message_chain
-from .services.played_filter import filter_played_games, wants_played_game_exclusion
+from .services.played_filter import (
+    LIBRARY_FILTER_EXCLUDE_OWNED,
+    LIBRARY_FILTER_ONLY_OWNED,
+    LibraryFilterModeError,
+    detect_library_filter_mode,
+    filter_games_by_library_mode,
+    parse_library_filter_command,
+    resolve_library_filter_mode,
+)
 from .services.preference_parser import PreferenceParser
 from .services.recommendation_limits import effective_result_limit
 from .services.steam_index import (
@@ -103,8 +111,8 @@ class GameRecommenderPlugin(Star):
         desc="根据自然语言需求推荐游戏。",
     )
     async def recommend_games(self, event: AstrMessageEvent, query: GreedyStr):
-        text = str(query).strip()
-        if not text:
+        raw_text = str(query).strip()
+        if not raw_text:
             yield event.plain_result(
                 "请输入需求，例如：/gamerec Switch 和 Steam 双人合作，"
                 "不要恐怖，预算 100 以内（当前仅推荐 Steam/PC 候选）"
@@ -112,29 +120,47 @@ class GameRecommenderPlugin(Star):
             return
 
         try:
+            command_filter = parse_library_filter_command(raw_text)
+            text = command_filter.query
+            if not text:
+                yield event.plain_result(
+                    "请输入游戏需求，例如：/gamerec 排除已有 Steam 双人合作解谜"
+                )
+                return
+            text_filter_mode = detect_library_filter_mode(text)
             preference = await self.preference_parser.parse_preference(event, text)
+            library_filter_mode = resolve_library_filter_mode(
+                command_filter.mode,
+                text_filter_mode,
+                preference.library_filter_mode,
+            )
+            preference.library_filter_mode = library_filter_mode
             if warning := steam_only_scope_warning_for(preference):
                 preference.parse_warnings.append(warning)
             if not has_supported_steam_platform(preference):
                 yield event.plain_result(preference.parse_warnings[-1])
                 return
             result_limit = effective_result_limit(self.max_results, preference.result_count)
-            exclude_played = wants_played_game_exclusion(text)
             candidate_pool_size = None
             if preference.budget is not None or self.price_bridge.is_available():
                 candidate_pool_size = max(result_limit * 3, result_limit)
-            if exclude_played:
+            if library_filter_mode:
                 candidate_pool_size = max(
                     candidate_pool_size or result_limit,
-                    result_limit * 4,
-                    result_limit + 10,
+                    result_limit * 6,
+                    result_limit + 20,
                 )
             ranked_games = await self._recommend_with_steam_index(
                 preference,
                 limit=candidate_pool_size or result_limit,
             )
-            if exclude_played:
-                ranked_games = await self._exclude_played_games(event, preference, ranked_games)
+            if library_filter_mode:
+                ranked_games = await self._filter_library_games(
+                    event,
+                    preference,
+                    ranked_games,
+                    library_filter_mode,
+                )
             ranked_games = await self.price_bridge.enrich_ranked_games(ranked_games, preference)
             messages = await format_recommendation_messages_with_llm(
                 self.context,
@@ -147,6 +173,9 @@ class GameRecommenderPlugin(Star):
         except SteamApiError as exc:
             logger.warning(f"Steam game recommendation failed: {exc}")
             yield event.plain_result(f"Steam 查询失败：{exc}")
+            return
+        except LibraryFilterModeError as exc:
+            yield event.plain_result(f"游戏库过滤参数错误：{exc}")
             return
         except Exception as exc:
             logger.exception("Game recommendation failed")
@@ -248,47 +277,46 @@ class GameRecommenderPlugin(Star):
             preference.parse_warnings.append(STEAM_INDEX_FALLBACK_WARNING)
         return []
 
-    async def _exclude_played_games(
+    async def _filter_library_games(
         self,
         event: AstrMessageEvent,
         preference,
         ranked_games,
+        mode: str,
     ):
         try:
             chat_platform, chat_user_id = chat_identity_from_event(event)
         except AccountBindingError as exc:
-            preference.parse_warnings.append(f"已跳过已玩排除：{exc}")
-            return ranked_games
+            raise LibraryFilterModeError(f"无法识别当前用户，不能执行游戏库过滤：{exc}") from exc
 
         binding = await self.cache.get_account_binding(chat_platform, chat_user_id, "steam")
         if binding is None:
-            preference.parse_warnings.append(
-                "已请求排除已玩游戏，但当前用户未绑定 Steam 账号；"
-                "可使用 /accountbind steam <SteamID64 或好友码> 绑定。"
+            raise LibraryFilterModeError(
+                "当前用户未绑定 Steam 账号；请先使用 /accountbind steam <SteamID64 或好友码>。"
             )
-            return ranked_games
 
         if not self.steam_client.has_web_api_key():
-            preference.parse_warnings.append(
-                "已请求排除已玩游戏，但未配置 steam_api_key，无法读取 Steam 游戏库。"
+            raise LibraryFilterModeError(
+                "未配置 steam_api_key，无法读取 Steam 游戏库。"
             )
-            return ranked_games
 
         try:
             owned_games = await self.steam_client.get_owned_games(binding.account_id)
         except SteamApiError as exc:
             logger.warning(f"Steam owned games lookup failed: {exc}")
-            preference.parse_warnings.append(f"Steam 游戏库不可用，已跳过已玩排除：{exc}")
-            return ranked_games
+            raise LibraryFilterModeError(f"Steam 游戏库不可读，无法执行游戏库过滤：{exc}") from exc
 
         if not owned_games:
-            preference.parse_warnings.append("Steam 游戏库为空或不可见，已跳过已玩排除。")
-            return ranked_games
+            raise LibraryFilterModeError("Steam 游戏库为空或不可见，无法执行游戏库过滤。")
 
-        filtered, removed_count = filter_played_games(ranked_games, owned_games)
-        if removed_count:
+        filtered, removed_count = filter_games_by_library_mode(ranked_games, owned_games, mode)
+        if mode == LIBRARY_FILTER_EXCLUDE_OWNED:
             preference.parse_warnings.append(
-                f"已排除 Steam 游戏库中有游玩时长的 {removed_count} 款游戏。"
+                f"已排除 Steam 游戏库中已有的 {removed_count} 款候选。"
+            )
+        elif mode == LIBRARY_FILTER_ONLY_OWNED:
+            preference.parse_warnings.append(
+                f"已仅保留 Steam 游戏库中已有的 {len(filtered)} 款候选。"
             )
         return filtered
 

@@ -82,6 +82,7 @@ class GamePreference(BaseModel):
     reference_games_like: list[str] = Field(default_factory=list)
     reference_search_terms: list[str] = Field(default_factory=list)
     reference_games_dislike: list[str] = Field(default_factory=list)
+    library_filter_mode: str | None = None
     resolved_reference_games: list["ResolvedReferenceGame"] = Field(default_factory=list)
     players: int | None = None
     budget: float | None = None
@@ -111,6 +112,16 @@ class GamePreference(BaseModel):
     @validator("reference_search_terms", pre=True)
     def _normalize_reference_search_terms(cls, value: Any) -> list[str]:
         return split_display_list(value)
+
+    @validator("library_filter_mode", pre=True)
+    def _normalize_library_filter_mode(cls, value: Any) -> str | None:
+        text = re.sub(r"\s+", " ", str(value or "")).strip().lower()
+        text = text.replace("-", "_").replace(" ", "_")
+        if text in {"exclude_owned", "排除已有"}:
+            return "exclude_owned"
+        if text in {"only_owned", "仅查看已有"}:
+            return "only_owned"
+        return None
 
     @validator("budget", pre=True)
     def _normalize_budget(cls, value: Any) -> float | None:

@@ -108,6 +108,24 @@ class PreferenceRulesTest(unittest.TestCase):
         self.assertIn("action", preference.extra_tags)
         self.assertIn("rpg", preference.extra_tags)
 
+    def test_infers_library_filter_mode_from_text(self) -> None:
+        self.assertEqual(
+            infer_preference_from_text("推荐几个合作游戏，排除已有").library_filter_mode,
+            "exclude_owned",
+        )
+        self.assertEqual(
+            infer_preference_from_text("recommend co-op games only-owned").library_filter_mode,
+            "only_owned",
+        )
+
+    def test_merges_llm_library_filter_mode(self) -> None:
+        merged = merge_text_preference(
+            GamePreference(library_filter_mode="exclude_owned"),
+            "推荐几个 Steam 合作游戏",
+        )
+
+        self.assertEqual(merged.library_filter_mode, "exclude_owned")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 from ..storage.models import GamePreference
+from .played_filter import detect_library_filter_mode
 
 SOULSLIKE_TERMS = (
     "魂like",
@@ -109,6 +110,7 @@ def infer_preference_from_text(text: str) -> GamePreference:
     if references_imply_soulslike(reference_like):
         extra_tags = merge_lists(extra_tags, ["soulslike"])
     extra_tags = expand_related_extra_tags(extra_tags)
+    library_filter_mode = detect_library_filter_mode(text)
 
     return GamePreference(
         platforms=platforms,
@@ -123,6 +125,7 @@ def infer_preference_from_text(text: str) -> GamePreference:
         difficulty=difficulty,
         mood="轻松" if any(word in lower for word in ("轻松", "休闲", "治愈")) else None,
         result_count=result_count,
+        library_filter_mode=library_filter_mode,
     )
 
 
@@ -143,6 +146,8 @@ def merge_text_preference(preference: GamePreference, text: str) -> GamePreferen
     for field in ("players", "budget", "language", "difficulty", "mood"):
         if getattr(preference, field) in (None, "", []):
             data[field] = getattr(inferred, field)
+    if not preference.library_filter_mode:
+        data["library_filter_mode"] = inferred.library_filter_mode
     if explicit_count := extract_result_count(text):
         data["result_count"] = explicit_count
     elif not preference.result_count:

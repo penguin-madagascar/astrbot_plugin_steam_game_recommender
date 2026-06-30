@@ -15,7 +15,7 @@
   "steam_api_key": {
     "type": "string",
     "description": "Steam Web API Key",
-    "hint": "用于 /gamerec 显式排除已玩时调用 Steam GetOwnedGames；留空时账号绑定仍可用，但会跳过已玩排除。",
+    "hint": "用于 /gamerec 的排除已有和仅查看已有参数调用 Steam GetOwnedGames；留空时账号绑定仍可用，但无法执行库过滤。",
     "default": ""
   },
   "steam_price_heybox_notice": {
