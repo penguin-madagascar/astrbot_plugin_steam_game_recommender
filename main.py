@@ -38,6 +38,11 @@ from .services.steam_index import (
     steam_only_scope_warning_for,
 )
 from .services.steam_price_bridge import SteamPriceBridge
+from .services.unplayed_picker import (
+    UnplayedRecommendationError,
+    format_unplayed_recommendation,
+    pick_random_unplayed_game,
+)
 from .services.user_profile import load_bound_user_tag_weights
 from .storage.models import AccountBinding
 from .storage.repository import SQLiteCacheRepository
@@ -266,6 +271,60 @@ class GameRecommenderPlugin(Star):
 
         yield event.plain_result(
             f"账号绑定成功：Steam ID {saved.account_id}（来源：{saved.account_kind}）。"
+        )
+
+    @filter.command(
+        "unplayedrec",
+        alias={"未玩推荐"},
+        desc="从已绑定 Steam 库中随机推荐一款未玩且评价过线的游戏。",
+    )
+    async def recommend_unplayed_game(self, event: AstrMessageEvent):
+        try:
+            chat_platform, chat_user_id = chat_identity_from_event(event)
+            binding = await self.cache.get_account_binding(chat_platform, chat_user_id, "steam")
+            if binding is None:
+                yield event.plain_result(
+                    "当前用户未绑定 Steam 账号；请先使用 /accountbind steam <SteamID64 或好友码>。"
+                )
+                return
+            if not self.steam_client.has_web_api_key():
+                yield event.plain_result("未配置 steam_api_key，无法读取 Steam 游戏库。")
+                return
+
+            owned_games = await self.steam_client.get_owned_games(binding.account_id)
+            if not owned_games:
+                yield event.plain_result("Steam 游戏库为空或不可见，无法推荐未玩游戏。")
+                return
+
+            min_review_count = safe_int(self.config.get("steam_min_review_count"), 50)
+            min_positive_ratio = safe_float(self.config.get("steam_min_positive_ratio"), 0.65)
+            recommendation = await pick_random_unplayed_game(
+                owned_games,
+                self.steam_client,
+                min_review_count=min_review_count,
+                min_positive_ratio=min_positive_ratio,
+            )
+        except AccountBindingError as exc:
+            yield event.plain_result(f"未玩游戏推荐失败：{exc}")
+            return
+        except UnplayedRecommendationError as exc:
+            yield event.plain_result(f"未玩游戏推荐失败：{exc}")
+            return
+        except SteamApiError as exc:
+            logger.warning(f"Steam unplayed game recommendation failed: {exc}")
+            yield event.plain_result(f"Steam 查询失败：{exc}")
+            return
+        except Exception as exc:
+            logger.exception("Unplayed game recommendation failed")
+            yield event.plain_result(f"未玩游戏推荐失败：{exc}")
+            return
+
+        yield event.plain_result(
+            format_unplayed_recommendation(
+                recommendation,
+                min_review_count=min_review_count,
+                min_positive_ratio=min_positive_ratio,
+            )
         )
 
     async def _recommend_with_steam_index(

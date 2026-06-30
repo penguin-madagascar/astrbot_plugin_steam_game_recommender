@@ -6,6 +6,7 @@
 
 - `/gamerec <自然语言需求>`：根据平台、类型、排除项、人数、预算、语言、难度、氛围等偏好推荐游戏；兼容 alias：`/游戏推荐`。
 - `/accountbind [steam] <SteamID64|好友码>`：绑定当前聊天用户的 Steam 账号；兼容 alias：`/账号绑定`。
+- `/unplayedrec`：从已绑定 Steam 游戏库中随机推荐一款未游玩且 Steam 评价过线的游戏；兼容 alias：`/未玩推荐`。
 - `/gamedesc <游戏名>`：查询游戏基础资料，并在可用时补充 Steam 价格；兼容 alias：`/游戏详情`。
 - 平台覆盖：当前版本仅支持 Steam/PC，检测到 Switch、PlayStation、Xbox 等平台会明确提示。
 - `/gamerec` 和 `/游戏推荐` 支持前置库过滤参数：`排除已有` / `exclude-owned` 会排除 Steam 游戏库中已有的候选；`仅查看已有` / `only-owned` 只保留库内已有的候选。
@@ -29,7 +30,7 @@ pip install -r requirements.txt
 可选：
 
 - `llm_provider_id`：用于偏好解析和结果解释；留空时尝试当前会话模型，失败会自动降级。
-- `steam_api_key`：Steam Web API Key，用于 `/gamerec` 的已有游戏过滤参数调用 `GetOwnedGames`；留空时账号绑定仍可用，但无法执行库过滤。
+- `steam_api_key`：Steam Web API Key，用于 `/gamerec` 的已有游戏过滤参数和 `/unplayedrec` 调用 `GetOwnedGames`；留空时账号绑定仍可用，但无法读取游戏库。
 - `max_results`：默认推荐数量，范围 1-10。
 - `steam_index_ttl_hours`：Steam 推荐索引缓存有效期，默认 168 小时。
 - `steam_min_review_count`：Steam 索引推荐最低评测数量，默认 50。
@@ -44,6 +45,8 @@ pip install -r requirements.txt
 ```text
 /gamerec 推荐几个 Steam 上适合双人的轻松解谜合作游戏，不要恐怖，最好支持中文，预算 100 以内，类似双人成行但别太难。
 /accountbind steam 76561198000000000
+/unplayedrec
+/未玩推荐
 /gamerec 排除已有 推荐几个 Steam 合作解谜游戏
 /游戏推荐 仅查看已有 找几个适合双人的轻松游戏
 /gamedesc It Takes Two
@@ -52,7 +55,8 @@ pip install -r requirements.txt
 ## 限制说明
 
 - 价格增强依赖可导入的 `astrbot_plugin_steam_price_heybox`；该插件未安装、不可导入或查询失败时，只展示游戏推荐结果。
-- `排除已有` / `仅查看已有` 依赖 `steam_api_key` 和公开可读的 Steam 游戏库；未绑定、未配置 key、资料隐私不可见或接口失败时，会直接提示错误。
+- `排除已有` / `仅查看已有` / `/unplayedrec` 依赖 `steam_api_key` 和公开可读的 Steam 游戏库；未绑定、未配置 key、资料隐私不可见或接口失败时，会直接提示错误。
+- `/unplayedrec` 将 Steam `playtime_forever` 为 0 的条目视为未游玩，并沿用 `steam_min_review_count` 与 `steam_min_positive_ratio` 作为评价门槛。
 - Steam 索引推荐仅覆盖 Steam/PC；Nintendo Switch、PlayStation、Xbox 等跨平台请求会返回范围提示。
 - 预算会参与软排序：当前价在预算内会加分，超预算会提示，但不会直接过滤候选。
 - Steam 的中文支持数据可能不完整；结果中未确认时会显示“不确定”或提醒以商店页面为准。
