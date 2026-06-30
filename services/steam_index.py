@@ -54,16 +54,29 @@ class SteamGameIndexService:
         self,
         preference: GamePreference,
         limit: int,
+        profile_tag_weights: dict[str, float] | None = None,
     ) -> list[RankedGame]:
         if preference.platforms and not has_supported_steam_platform(preference):
             return []
         entries = await self.load_entries()
-        ranked = rank_entries(entries, preference, self.min_review_count, self.min_positive_ratio)
+        ranked = rank_entries(
+            entries,
+            preference,
+            self.min_review_count,
+            self.min_positive_ratio,
+            profile_tag_weights=profile_tag_weights,
+        )
         if ranked:
             return ranked[:limit]
 
         refreshed = await self.refresh_entries(preference, entries)
-        ranked = rank_entries(refreshed, preference, self.min_review_count, self.min_positive_ratio)
+        ranked = rank_entries(
+            refreshed,
+            preference,
+            self.min_review_count,
+            self.min_positive_ratio,
+            profile_tag_weights=profile_tag_weights,
+        )
         return ranked[:limit]
 
     async def load_entries(self) -> list[GameCandidate]:
@@ -180,12 +193,19 @@ def rank_entries(
     preference: GamePreference,
     min_review_count: int,
     min_positive_ratio: float,
+    profile_tag_weights: dict[str, float] | None = None,
 ) -> list[RankedGame]:
     profile = build_profile_from_preference(
         preference,
         reference_candidates=reference_candidates(preference, entries),
     )
-    return rank_steam_candidates(entries, profile, min_review_count, min_positive_ratio)
+    return rank_steam_candidates(
+        entries,
+        profile,
+        min_review_count,
+        min_positive_ratio,
+        profile_tag_weights=profile_tag_weights,
+    )
 
 
 def reference_candidates(

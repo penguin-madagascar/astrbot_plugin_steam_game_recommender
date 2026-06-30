@@ -318,6 +318,9 @@ class GameFacts(BaseModel):
     reference_similarity: float = 0.0
     match_coverage: float = 0.0
     match_score: float = 0.0
+    base_tag_score: float = 0.0
+    profile_weight_bonus: float = 0.0
+    diversity_penalty: float = 0.0
     confidence: float = 0.0
 
     @validator(
@@ -336,7 +339,16 @@ class GameFacts(BaseModel):
     def _normalize_lists(cls, value: Any) -> list[str]:
         return split_display_list(value)
 
-    @validator("reference_similarity", "match_coverage", "match_score", "confidence", pre=True)
+    @validator(
+        "reference_similarity",
+        "match_coverage",
+        "match_score",
+        "base_tag_score",
+        "profile_weight_bonus",
+        "diversity_penalty",
+        "confidence",
+        pre=True,
+    )
     def _normalize_float(cls, value: Any) -> float:
         try:
             number = float(value)

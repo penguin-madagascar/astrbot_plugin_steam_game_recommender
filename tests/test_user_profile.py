@@ -1,0 +1,223 @@
+from __future__ import annotations
+
+import unittest
+
+from astrbot_plugin_game_recommender.services.similarity_ranker import (
+    SteamTagProfile,
+    rank_steam_candidates,
+)
+from astrbot_plugin_game_recommender.services.steam_index import SteamGameIndexService
+from astrbot_plugin_game_recommender.storage.models import (
+    AccountBinding,
+    GameCandidate,
+    GamePreference,
+    SteamOwnedGame,
+)
+
+
+class UserProfileWeightsTest(unittest.TestCase):
+    def test_playtime_profile_weights_known_owned_game_tags(self) -> None:
+        from astrbot_plugin_game_recommender.services.user_profile import build_user_tag_weights
+
+        weights = build_user_tag_weights(
+            [
+                SteamOwnedGame(appid=1, name="Farm Workshop", playtime_forever=2400),
+                SteamOwnedGame(appid=2, name="Arena Shooter", playtime_forever=30),
+                SteamOwnedGame(appid=3, name="Unindexed Game", playtime_forever=9000),
+            ],
+            [
+                steam_game(1, "Farm Workshop", ["Farming", "Crafting", "Building"]),
+                steam_game(2, "Arena Shooter", ["Shooter", "PvP"]),
+            ],
+        )
+
+        self.assertGreater(weights["farming"], weights["shooter"])
+        self.assertGreater(weights["crafting"], weights["pvp"])
+        self.assertNotIn("singleplayer", weights)
+
+
+class UserProfileRankerTest(unittest.TestCase):
+    def test_profile_bonus_reorders_only_equal_primary_matches(self) -> None:
+        profile = SteamTagProfile(include_tags=["co_op", "puzzle"])
+        ranked = rank_steam_candidates(
+            [
+                steam_game(1, "Generic Co-op Puzzle", ["Co-op", "Puzzle"]),
+                steam_game(2, "Craft Co-op Puzzle", ["Co-op", "Puzzle", "Farming", "Crafting"]),
+            ],
+            profile,
+            profile_tag_weights={"farming": 1.0, "crafting": 0.9},
+        )
+
+        self.assertEqual([game.title for game in ranked], [
+            "Craft Co-op Puzzle",
+            "Generic Co-op Puzzle",
+        ])
+        self.assertGreater(ranked[0].facts.profile_weight_bonus, 0)
+        self.assertEqual(ranked[0].facts.base_tag_score, ranked[0].facts.match_score)
+
+    def test_profile_bonus_does_not_outrank_better_primary_match_or_exclusions(self) -> None:
+        profile = SteamTagProfile(
+            include_tags=["co_op", "puzzle", "relaxing"],
+            exclude_tags=["horror"],
+        )
+        ranked = rank_steam_candidates(
+            [
+                steam_game(1, "Focused Co-op Puzzle", ["Co-op", "Puzzle", "Relaxing"]),
+                steam_game(2, "Profile Favorite Co-op", ["Co-op", "Farming", "Crafting"]),
+                steam_game(3, "Scary Profile Favorite", ["Co-op", "Puzzle", "Horror", "Farming"]),
+            ],
+            profile,
+            profile_tag_weights={"farming": 1.0, "crafting": 0.9},
+        )
+
+        self.assertEqual([game.title for game in ranked], [
+            "Focused Co-op Puzzle",
+            "Profile Favorite Co-op",
+        ])
+
+
+class UserProfileSteamIndexTest(unittest.IsolatedAsyncioTestCase):
+    async def test_recommend_passes_profile_weights_to_ranker(self) -> None:
+        service = SteamGameIndexService(
+            steam_client=NoLiveSearchSteamClient(),
+            cache=MemoryCache(
+                [
+                    steam_game(1, "Generic Co-op Puzzle", ["Co-op", "Puzzle"]),
+                    steam_game(2, "Craft Co-op Puzzle", ["Co-op", "Puzzle", "Farming"]),
+                ]
+            ),
+        )
+
+        ranked = await service.recommend(
+            GamePreference(platforms=["steam"], genres_like=["co-op", "puzzle"]),
+            limit=2,
+            profile_tag_weights={"farming": 1.0},
+        )
+
+        self.assertEqual([game.title for game in ranked], [
+            "Craft Co-op Puzzle",
+            "Generic Co-op Puzzle",
+        ])
+
+
+class BoundUserProfileLoaderTest(unittest.IsolatedAsyncioTestCase):
+    async def test_loads_weights_for_bound_account_with_api_key(self) -> None:
+        from astrbot_plugin_game_recommender.services.user_profile import (
+            load_bound_user_tag_weights,
+        )
+
+        weights = await load_bound_user_tag_weights(
+            chat_platform="qq",
+            chat_user_id="user-1",
+            cache=FakeBindingCache(
+                AccountBinding(
+                    chat_platform="qq",
+                    chat_user_id="user-1",
+                    provider="steam",
+                    account_id="76561198000000000",
+                    account_kind="steam_id64",
+                    display_value="76561198000000000",
+                )
+            ),
+            steam_client=FakeOwnedGamesClient(has_key=True),
+            index_entries=[
+                steam_game(1, "Farm Workshop", ["Farming", "Crafting"]),
+                steam_game(2, "Arena Shooter", ["Shooter"]),
+            ],
+        )
+
+        self.assertGreater(weights["farming"], weights["shooter"])
+
+    async def test_missing_binding_or_api_key_returns_empty_weights(self) -> None:
+        from astrbot_plugin_game_recommender.services.user_profile import (
+            load_bound_user_tag_weights,
+        )
+
+        no_binding = await load_bound_user_tag_weights(
+            chat_platform="qq",
+            chat_user_id="user-1",
+            cache=FakeBindingCache(None),
+            steam_client=FakeOwnedGamesClient(has_key=True),
+            index_entries=[steam_game(1, "Farm Workshop", ["Farming"])],
+        )
+        no_api_key = await load_bound_user_tag_weights(
+            chat_platform="qq",
+            chat_user_id="user-1",
+            cache=FakeBindingCache(
+                AccountBinding(
+                    chat_platform="qq",
+                    chat_user_id="user-1",
+                    provider="steam",
+                    account_id="76561198000000000",
+                    account_kind="steam_id64",
+                    display_value="76561198000000000",
+                )
+            ),
+            steam_client=FakeOwnedGamesClient(has_key=False),
+            index_entries=[steam_game(1, "Farm Workshop", ["Farming"])],
+        )
+
+        self.assertEqual(no_binding, {})
+        self.assertEqual(no_api_key, {})
+
+
+def steam_game(appid: int, title: str, tags: list[str]) -> GameCandidate:
+    return GameCandidate(
+        title=title,
+        appid=appid,
+        platforms=["PC"],
+        tags=tags,
+        stores=["Steam"],
+        review_total=500,
+        review_positive_ratio=0.8,
+    )
+
+
+class MemoryCache:
+    def __init__(self, entries: list[GameCandidate]) -> None:
+        self.entries = entries
+
+    async def get_json(self, _key: str, _ttl_hours: int):
+        return [entry.model_dump() for entry in self.entries]
+
+    async def set_json(self, _key: str, _payload) -> None:
+        raise AssertionError("cached recommendation should not refresh entries")
+
+
+class NoLiveSearchSteamClient:
+    async def search_games(self, **_kwargs):
+        raise AssertionError("cached recommendation should not call live search")
+
+
+class FakeBindingCache:
+    def __init__(self, binding: AccountBinding | None) -> None:
+        self.binding = binding
+
+    async def get_account_binding(self, chat_platform: str, chat_user_id: str, provider: str):
+        if self.binding is None:
+            return None
+        if (
+            self.binding.chat_platform == chat_platform
+            and self.binding.chat_user_id == chat_user_id
+            and self.binding.provider == provider
+        ):
+            return self.binding
+        return None
+
+
+class FakeOwnedGamesClient:
+    def __init__(self, has_key: bool) -> None:
+        self.has_key = has_key
+
+    def has_web_api_key(self) -> bool:
+        return self.has_key
+
+    async def get_owned_games(self, _steam_id64: str) -> list[SteamOwnedGame]:
+        return [
+            SteamOwnedGame(appid=1, name="Farm Workshop", playtime_forever=2400),
+            SteamOwnedGame(appid=2, name="Arena Shooter", playtime_forever=30),
+        ]
+
+
+if __name__ == "__main__":
+    unittest.main()

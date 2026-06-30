@@ -38,6 +38,7 @@ from .services.steam_index import (
     steam_only_scope_warning_for,
 )
 from .services.steam_price_bridge import SteamPriceBridge
+from .services.user_profile import load_bound_user_tag_weights
 from .storage.models import AccountBinding
 from .storage.repository import SQLiteCacheRepository
 
@@ -150,9 +151,11 @@ class GameRecommenderPlugin(Star):
                     result_limit * 6,
                     result_limit + 20,
                 )
+            profile_tag_weights = await self._user_profile_tag_weights(event)
             ranked_games = await self._recommend_with_steam_index(
                 preference,
                 limit=candidate_pool_size or result_limit,
+                profile_tag_weights=profile_tag_weights,
             )
             if library_filter_mode:
                 ranked_games = await self._filter_library_games(
@@ -269,13 +272,35 @@ class GameRecommenderPlugin(Star):
         self,
         preference,
         limit: int,
+        profile_tag_weights: dict[str, float] | None = None,
     ):
-        ranked_games = await self.steam_index.recommend(preference, limit=limit)
+        ranked_games = await self.steam_index.recommend(
+            preference,
+            limit=limit,
+            profile_tag_weights=profile_tag_weights,
+        )
         if ranked_games:
             return ranked_games
         if STEAM_INDEX_FALLBACK_WARNING not in preference.parse_warnings:
             preference.parse_warnings.append(STEAM_INDEX_FALLBACK_WARNING)
         return []
+
+    async def _user_profile_tag_weights(self, event: AstrMessageEvent) -> dict[str, float]:
+        try:
+            chat_platform, chat_user_id = chat_identity_from_event(event)
+            entries = await self.steam_index.load_entries()
+            if not entries:
+                return {}
+            return await load_bound_user_tag_weights(
+                chat_platform,
+                chat_user_id,
+                self.cache,
+                self.steam_client,
+                entries,
+            )
+        except Exception as exc:
+            logger.debug(f"Steam user profile weights skipped: {exc}")
+            return {}
 
     async def _filter_library_games(
         self,

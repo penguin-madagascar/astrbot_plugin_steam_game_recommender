@@ -68,8 +68,10 @@ def rank_steam_candidates(
     profile: SteamTagProfile,
     min_review_count: int = 50,
     min_positive_ratio: float = 0.65,
+    profile_tag_weights: dict[str, float] | None = None,
 ) -> list[RankedGame]:
     ranked: list[RankedGame] = []
+    profile_weights = profile_tag_weights or {}
     for candidate in candidates:
         if is_reference_title(candidate.title, profile.reference_titles) or is_reference_query(candidate):
             continue
@@ -107,10 +109,17 @@ def rank_steam_candidates(
                 len(matched) / len(profile.include_tags) if profile.include_tags else 0.0
             ),
             match_score=match_score,
+            base_tag_score=match_score,
+            profile_weight_bonus=profile_weight_bonus(tags, profile_weights),
             confidence=confidence_for(candidate, tags),
         )
         score = similarity_score(candidate, facts, tier)
         fit_points = fit_points_for(candidate, matched, match_score)
+        if facts.profile_weight_bonus > 0:
+            fit_points = merge_tags(
+                fit_points,
+                [profile_fit_point(tags, profile_weights)],
+            )
         risk_points = risk_points_for(candidate, missing, tier, min_review_count)
         ranked.append(
             copy_ranked_game(
@@ -186,6 +195,7 @@ def similarity_score(candidate: GameCandidate, facts: GameFacts, tier: str) -> f
     score = {"strong": 300.0, "recommended": 200.0, "backup": 100.0}[tier]
     score += facts.match_score * 120
     score += facts.confidence * 10
+    score += facts.profile_weight_bonus * 8
     if candidate.review_positive_ratio is not None:
         score += candidate.review_positive_ratio * 8
     if candidate.review_total:
@@ -207,6 +217,29 @@ def confidence_for(candidate: GameCandidate, tags: list[str]) -> float:
     if candidate.appid is not None:
         confidence += 0.10
     return min(confidence, 1.0)
+
+
+def profile_weight_bonus(tags: list[str], weights: dict[str, float]) -> float:
+    if not weights:
+        return 0.0
+    matched = [
+        min(max(float(weights[tag]), 0.0), 1.0)
+        for tag in tags
+        if tag in weights
+    ]
+    if not matched:
+        return 0.0
+    return min(sum(matched) / 3, 1.0)
+
+
+def profile_fit_point(tags: list[str], weights: dict[str, float]) -> str:
+    matched = [
+        tag
+        for tag in tags
+        if tag in weights
+    ]
+    ranked = sorted(matched, key=lambda tag: (-weights.get(tag, 0.0), tag))
+    return f"个人游戏库偏好命中：{'、'.join(ranked[:4])}"
 
 
 def fit_points_for(candidate: GameCandidate, matched: list[str], match_score: float) -> list[str]:
