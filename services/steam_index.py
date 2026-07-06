@@ -7,8 +7,8 @@ from .similarity_ranker import (
     SteamTagProfile,
     build_profile_from_preference,
     rank_steam_candidates,
-    select_diverse_results,
 )
+from .diversity import DIVERSITY_STRICT, select_results_by_diversity
 from .tag_normalizer import candidate_canonical_tags
 
 STEAM_INDEX_CACHE_KEY = "steam_index:entries"
@@ -56,6 +56,7 @@ class SteamGameIndexService:
         preference: GamePreference,
         limit: int,
         profile_tag_weights: dict[str, float] | None = None,
+        diversity_mode: str = DIVERSITY_STRICT,
     ) -> list[RankedGame]:
         if preference.platforms and not has_supported_steam_platform(preference):
             return []
@@ -68,7 +69,7 @@ class SteamGameIndexService:
             profile_tag_weights=profile_tag_weights,
         )
         if ranked:
-            return select_diverse_results(ranked, limit)
+            return select_results_by_diversity(ranked, limit, diversity_mode)
 
         refreshed = await self.refresh_entries(preference, entries)
         ranked = rank_entries(
@@ -78,7 +79,7 @@ class SteamGameIndexService:
             self.min_positive_ratio,
             profile_tag_weights=profile_tag_weights,
         )
-        return select_diverse_results(ranked, limit)
+        return select_results_by_diversity(ranked, limit, diversity_mode)
 
     async def load_entries(self) -> list[GameCandidate]:
         payload = await self.cache.get_json(STEAM_INDEX_CACHE_KEY, self.ttl_hours)

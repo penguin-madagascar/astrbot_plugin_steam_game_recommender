@@ -132,7 +132,7 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertGreater(ranked[0].facts.match_score, ranked[1].facts.match_score)
 
-    async def test_cached_index_applies_diversity_after_primary_ranking(self) -> None:
+    async def test_cached_index_defaults_to_strict_primary_ranking(self) -> None:
         cache = MemoryCache(
             {
                 "steam_index:entries": [
@@ -156,6 +156,38 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
         ranked = await service.recommend(
             GamePreference(platforms=["steam"], genres_like=["co-op", "puzzle"]),
             limit=4,
+        )
+
+        self.assertEqual(
+            [game.title for game in ranked],
+            ["Farm Co-op A", "Farm Co-op B", "Story Co-op", "Lower Match Builder"],
+        )
+
+    async def test_cached_index_applies_explicit_balanced_diversity(self) -> None:
+        cache = MemoryCache(
+            {
+                "steam_index:entries": [
+                    dump_model(
+                        steam_game("Farm Co-op A", ["Co-op", "Puzzle", "Farming", "Crafting"])
+                    ),
+                    dump_model(
+                        steam_game("Farm Co-op B", ["Co-op", "Puzzle", "Farming", "Crafting"])
+                    ),
+                    dump_model(
+                        steam_game("Story Co-op", ["Co-op", "Puzzle", "Story Rich", "Choices Matter"])
+                    ),
+                    dump_model(
+                        steam_game("Lower Match Builder", ["Co-op", "Building", "Automation"])
+                    ),
+                ]
+            }
+        )
+        service = SteamGameIndexService(NoLiveSearchSteamClient(), cache)
+
+        ranked = await service.recommend(
+            GamePreference(platforms=["steam"], genres_like=["co-op", "puzzle"]),
+            limit=4,
+            diversity_mode="balanced",
         )
 
         self.assertEqual(

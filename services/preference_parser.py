@@ -13,7 +13,7 @@ from .preference_rules import infer_preference_from_text, merge_text_preference
 
 SYSTEM_PROMPT = """你是游戏推荐插件的偏好解析器。
 只把用户自然语言解析成 JSON，不要推荐游戏，不要补充解释，不要使用 Markdown。
-插件只覆盖 Steam/PC；你只负责抽取用户明确或隐含的标签、排除项和相似游戏名。
+插件只覆盖 Steam/PC；你只负责抽取用户明确或隐含的标签、排除项、相似游戏名和多样性要求。
 未知字段使用空数组或 null，不要编造价格、平台、语言支持、评测或商店事实。"""
 
 PREFERENCE_SCHEMA_HINT = """
@@ -32,6 +32,7 @@ PREFERENCE_SCHEMA_HINT = """
   "language": null,
   "difficulty": null,
   "mood": null,
+  "diversity_mode": "strict",
   "result_count": 5
 }
 说明：
@@ -41,6 +42,10 @@ PREFERENCE_SCHEMA_HINT = """
 - reference_search_terms 放参考游戏的 Steam 搜索友好标题候选，例如“黑暗之魂”对应 “Dark Souls”。
 - genres_dislike 放排除标签，例如恐怖、魂类、肉鸽、纯单人、pvp。
 - library_filter_mode 只在用户明确要求时填写：排除已有/exclude-owned 为 "exclude_owned"；仅查看已有/only-owned 为 "only_owned"；否则为 null。
+- diversity_mode 只允许 "strict"、"balanced"、"high"：
+  默认使用 "strict"；用户要求更像、同类优先、严格匹配时也使用 "strict"。
+  用户要求适度变化但仍以相似为主时使用 "balanced"。
+  只有用户明确希望更多样、不同题材/玩法、避免同质化时使用 "high"。
 """
 
 

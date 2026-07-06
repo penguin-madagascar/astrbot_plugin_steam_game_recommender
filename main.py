@@ -19,6 +19,7 @@ from .services.formatter import (
     format_game_detail,
     format_recommendation_messages_with_llm,
 )
+from .services.diversity import DIVERSITY_STRICT
 from .services.message_delivery import build_forward_message_chain
 from .services.played_filter import (
     LIBRARY_FILTER_EXCLUDE_OWNED,
@@ -135,6 +136,7 @@ class GameRecommenderPlugin(Star):
                 return
             text_filter_mode = detect_library_filter_mode(text)
             preference = await self.preference_parser.parse_preference(event, text)
+            diversity_mode = getattr(preference, "diversity_mode", DIVERSITY_STRICT)
             library_filter_mode = resolve_library_filter_mode(
                 command_filter.mode,
                 text_filter_mode,
@@ -161,6 +163,7 @@ class GameRecommenderPlugin(Star):
                 preference,
                 limit=candidate_pool_size or result_limit,
                 profile_tag_weights=profile_tag_weights,
+                diversity_mode=diversity_mode,
             )
             if library_filter_mode:
                 ranked_games = await self._filter_library_games(
@@ -332,11 +335,13 @@ class GameRecommenderPlugin(Star):
         preference,
         limit: int,
         profile_tag_weights: dict[str, float] | None = None,
+        diversity_mode: str = "strict",
     ):
         ranked_games = await self.steam_index.recommend(
             preference,
             limit=limit,
             profile_tag_weights=profile_tag_weights,
+            diversity_mode=diversity_mode,
         )
         if ranked_games:
             return ranked_games

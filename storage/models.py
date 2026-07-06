@@ -90,6 +90,7 @@ class GamePreference(BaseModel):
     difficulty: str | None = None
     mood: str | None = None
     result_count: int = 5
+    diversity_mode: str = "strict"
     parse_warnings: list[str] = Field(default_factory=list)
 
     @validator("platforms", pre=True)
@@ -122,6 +123,11 @@ class GamePreference(BaseModel):
         if text in {"only_owned", "仅查看已有"}:
             return "only_owned"
         return None
+
+    @validator("diversity_mode", pre=True)
+    def _normalize_diversity_mode(cls, value: Any) -> str:
+        text = re.sub(r"\s+", " ", str(value or "")).strip().lower()
+        return text if text in {"strict", "balanced", "high"} else "strict"
 
     @validator("budget", pre=True)
     def _normalize_budget(cls, value: Any) -> float | None:

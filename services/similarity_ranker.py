@@ -146,12 +146,18 @@ def rank_steam_candidates(
     )
 
 
-def select_diverse_results(games: list[RankedGame], limit: int) -> list[RankedGame]:
+def select_diverse_results(
+    games: list[RankedGame],
+    limit: int,
+    group_by: str = "primary",
+    penalty_weight: float = 15,
+) -> list[RankedGame]:
     if limit <= 0 or not games:
         return []
 
     selected: list[RankedGame] = []
-    for group in primary_match_groups(games):
+    groups = tier_groups(games) if group_by == "tier" else primary_match_groups(games)
+    for group in groups:
         group_selected: list[RankedGame] = []
         remaining = list(group)
         while remaining and len(selected) < limit:
@@ -165,7 +171,7 @@ def select_diverse_results(games: list[RankedGame], limit: int) -> list[RankedGa
                     for index, game in enumerate(remaining)
                 ),
                 key=lambda item: (
-                    float(item[1].score) - item[2] * 15,
+                    float(item[1].score) - item[2] * penalty_weight,
                     -item[0],
                 ),
             )
@@ -185,6 +191,22 @@ def select_diverse_results(games: list[RankedGame], limit: int) -> list[RankedGa
         if len(selected) >= limit:
             break
     return selected
+
+
+def tier_groups(games: list[RankedGame]) -> list[list[RankedGame]]:
+    groups: list[list[RankedGame]] = []
+    current: list[RankedGame] = []
+    current_key: int | None = None
+    for game in games:
+        key = TIER_ORDER.get(game.tier, 9)
+        if current and key != current_key:
+            groups.append(current)
+            current = []
+        current.append(game)
+        current_key = key
+    if current:
+        groups.append(current)
+    return groups
 
 
 def primary_match_groups(games: list[RankedGame]) -> list[list[RankedGame]]:
