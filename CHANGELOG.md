@@ -5,6 +5,8 @@
 - 新增 `/accountbind`（alias `/账号绑定`），支持为当前聊天用户绑定 SteamID64 或 Steam 好友码，并使用 SQLite 保存可扩展账号绑定记录。
 - `/gamerec` 支持 `排除已有` / `exclude-owned` 和 `仅查看已有` / `only-owned` 两个互斥库过滤参数。
 - 新增 `/unplayedrec`（alias `/未玩推荐`），可从已绑定 Steam 游戏库中随机返回一款未游玩且 Steam 评价过线的游戏。
+- `/gamerec` 默认改为严格匹配排序；多样性模式改由 LLM 从用户描述中判断，失败或非法值回退严格匹配。
+- 新增 `/gamerec_retry`（alias `/重新推荐`、`/换一批`），可基于最近 30 分钟内的 `/gamerec` 结果排除已展示游戏并换一批。
 - 新增 `steam_api_key` 配置，用于 Steam Web API `GetOwnedGames`；未配置或游戏库不可见时，库过滤和未玩推荐会直接提示错误。
 
 ## 0.3.2 - 2026-06-29

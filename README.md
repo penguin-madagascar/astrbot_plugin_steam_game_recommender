@@ -1,17 +1,19 @@
 # astrbot_plugin_game_recommender
 
-无需 API Key 即可运行的 Steam/PC 游戏推荐插件。推荐流程使用本地 Steam 索引、归一化标签相似度、排除标签和 Steam 评测口碑；安装 `astrbot_plugin_steam_price_heybox` 时，会额外补充 Steam 当前价、历史最低价、促销状态和小黑盒跨区价格摘要。LLM 只负责抽取用户需求里的额外标签、排除项和相似游戏名，不直接编造推荐事实。
+无需 API Key 即可运行的 Steam/PC 游戏推荐插件。推荐流程使用本地 Steam 索引、归一化标签相似度、排除标签和 Steam 评测口碑；安装 `astrbot_plugin_steam_price_heybox` 时，会额外补充 Steam 当前价、历史最低价、促销状态和小黑盒跨区价格摘要。LLM 只负责抽取用户需求里的额外标签、排除项、相似游戏名和多样性模式，不直接编造推荐事实。
 
 ## 功能
 
 - `/gamerec <自然语言需求>`：根据平台、类型、排除项、人数、预算、语言、难度、氛围等偏好推荐游戏；兼容 alias：`/游戏推荐`。
+- `/gamerec_retry [补充要求]`：基于最近一次 `/gamerec` 换一批推荐，并排除已展示结果；兼容 alias：`/重新推荐`、`/换一批`。
 - `/accountbind [steam] <SteamID64|好友码>`：绑定当前聊天用户的 Steam 账号；兼容 alias：`/账号绑定`。
 - `/unplayedrec`：从已绑定 Steam 游戏库中随机推荐一款未游玩且 Steam 评价过线的游戏；兼容 alias：`/未玩推荐`。
 - `/gamedesc <游戏名>`：查询游戏基础资料，并在可用时补充 Steam 价格；兼容 alias：`/游戏详情`。
 - 平台覆盖：当前版本仅支持 Steam/PC，检测到 Switch、PlayStation、Xbox 等平台会明确提示。
 - `/gamerec` 和 `/游戏推荐` 支持前置库过滤参数：`排除已有` / `exclude-owned` 会排除 Steam 游戏库中已有的候选；`仅查看已有` / `only-owned` 只保留库内已有的候选。
-- 推荐参考 SteamPeek 思路，优先按归一化标签相似度、排除标签、评测数量和好评率排序，而不是只看评分。
+- 推荐参考 SteamPeek 思路，优先按归一化标签相似度、排除标签、评测数量和好评率排序，而不是只看评分；默认严格匹配同题材/同机制，LLM 只有在用户明确表达更多样、不同题材/玩法、避免同质化等意图时才提高多样性。
 - 使用 SQLite 缓存 Steam 响应和推荐索引，减少重复请求。
+- 使用 SQLite 保存最近 30 分钟的推荐上下文，用于不满意时重新推荐。
 - 价格查询全部通过 `astrbot_plugin_steam_price_heybox`；本插件不直接接入第三方价格 API。
 
 ## 安装
@@ -49,6 +51,9 @@ pip install -r requirements.txt
 /未玩推荐
 /gamerec 排除已有 推荐几个 Steam 合作解谜游戏
 /游戏推荐 仅查看已有 找几个适合双人的轻松游戏
+/gamerec 更多样 推荐几个 Steam 合作游戏，别太同质
+/重新推荐
+/换一批 不要恐怖，预算 100 以内
 /gamedesc It Takes Two
 ```
 
@@ -58,6 +63,8 @@ pip install -r requirements.txt
 - `排除已有` / `仅查看已有` / `/unplayedrec` 依赖 `steam_api_key` 和公开可读的 Steam 游戏库；未绑定、未配置 key、资料隐私不可见或接口失败时，会直接提示错误。
 - `/unplayedrec` 将 Steam `playtime_forever` 为 0 的条目视为未游玩，并沿用 `steam_min_review_count` 与 `steam_min_positive_ratio` 作为评价门槛。
 - Steam 索引推荐仅覆盖 Steam/PC；Nintendo Switch、PlayStation、Xbox 等跨平台请求会返回范围提示。
+- `/重新推荐` / `/换一批` 只复用最近 30 分钟内当前聊天用户的 `/gamerec` 结果，不会复用 `/unplayedrec` 或 `/gamedesc`。
+- 多样性模式由 LLM 从用户描述中解析；LLM 不可用、字段缺失或返回非法值时固定使用严格匹配。
 - 预算会参与软排序：当前价在预算内会加分，超预算会提示，但不会直接过滤候选。
 - Steam 的中文支持数据可能不完整；结果中未确认时会显示“不确定”或提醒以商店页面为准。
 - 多人/合作、难度、氛围主要依据 Steam categories/genres、描述和规则推断，可能不完整。
