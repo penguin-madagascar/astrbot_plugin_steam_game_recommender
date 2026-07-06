@@ -57,6 +57,8 @@ class SteamGameIndexService:
         limit: int,
         profile_tag_weights: dict[str, float] | None = None,
         diversity_mode: str = DIVERSITY_STRICT,
+        excluded_appids: list[int] | None = None,
+        excluded_titles: list[str] | None = None,
     ) -> list[RankedGame]:
         if preference.platforms and not has_supported_steam_platform(preference):
             return []
@@ -68,6 +70,7 @@ class SteamGameIndexService:
             self.min_positive_ratio,
             profile_tag_weights=profile_tag_weights,
         )
+        ranked = exclude_previously_shown(ranked, excluded_appids, excluded_titles)
         if ranked:
             return select_results_by_diversity(ranked, limit, diversity_mode)
 
@@ -79,6 +82,7 @@ class SteamGameIndexService:
             self.min_positive_ratio,
             profile_tag_weights=profile_tag_weights,
         )
+        ranked = exclude_previously_shown(ranked, excluded_appids, excluded_titles)
         return select_results_by_diversity(ranked, limit, diversity_mode)
 
     async def load_entries(self) -> list[GameCandidate]:
@@ -208,6 +212,25 @@ def rank_entries(
         min_positive_ratio,
         profile_tag_weights=profile_tag_weights,
     )
+
+
+def exclude_previously_shown(
+    games: list[RankedGame],
+    excluded_appids: list[int] | None,
+    excluded_titles: list[str] | None,
+) -> list[RankedGame]:
+    appids = {int(appid) for appid in excluded_appids or []}
+    titles = {normalize_text(title) for title in excluded_titles or [] if title}
+    if not appids and not titles:
+        return games
+    return [
+        game
+        for game in games
+        if not (
+            (game.appid is not None and int(game.appid) in appids)
+            or normalize_text(game.title) in titles
+        )
+    ]
 
 
 def reference_candidates(
