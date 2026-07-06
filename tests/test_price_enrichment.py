@@ -73,6 +73,9 @@ class CommandRegistrationTest(unittest.TestCase):
         self.assertIn("账号绑定", commands["accountbind"])
         self.assertIn("unplayedrec", commands)
         self.assertIn("未玩推荐", commands["unplayedrec"])
+        self.assertIn("gamerec_retry", commands)
+        self.assertIn("重新推荐", commands["gamerec_retry"])
+        self.assertIn("换一批", commands["gamerec_retry"])
 
     def test_game_data_api_key_is_not_required_in_config_schema(self) -> None:
         schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,14 @@ from .services.played_filter import (
 )
 from .services.preference_parser import PreferenceParser
 from .services.recommendation_limits import effective_result_limit
+from .services.recommendation_memory import (
+    RecommendationMemory,
+    append_shown_games,
+    build_recommendation_memory,
+    load_recommendation_memory,
+    save_recommendation_memory,
+)
+from .services.retry_command import parse_retry_request
 from .services.steam_index import (
     STEAM_INDEX_FALLBACK_WARNING,
     SteamGameIndexService,
@@ -45,7 +55,7 @@ from .services.unplayed_picker import (
     pick_random_unplayed_game,
 )
 from .services.user_profile import load_bound_user_tag_weights
-from .storage.models import AccountBinding
+from .storage.models import AccountBinding, GamePreference, RankedGame
 from .storage.repository import SQLiteCacheRepository
 
 PLUGIN_NAME = "astrbot_plugin_game_recommender"
@@ -54,6 +64,24 @@ PLUGIN_DESCRIPTION = (
     "基于 Steam/PC 公开数据、本地索引和标签相似度推荐游戏；"
     "当前版本暂不做跨平台候选召回。"
 )
+
+
+@dataclass(frozen=True)
+class PreparedRecommendation:
+    raw_query: str
+    preference: GamePreference
+    diversity_mode: str
+    result_limit: int
+
+
+@dataclass(frozen=True)
+class RecommendationRun:
+    messages: list[str]
+    ranked_games: list[RankedGame]
+    preference: GamePreference
+    diversity_mode: str
+    result_limit: int
+    raw_query: str
 
 
 @register(
@@ -127,60 +155,17 @@ class GameRecommenderPlugin(Star):
             return
 
         try:
-            command_filter = parse_library_filter_command(raw_text)
-            text = command_filter.query
-            if not text:
-                yield event.plain_result(
-                    "请输入游戏需求，例如：/gamerec 排除已有 Steam 双人合作解谜"
-                )
-                return
-            text_filter_mode = detect_library_filter_mode(text)
-            preference = await self.preference_parser.parse_preference(event, text)
-            diversity_mode = getattr(preference, "diversity_mode", DIVERSITY_STRICT)
-            library_filter_mode = resolve_library_filter_mode(
-                command_filter.mode,
-                text_filter_mode,
-                preference.library_filter_mode,
-            )
-            preference.library_filter_mode = library_filter_mode
-            if warning := steam_only_scope_warning_for(preference):
-                preference.parse_warnings.append(warning)
-            if not has_supported_steam_platform(preference):
-                yield event.plain_result(preference.parse_warnings[-1])
-                return
-            result_limit = effective_result_limit(self.max_results, preference.result_count)
-            candidate_pool_size = None
-            if preference.budget is not None or self.price_bridge.is_available():
-                candidate_pool_size = max(result_limit * 3, result_limit)
-            if library_filter_mode:
-                candidate_pool_size = max(
-                    candidate_pool_size or result_limit,
-                    result_limit * 6,
-                    result_limit + 20,
-                )
-            profile_tag_weights = await self._user_profile_tag_weights(event)
-            ranked_games = await self._recommend_with_steam_index(
-                preference,
-                limit=candidate_pool_size or result_limit,
-                profile_tag_weights=profile_tag_weights,
-                diversity_mode=diversity_mode,
-            )
-            if library_filter_mode:
-                ranked_games = await self._filter_library_games(
+            retry_request = parse_retry_request(raw_text)
+            if retry_request.is_retry:
+                messages = await self._retry_recommendation_messages(
                     event,
-                    preference,
-                    ranked_games,
-                    library_filter_mode,
+                    retry_request.supplement,
                 )
-            ranked_games = await self.price_bridge.enrich_ranked_games(ranked_games, preference)
-            messages = await format_recommendation_messages_with_llm(
-                self.context,
-                event,
-                self.provider_id,
-                preference,
-                ranked_games,
-                limit=result_limit,
-            )
+            else:
+                prepared = await self._prepare_recommendation(event, raw_text)
+                run = await self._run_recommendation(event, prepared)
+                await self._save_recent_recommendation(event, run)
+                messages = run.messages
         except SteamApiError as exc:
             logger.warning(f"Steam game recommendation failed: {exc}")
             yield event.plain_result(f"Steam 查询失败：{exc}")
@@ -193,11 +178,29 @@ class GameRecommenderPlugin(Star):
             yield event.plain_result(f"游戏推荐失败：{exc}")
             return
 
-        forward_chain = build_forward_message_chain(messages)
-        if forward_chain and hasattr(event, "chain_result"):
-            yield event.chain_result(forward_chain)
-        else:
-            yield event.plain_result("\n\n".join(messages))
+        yield self._recommendation_result(event, messages)
+
+    @filter.command(
+        "gamerec_retry",
+        alias={"重新推荐", "换一批"},
+        desc="基于最近一次游戏推荐换一批候选。",
+    )
+    async def retry_recommend_games(self, event: AstrMessageEvent, query: GreedyStr):
+        try:
+            messages = await self._retry_recommendation_messages(event, str(query).strip())
+        except SteamApiError as exc:
+            logger.warning(f"Steam retry recommendation failed: {exc}")
+            yield event.plain_result(f"Steam 查询失败：{exc}")
+            return
+        except LibraryFilterModeError as exc:
+            yield event.plain_result(f"游戏库过滤参数错误：{exc}")
+            return
+        except Exception as exc:
+            logger.exception("Retry game recommendation failed")
+            yield event.plain_result(f"重新推荐失败：{exc}")
+            return
+
+        yield self._recommendation_result(event, messages)
 
     @filter.command(
         "gamedesc",
@@ -336,12 +339,16 @@ class GameRecommenderPlugin(Star):
         limit: int,
         profile_tag_weights: dict[str, float] | None = None,
         diversity_mode: str = "strict",
+        excluded_appids: list[int] | None = None,
+        excluded_titles: list[str] | None = None,
     ):
         ranked_games = await self.steam_index.recommend(
             preference,
             limit=limit,
             profile_tag_weights=profile_tag_weights,
             diversity_mode=diversity_mode,
+            excluded_appids=excluded_appids,
+            excluded_titles=excluded_titles,
         )
         if ranked_games:
             return ranked_games
@@ -365,6 +372,181 @@ class GameRecommenderPlugin(Star):
         except Exception as exc:
             logger.debug(f"Steam user profile weights skipped: {exc}")
             return {}
+
+    async def _prepare_recommendation(
+        self,
+        event: AstrMessageEvent,
+        raw_text: str,
+    ) -> PreparedRecommendation:
+        command_filter = parse_library_filter_command(raw_text)
+        text = command_filter.query
+        if not text:
+            raise LibraryFilterModeError(
+                "请输入游戏需求，例如：/gamerec 排除已有 Steam 双人合作解谜"
+            )
+        text_filter_mode = detect_library_filter_mode(text)
+        preference = await self.preference_parser.parse_preference(event, text)
+        diversity_mode = getattr(preference, "diversity_mode", DIVERSITY_STRICT)
+        library_filter_mode = resolve_library_filter_mode(
+            command_filter.mode,
+            text_filter_mode,
+            preference.library_filter_mode,
+        )
+        preference.library_filter_mode = library_filter_mode
+        if warning := steam_only_scope_warning_for(preference):
+            preference.parse_warnings.append(warning)
+        if not has_supported_steam_platform(preference):
+            raise LibraryFilterModeError(preference.parse_warnings[-1])
+        result_limit = effective_result_limit(self.max_results, preference.result_count)
+        return PreparedRecommendation(
+            raw_query=raw_text,
+            preference=preference,
+            diversity_mode=diversity_mode,
+            result_limit=result_limit,
+        )
+
+    async def _run_recommendation(
+        self,
+        event: AstrMessageEvent,
+        prepared: PreparedRecommendation,
+        excluded_appids: list[int] | None = None,
+        excluded_titles: list[str] | None = None,
+    ) -> RecommendationRun:
+        preference = prepared.preference
+        result_limit = prepared.result_limit
+        candidate_pool_size = None
+        if preference.budget is not None or self.price_bridge.is_available():
+            candidate_pool_size = max(result_limit * 3, result_limit)
+        if preference.library_filter_mode:
+            candidate_pool_size = max(
+                candidate_pool_size or result_limit,
+                result_limit * 6,
+                result_limit + 20,
+            )
+        if excluded_appids or excluded_titles:
+            candidate_pool_size = max(
+                candidate_pool_size or result_limit,
+                result_limit * 6,
+                result_limit + 20,
+            )
+        profile_tag_weights = await self._user_profile_tag_weights(event)
+        ranked_games = await self._recommend_with_steam_index(
+            preference,
+            limit=candidate_pool_size or result_limit,
+            profile_tag_weights=profile_tag_weights,
+            diversity_mode=prepared.diversity_mode,
+            excluded_appids=excluded_appids,
+            excluded_titles=excluded_titles,
+        )
+        if preference.library_filter_mode:
+            ranked_games = await self._filter_library_games(
+                event,
+                preference,
+                ranked_games,
+                preference.library_filter_mode,
+            )
+        ranked_games = await self.price_bridge.enrich_ranked_games(ranked_games, preference)
+        messages = await format_recommendation_messages_with_llm(
+            self.context,
+            event,
+            self.provider_id,
+            preference,
+            ranked_games,
+            limit=result_limit,
+        )
+        return RecommendationRun(
+            messages=messages,
+            ranked_games=ranked_games,
+            preference=preference,
+            diversity_mode=prepared.diversity_mode,
+            result_limit=result_limit,
+            raw_query=prepared.raw_query,
+        )
+
+    async def _retry_recommendation_messages(
+        self,
+        event: AstrMessageEvent,
+        supplement: str = "",
+    ) -> list[str]:
+        chat_platform, chat_user_id = chat_identity_from_event(event)
+        memory = await load_recommendation_memory(
+            chat_platform,
+            chat_user_id,
+            self.cache,
+        )
+        if memory is None:
+            return [
+                "没有可用于重新推荐的近期记录。请先使用 /gamerec 提出一次游戏推荐需求。"
+            ]
+
+        if supplement:
+            prepared = await self._prepare_recommendation(
+                event,
+                f"{memory.raw_query} {supplement}".strip(),
+            )
+        else:
+            prepared = PreparedRecommendation(
+                raw_query=memory.raw_query,
+                preference=memory.preference,
+                diversity_mode=memory.diversity_mode,
+                result_limit=memory.result_limit,
+            )
+        run = await self._run_recommendation(
+            event,
+            prepared,
+            excluded_appids=memory.shown_appids,
+            excluded_titles=memory.shown_titles,
+        )
+        await self._save_retry_memory(chat_platform, chat_user_id, memory, run)
+        return run.messages
+
+    async def _save_recent_recommendation(
+        self,
+        event: AstrMessageEvent,
+        run: RecommendationRun,
+    ) -> None:
+        if not run.ranked_games:
+            return
+        chat_platform, chat_user_id = chat_identity_from_event(event)
+        memory = build_recommendation_memory(
+            chat_platform=chat_platform,
+            chat_user_id=chat_user_id,
+            raw_query=run.raw_query,
+            preference=run.preference,
+            diversity_mode=run.diversity_mode,
+            result_limit=run.result_limit,
+            games=run.ranked_games[: run.result_limit],
+        )
+        await save_recommendation_memory(self.cache, memory)
+
+    async def _save_retry_memory(
+        self,
+        chat_platform: str,
+        chat_user_id: str,
+        memory: RecommendationMemory,
+        run: RecommendationRun,
+    ) -> None:
+        if not run.ranked_games:
+            return
+        updated = RecommendationMemory(
+            chat_platform=chat_platform,
+            chat_user_id=chat_user_id,
+            raw_query=run.raw_query,
+            preference=run.preference,
+            diversity_mode=run.diversity_mode,
+            result_limit=run.result_limit,
+            shown_appids=list(memory.shown_appids),
+            shown_titles=list(memory.shown_titles),
+            created_at=time.time(),
+        )
+        updated = append_shown_games(updated, run.ranked_games[: run.result_limit])
+        await save_recommendation_memory(self.cache, updated)
+
+    def _recommendation_result(self, event: AstrMessageEvent, messages: list[str]):
+        forward_chain = build_forward_message_chain(messages)
+        if forward_chain and hasattr(event, "chain_result"):
+            return event.chain_result(forward_chain)
+        return event.plain_result("\n\n".join(messages))
 
     async def _filter_library_games(
         self,
