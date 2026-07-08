@@ -19,6 +19,8 @@ STEAM_ONLY_SCOPE_WARNING = (
     "当前版本仅覆盖 Steam/PC 推荐，暂不支持 Switch、PlayStation、Xbox 等跨平台候选。"
 )
 STEAM_INDEX_PLATFORMS = {"steam", "pc"}
+AAA_SEARCH_TERMS = ["popular", "action adventure", "open world", "story rich", "rpg"]
+AAA_INTENT_MARKERS = {"aaa", "3a", "triple-a", "triple a", "大作", "单机大作"}
 
 
 class SteamIndexCache(Protocol):
@@ -250,6 +252,8 @@ def reference_candidates(
 
 def search_terms_for(preference: GamePreference, profile: SteamTagProfile) -> list[str]:
     terms: list[str] = []
+    if has_aaa_intent(preference):
+        terms.extend(AAA_SEARCH_TERMS)
     terms.extend(preference.reference_games_like[:3])
     terms.extend(preference.reference_search_terms[:3])
     include = [tag.replace("_", " ") for tag in profile.include_tags[:6]]
@@ -261,6 +265,12 @@ def search_terms_for(preference: GamePreference, profile: SteamTagProfile) -> li
     if not terms:
         terms.append("popular co-op")
     return dedupe_texts(terms)
+
+
+def has_aaa_intent(preference: GamePreference) -> bool:
+    values = [*preference.genres_like, *preference.extra_tags]
+    normalized = {normalize_text(value) for value in values}
+    return bool(normalized & AAA_INTENT_MARKERS)
 
 
 def reference_terms_for(preference: GamePreference) -> list[str]:

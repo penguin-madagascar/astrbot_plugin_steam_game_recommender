@@ -41,6 +41,9 @@ PREFERENCE_SCHEMA_HINT = """
 - reference_games_like 只放用户提到的相似游戏名，不要把相似游戏扩写成推荐结果。
 - reference_search_terms 放参考游戏的 Steam 搜索友好标题候选，例如“黑暗之魂”对应 “Dark Souls”。
 - genres_dislike 放排除标签，例如恐怖、魂类、肉鸽、纯单人、pvp。
+- 用户说 3A、AAA、triple-A、大作、单机大作时，按宽泛的 Steam/PC 大作意图处理：
+  genres_like 可包含 action、adventure、rpg；extra_tags 包含 aaa、story rich、open world。
+  不要把 3A 当成推荐数量，不要因此编造具体游戏名。
 - library_filter_mode 只在用户明确要求时填写：排除已有/exclude-owned 为 "exclude_owned"；仅查看已有/only-owned 为 "only_owned"；否则为 null。
 - diversity_mode 只允许 "strict"、"balanced"、"high"：
   默认使用 "strict"；用户要求更像、同类优先、严格匹配时也使用 "strict"。

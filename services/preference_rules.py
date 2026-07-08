@@ -15,6 +15,9 @@ SOULSLIKE_TERMS = (
     "dark souls",
 )
 
+AAA_GENRE_TAGS = ["action", "adventure", "rpg"]
+AAA_EXTRA_TAGS = ["aaa", "story rich", "open world"]
+
 
 def infer_preference_from_text(text: str) -> GamePreference:
     lower = text.lower()
@@ -96,6 +99,8 @@ def infer_preference_from_text(text: str) -> GamePreference:
     reference_like = extract_reference_games(text)
     if references_imply_soulslike(reference_like):
         genres_like = merge_lists(genres_like, ["soulslike"])
+    if has_aaa_intent(lower):
+        genres_like = merge_lists(genres_like, AAA_GENRE_TAGS)
     extra_tags = keyword_hits(
         lower,
         {
@@ -109,6 +114,8 @@ def infer_preference_from_text(text: str) -> GamePreference:
     )
     if references_imply_soulslike(reference_like):
         extra_tags = merge_lists(extra_tags, ["soulslike"])
+    if has_aaa_intent(lower):
+        extra_tags = merge_lists(extra_tags, AAA_EXTRA_TAGS)
     extra_tags = expand_related_extra_tags(extra_tags)
     library_filter_mode = detect_library_filter_mode(text)
 
@@ -195,6 +202,14 @@ def search_terms_from_reference_titles(titles: list[str]) -> list[str]:
 
 def references_imply_soulslike(titles: list[str]) -> bool:
     return any("魂" in title or "souls" in title.lower() for title in titles)
+
+
+def has_aaa_intent(text: str) -> bool:
+    lower = text.lower()
+    return (
+        bool(re.search(r"(?<![0-9a-z])(?:3a|aaa)(?![0-9a-z])", lower))
+        or any(term in lower for term in ("triple-a", "triple a", "大作"))
+    )
 
 
 def expand_related_extra_tags(tags: list[str]) -> list[str]:

@@ -31,11 +31,16 @@ class TagNormalizerTest(unittest.TestCase):
         self.assertEqual(normalizer.normalize_tag("Shared/Split Screen Co-op"), "local_coop")
         self.assertEqual(normalizer.normalize_tag("轻松"), "relaxing")
         self.assertEqual(normalizer.normalize_tag("Simplified Chinese"), "chinese")
+        self.assertEqual(normalizer.normalize_tag("开放世界"), "open_world")
+        self.assertEqual(normalizer.normalize_tag("Story Rich"), "story_rich")
 
         tags = normalizer.canonical_tags_from_terms(
-            ["双人", "Local Co-op", "休闲", "Puzzle", "恐怖"]
+            ["双人", "Local Co-op", "休闲", "Puzzle", "恐怖", "剧情向"]
         )
-        self.assertEqual(tags, ["co_op", "local_coop", "casual", "puzzle", "horror"])
+        self.assertEqual(
+            tags,
+            ["co_op", "local_coop", "casual", "puzzle", "horror", "story_rich"],
+        )
 
     def test_maps_specific_mechanic_tags_without_broad_false_positive(self) -> None:
         normalizer = optional_import("astrbot_plugin_game_recommender.services.tag_normalizer")
@@ -131,8 +136,61 @@ class SimilarityRankerTest(unittest.TestCase):
         self.assertIn("crafting", profile.include_tags)
         self.assertIn("relaxing", profile.include_tags)
 
+    def test_aaa_profile_prioritizes_broad_blockbuster_matches(self) -> None:
+        ranker = optional_import("astrbot_plugin_game_recommender.services.similarity_ranker")
+        profile = ranker.build_profile_from_preference(
+            GamePreference(
+                extra_tags=["aaa", "open world", "story rich"],
+                genres_like=["action", "adventure", "rpg"],
+            )
+        )
+
+        self.assertIn("open_world", profile.include_tags)
+        self.assertIn("story_rich", profile.include_tags)
+
+        ranked = ranker.rank_steam_candidates(
+            [
+                steam_index_game(
+                    "High Review Generic Action",
+                    tags=["Action", "Adventure", "RPG"],
+                    review_total=90000,
+                    review_positive_ratio=0.96,
+                ),
+                steam_index_game(
+                    "Focused AAA Adventure",
+                    tags=["Action", "Adventure", "RPG", "Open World", "Story Rich"],
+                    review_total=500,
+                    review_positive_ratio=0.80,
+                ),
+            ],
+            profile,
+            min_review_count=50,
+            min_positive_ratio=0.65,
+        )
+
+        self.assertEqual(
+            [game.title for game in ranked],
+            ["Focused AAA Adventure", "High Review Generic Action"],
+        )
+
 
 class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
+    def test_aaa_request_uses_blockbuster_search_terms(self) -> None:
+        index_module = optional_import("astrbot_plugin_game_recommender.services.steam_index")
+        ranker = optional_import("astrbot_plugin_game_recommender.services.similarity_ranker")
+        preference = GamePreference(extra_tags=["aaa"])
+
+        terms = index_module.search_terms_for(
+            preference,
+            ranker.build_profile_from_preference(preference),
+        )
+
+        self.assertEqual(
+            terms[:5],
+            ["popular", "action adventure", "open world", "story rich", "rpg"],
+        )
+        self.assertNotIn("popular co-op", terms)
+
     async def test_enrich_candidate_persists_description_mechanic_tags(self) -> None:
         index_module = optional_import("astrbot_plugin_game_recommender.services.steam_index")
         service = index_module.SteamGameIndexService(

@@ -108,6 +108,17 @@ class PreferenceRulesTest(unittest.TestCase):
         self.assertIn("action", preference.extra_tags)
         self.assertIn("rpg", preference.extra_tags)
 
+    def test_aaa_request_extracts_broad_blockbuster_profile(self) -> None:
+        preference = infer_preference_from_text("推荐一下3a游戏")
+
+        self.assertIn("action", preference.genres_like)
+        self.assertIn("adventure", preference.genres_like)
+        self.assertIn("rpg", preference.genres_like)
+        self.assertIn("aaa", preference.extra_tags)
+        self.assertIn("story rich", preference.extra_tags)
+        self.assertIn("open world", preference.extra_tags)
+        self.assertEqual(preference.result_count, 5)
+
     def test_infers_library_filter_mode_from_text(self) -> None:
         self.assertEqual(
             infer_preference_from_text("推荐几个合作游戏，排除已有").library_filter_mode,
