@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from typing import Any
 
 from ..storage.models import GameCandidate
 
@@ -36,6 +37,7 @@ TAG_ALIASES = {
     "休闲": "casual",
     "relaxing": "relaxing",
     "cozy": "relaxing",
+    "放松": "relaxing",
     "轻松": "relaxing",
     "治愈": "relaxing",
     "adventure": "adventure",
@@ -63,6 +65,12 @@ TAG_ALIASES = {
     "家庭": "family",
     "farming": "farming",
     "farm": "farming",
+    "farming sim": "farming_sim",
+    "农场模拟": "farming_sim",
+    "life sim": "life_sim",
+    "生活模拟": "life_sim",
+    "pixel graphics": "pixel_graphics",
+    "像素图形": "pixel_graphics",
     "种田": "farming",
     "农场": "farming",
     "crafting": "crafting",
@@ -129,17 +137,42 @@ TAG_ALIASES = {
     "繁体中文": "chinese",
 }
 
-CANONICAL_TAGS = set(TAG_ALIASES.values())
+STEAM_TAG_ALIASES: dict[str, str] = {}
+STEAM_CANONICAL_TAGS: set[str] = set()
+
+
+def register_steam_tag_aliases(tags: list[dict[str, Any]]) -> None:
+    for item in tags:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "")
+        key = normalize_key(name)
+        if not key:
+            continue
+        canonical = steam_tag_canonical_key(name)
+        if canonical:
+            STEAM_TAG_ALIASES[key] = canonical
+            STEAM_CANONICAL_TAGS.add(canonical)
+
+
+def steam_tag_canonical_key(value: str) -> str:
+    return normalize_key(value).replace(" ", "_")
+
+
+def canonical_tags() -> set[str]:
+    return set(TAG_ALIASES.values()) | STEAM_CANONICAL_TAGS
 
 
 def normalize_tag(value: str) -> str | None:
     key = normalize_key(value)
     if not key:
         return None
+    if key in STEAM_TAG_ALIASES:
+        return STEAM_TAG_ALIASES[key]
     if key in TAG_ALIASES:
         return TAG_ALIASES[key]
     compact = key.replace(" ", "_")
-    return compact if compact in CANONICAL_TAGS else None
+    return compact if compact in canonical_tags() else None
 
 
 def canonical_tags_from_terms(values: list[str] | tuple[str, ...]) -> list[str]:

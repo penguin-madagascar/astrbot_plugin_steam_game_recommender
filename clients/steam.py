@@ -17,6 +17,7 @@ STEAM_APP_DETAILS_URL = "https://store.steampowered.com/api/appdetails"
 STEAM_APP_REVIEWS_URL = "https://store.steampowered.com/appreviews/{appid}"
 STEAM_OWNED_GAMES_URL = "https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/"
 STEAM_STORE_BASE_URL = "https://store.steampowered.com/app"
+STEAM_POPULAR_TAGS_URL = "https://store.steampowered.com/tagdata/populartags/english"
 
 STEAM_GENRE_TERMS = {
     "action": "action",
@@ -166,6 +167,28 @@ class SteamClient:
             recent_positive_ratio=positive_ratio,
         )
 
+    async def get_popular_tags(self) -> list[dict[str, Any]]:
+        data = await self._get_json(STEAM_POPULAR_TAGS_URL, {})
+        if not isinstance(data, list):
+            return []
+
+        tags: list[dict[str, Any]] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            tagid = optional_int(item.get("tagid"))
+            name = optional_text(item.get("name"))
+            if tagid is not None and name:
+                tags.append({"tagid": tagid, "name": name})
+        return tags
+
+    async def get_store_page_tags(self, appid: int) -> list[str]:
+        text = await self._get_text(
+            f"{STEAM_STORE_BASE_URL}/{int(appid)}/",
+            {"l": "english"},
+        )
+        return parse_store_page_tags(text)
+
     def has_web_api_key(self) -> bool:
         return bool(self.steam_api_key)
 
@@ -221,6 +244,22 @@ class SteamClient:
 
         await self.cache.set_json(cache_key, data)
         return data
+
+    async def _get_text(self, url: str, params: dict[str, Any]) -> str:
+        cache_key = self._cache_key(url, params)
+        cached = await self.cache.get_json(cache_key, self.cache_ttl_hours)
+        if cached is not None:
+            return str(cached)
+
+        try:
+            response = await self.client.get(url, params=params)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise SteamApiError(f"Steam 请求失败：{exc}") from exc
+
+        text = str(getattr(response, "text", "") or "")
+        await self.cache.set_json(cache_key, text)
+        return text
 
     @staticmethod
     def _cache_key(url: str, params: dict[str, Any]) -> str:
@@ -304,6 +343,19 @@ def parse_languages(value: Any) -> list[str]:
     if not text:
         return []
     return unique_texts(re.split(r"[,，、/]+", text))
+
+
+def parse_store_page_tags(text: str) -> list[str]:
+    tags = []
+    for match in re.finditer(
+        r"<a\b[^>]*class=\"[^\"]*\bapp_tag\b[^\"]*\"[^>]*>(.*?)</a>",
+        text,
+        flags=re.I | re.S,
+    ):
+        tag = clean_html_text(match.group(1))
+        if tag:
+            tags.append(tag)
+    return unique_texts(tags)
 
 
 def clean_html_text(value: Any) -> str:

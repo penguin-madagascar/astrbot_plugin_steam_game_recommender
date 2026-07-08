@@ -113,6 +113,69 @@ class SteamClientTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(http_client.call_count, 1)
 
+    async def test_popular_tags_fetches_english_tag_vocabulary_and_uses_cache(self) -> None:
+        cache = MemoryCache()
+        http_client = FakeHttpClient(
+            {
+                "https://store.steampowered.com/tagdata/populartags/english": [
+                    {"tagid": 87918, "name": "Farming Sim"},
+                    {"tagid": 10235, "name": "Life Sim"},
+                    {"tagid": 3964, "name": "Pixel Graphics"},
+                    {"tagid": "bad", "name": ""},
+                ],
+            }
+        )
+        client = SteamClient(http_client, cache, cache_ttl_hours=24)
+
+        tags = await client.get_popular_tags()
+
+        self.assertEqual(
+            tags,
+            [
+                {"tagid": 87918, "name": "Farming Sim"},
+                {"tagid": 10235, "name": "Life Sim"},
+                {"tagid": 3964, "name": "Pixel Graphics"},
+            ],
+        )
+        self.assertEqual(http_client.last_params, {})
+
+        cached = await client.get_popular_tags()
+
+        self.assertEqual(cached, tags)
+        self.assertEqual(http_client.call_count, 1)
+
+    async def test_store_page_tags_fetches_english_user_tags_and_uses_cache(self) -> None:
+        cache = MemoryCache()
+        http_client = FakeHttpClient(
+            {
+                "https://store.steampowered.com/app/413150/": (
+                    "<html><body>"
+                    "Popular user-defined tags for this product:"
+                    '<a class="app_tag" href="/tags/en/Farming%20Sim/">Farming Sim</a>'
+                    '<a class="app_tag" href="/tags/en/Pixel%20Graphics/">Pixel Graphics</a>'
+                    '<a class="app_tag" href="/tags/en/Multiplayer/">Multiplayer</a>'
+                    '<a class="app_tag" href="/tags/en/Life%20Sim/">Life Sim</a>'
+                    '<a class="app_tag" href="/tags/en/RPG/">RPG</a>'
+                    '<a class="app_tag" href="/tags/en/Relaxing/">Relaxing</a>'
+                    "</body></html>"
+                ),
+            }
+        )
+        client = SteamClient(http_client, cache, cache_ttl_hours=24)
+
+        tags = await client.get_store_page_tags(413150)
+
+        self.assertEqual(
+            tags,
+            ["Farming Sim", "Pixel Graphics", "Multiplayer", "Life Sim", "RPG", "Relaxing"],
+        )
+        self.assertEqual(http_client.last_params, {"l": "english"})
+
+        cached = await client.get_store_page_tags(413150)
+
+        self.assertEqual(cached, tags)
+        self.assertEqual(http_client.call_count, 1)
+
     async def test_owned_games_requires_steam_web_api_key(self) -> None:
         client = SteamClient(FakeHttpClient({}), MemoryCache(), cache_ttl_hours=24)
 
@@ -135,18 +198,19 @@ def steam_detail_payload() -> dict[str, Any]:
 
 
 class FakeResponse:
-    def __init__(self, payload: dict[str, Any]) -> None:
+    def __init__(self, payload: Any) -> None:
         self.payload = payload
+        self.text = str(payload)
 
     def raise_for_status(self) -> None:
         return None
 
-    def json(self) -> dict[str, Any]:
+    def json(self) -> Any:
         return self.payload
 
 
 class FakeHttpClient:
-    def __init__(self, responses: dict[str, dict[str, Any]]) -> None:
+    def __init__(self, responses: dict[str, Any]) -> None:
         self.responses = responses
         self.call_count = 0
         self.last_params: dict[str, Any] = {}

@@ -9,7 +9,7 @@ from .similarity_ranker import (
     rank_steam_candidates,
 )
 from .diversity import DIVERSITY_STRICT, select_results_by_diversity
-from .tag_normalizer import candidate_canonical_tags
+from .tag_normalizer import candidate_canonical_tags, register_steam_tag_aliases
 
 STEAM_INDEX_CACHE_KEY = "steam_index:entries"
 STEAM_INDEX_FALLBACK_WARNING = (
@@ -64,6 +64,7 @@ class SteamGameIndexService:
     ) -> list[RankedGame]:
         if preference.platforms and not has_supported_steam_platform(preference):
             return []
+        await self.ensure_steam_tag_aliases()
         entries = await self.load_entries()
         ranked = rank_entries(
             entries,
@@ -86,6 +87,17 @@ class SteamGameIndexService:
         )
         ranked = exclude_previously_shown(ranked, excluded_appids, excluded_titles)
         return select_results_by_diversity(ranked, limit, diversity_mode)
+
+    async def ensure_steam_tag_aliases(self) -> bool:
+        getter = getattr(self.steam_client, "get_popular_tags", None)
+        if not getter:
+            return False
+        try:
+            tags = await getter()
+        except Exception:
+            return False
+        register_steam_tag_aliases(tags)
+        return bool(tags)
 
     async def load_entries(self) -> list[GameCandidate]:
         payload = await self.cache.get_json(STEAM_INDEX_CACHE_KEY, self.ttl_hours)
@@ -154,16 +166,31 @@ class SteamGameIndexService:
         return entries
 
     async def enrich_candidate(self, candidate: GameCandidate) -> GameCandidate:
+        has_steam_tags = await self.ensure_steam_tag_aliases()
         data = dump_model(candidate)
         data["index_source"] = "steam_index"
-        canonical_tags = candidate_canonical_tags(candidate)
+        reasons = list(data.get("source_reasons") or [])
+        if has_steam_tags and "tag_enrichment:steam_popular_tags" not in reasons:
+            reasons.append("tag_enrichment:steam_popular_tags")
+        appid = data.get("appid")
+        if appid is not None and hasattr(self.steam_client, "get_store_page_tags"):
+            try:
+                store_tags = await self.steam_client.get_store_page_tags(int(appid))
+            except Exception:
+                store_tags = []
+            if store_tags:
+                data["tags"] = dedupe_texts([*(data.get("tags") or []), *store_tags])
+                if "tag_enrichment:steam_store_page_tags" not in reasons:
+                    reasons.append("tag_enrichment:steam_store_page_tags")
+        data["source_reasons"] = reasons
+
+        enriched_candidate = validate_candidate(data)
+        canonical_tags = candidate_canonical_tags(enriched_candidate)
         if canonical_tags:
             data["tags"] = dedupe_texts([*(data.get("tags") or []), *canonical_tags])
-            reasons = list(data.get("source_reasons") or [])
             if "tag_enrichment:steam_detail" not in reasons:
                 reasons.append("tag_enrichment:steam_detail")
             data["source_reasons"] = reasons
-        appid = data.get("appid")
         if appid is not None and hasattr(self.steam_client, "get_review_summary"):
             try:
                 summary = await self.steam_client.get_review_summary(int(appid))

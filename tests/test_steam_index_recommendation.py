@@ -42,11 +42,30 @@ class TagNormalizerTest(unittest.TestCase):
             ["co_op", "local_coop", "casual", "puzzle", "horror", "story_rich"],
         )
 
+    def test_registers_english_steam_tags_and_maps_chinese_aliases_to_them(self) -> None:
+        normalizer = optional_import("astrbot_plugin_game_recommender.services.tag_normalizer")
+
+        normalizer.register_steam_tag_aliases(
+            [
+                {"tagid": 87918, "name": "Farming Sim"},
+                {"tagid": 10235, "name": "Life Sim"},
+                {"tagid": 3964, "name": "Pixel Graphics"},
+            ]
+        )
+
+        self.assertEqual(normalizer.normalize_tag("Farming Sim"), "farming_sim")
+        self.assertEqual(normalizer.normalize_tag("农场模拟"), "farming_sim")
+        self.assertEqual(normalizer.normalize_tag("生活模拟"), "life_sim")
+        self.assertEqual(normalizer.normalize_tag("像素图形"), "pixel_graphics")
+
     def test_maps_specific_mechanic_tags_without_broad_false_positive(self) -> None:
         normalizer = optional_import("astrbot_plugin_game_recommender.services.tag_normalizer")
 
         self.assertEqual(normalizer.normalize_tag("Deckbuilding"), "deckbuilding")
-        self.assertEqual(normalizer.normalize_tag("Open World Survival Craft"), "open_world_survival_craft")
+        self.assertEqual(
+            normalizer.normalize_tag("Open World Survival Craft"),
+            "open_world_survival_craft",
+        )
         self.assertEqual(normalizer.normalize_tag("Choices Matter"), "choices_matter")
 
         terms = normalizer.extract_description_terms(
@@ -219,6 +238,73 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("farming", enriched.tags)
         self.assertIn("relaxing", enriched.tags)
 
+    async def test_enrich_candidate_loads_english_steam_tags_and_store_page_tags(self) -> None:
+        index_module = optional_import("astrbot_plugin_game_recommender.services.steam_index")
+        service = index_module.SteamGameIndexService(
+            steam_client=TagAwareSteamClient(),
+            cache=MemoryCache({}),
+            min_review_count=0,
+        )
+
+        enriched = await service.enrich_candidate(
+            GameCandidate(
+                title="Stardew Valley",
+                appid=413150,
+                platforms=["PC"],
+                genres=["RPG", "Simulation"],
+                tags=["Single-player"],
+                stores=["Steam"],
+            )
+        )
+
+        self.assertIn("farming sim", enriched.tags)
+        self.assertIn("farming_sim", enriched.tags)
+        self.assertIn("life sim", enriched.tags)
+        self.assertIn("life_sim", enriched.tags)
+        self.assertIn("tag_enrichment:steam_popular_tags", enriched.source_reasons)
+        self.assertIn("tag_enrichment:steam_store_page_tags", enriched.source_reasons)
+
+    async def test_steam_store_tags_improve_recommendation_ranking(self) -> None:
+        index_module = optional_import("astrbot_plugin_game_recommender.services.steam_index")
+        cache = MemoryCache(
+            {
+                "steam_index:entries": [
+                    dump_model(
+                        steam_index_game(
+                            "Generic Multiplayer",
+                            tags=["Multiplayer"],
+                            review_total=90000,
+                            review_positive_ratio=0.96,
+                        )
+                    ),
+                    dump_model(
+                        steam_index_game(
+                            "Farm Life Match",
+                            tags=["Farming Sim", "Life Sim", "Relaxing", "Multiplayer"],
+                            review_total=500,
+                            review_positive_ratio=0.80,
+                        )
+                    ),
+                ]
+            }
+        )
+        service = index_module.SteamGameIndexService(
+            steam_client=TagAwareSteamClient(),
+            cache=cache,
+            min_review_count=50,
+            min_positive_ratio=0.65,
+        )
+
+        ranked = await service.recommend(
+            GamePreference(extra_tags=["农场模拟", "放松", "多人"]),
+            limit=2,
+        )
+
+        self.assertEqual(
+            [game.title for game in ranked],
+            ["Farm Life Match", "Generic Multiplayer"],
+        )
+
     async def test_recommend_uses_cached_index_without_live_search(self) -> None:
         index_module = optional_import("astrbot_plugin_game_recommender.services.steam_index")
         cache = MemoryCache(
@@ -324,3 +410,22 @@ class MemoryCache:
 class NoLiveSearchSteamClient:
     async def search_games(self, **_kwargs: Any) -> list[GameCandidate]:
         raise AssertionError("cached index recommendations must not call live Steam search")
+
+
+class TagAwareSteamClient(NoLiveSearchSteamClient):
+    async def get_popular_tags(self) -> list[dict[str, Any]]:
+        return [
+            {"tagid": 87918, "name": "Farming Sim"},
+            {"tagid": 10235, "name": "Life Sim"},
+            {"tagid": 3964, "name": "Pixel Graphics"},
+            {"tagid": 3859, "name": "Multiplayer"},
+            {"tagid": 1654, "name": "Relaxing"},
+        ]
+
+    async def get_store_page_tags(self, appid: int) -> list[str]:
+        del appid
+        return ["Farming Sim", "Pixel Graphics", "Multiplayer", "Life Sim", "RPG", "Relaxing"]
+
+    async def get_review_summary(self, appid: int):
+        del appid
+        return None
