@@ -25,6 +25,7 @@ TIER_LABELS = {
 DISCLAIMER = (
     "以下推荐基于当前可查询到的 Steam 公开数据，价格和商店信息可能因地区变化。"
 )
+EMPTY_LLM_FALLBACK_TITLE = "LLM 兜底建议（未经过 Steam 索引验证）"
 
 
 def format_recommendations(
@@ -73,6 +74,8 @@ async def format_recommendations_with_llm(
     preference: GamePreference,
     ranked_games: list[RankedGame],
     limit: int | None = None,
+    enable_empty_fallback: bool = False,
+    raw_query: str = "",
 ) -> str:
     return "\n".join(
         await format_recommendation_messages_with_llm(
@@ -82,6 +85,8 @@ async def format_recommendations_with_llm(
             preference,
             ranked_games,
             limit=limit,
+            enable_empty_fallback=enable_empty_fallback,
+            raw_query=raw_query,
         )
     )
 
@@ -93,9 +98,22 @@ async def format_recommendation_messages_with_llm(
     preference: GamePreference,
     ranked_games: list[RankedGame],
     limit: int | None = None,
+    enable_empty_fallback: bool = False,
+    raw_query: str = "",
 ) -> list[str]:
     fallback = format_recommendation_messages(preference, ranked_games, limit=limit)
     if not ranked_games:
+        if enable_empty_fallback:
+            empty_fallback = await format_empty_recommendations_with_llm(
+                context,
+                event,
+                provider_id,
+                preference,
+                limit=limit,
+                raw_query=raw_query,
+            )
+            if empty_fallback:
+                return [empty_fallback]
         return fallback
 
     resolved_provider = await resolve_provider_id(context, event, provider_id)
@@ -147,6 +165,56 @@ async def format_recommendation_messages_with_llm(
                 )
             )
     return messages
+
+
+async def format_empty_recommendations_with_llm(
+    context: "Context",
+    event: "AstrMessageEvent",
+    provider_id: str,
+    preference: GamePreference,
+    limit: int | None = None,
+    raw_query: str = "",
+) -> str:
+    resolved_provider = await resolve_provider_id(context, event, provider_id)
+    if not resolved_provider:
+        return ""
+
+    count = min(limit or preference.result_count or 5, 10)
+    payload = {
+        "raw_query": raw_query,
+        "preference": dump_model(preference),
+        "result_limit": count,
+        "rules": [
+            f"回复必须以“{EMPTY_LLM_FALLBACK_TITLE}”开头。",
+            "只给游戏名和简短理由，不要输出价格、评测数、中文支持、商店链接或数据来源。",
+            "必须明确这些建议未经过 Steam 索引验证，需要用户自行确认平台和商店信息。",
+            "不要使用 Markdown 表格。",
+        ],
+    }
+    prompt = (
+        "Steam 索引没有找到可验证的游戏结果。"
+        "请基于用户需求生成已标注的 LLM 兜底建议。\n"
+        f"数据 JSON：{json.dumps(payload, ensure_ascii=False)}"
+    )
+    try:
+        response = await context.llm_generate(
+            chat_provider_id=resolved_provider,
+            prompt=prompt,
+            system_prompt=(
+                "你是游戏推荐兜底助手。你不能声称建议经过数据库、Steam 索引、价格、"
+                "评测或商店信息验证，只能给未验证候选和简短匹配理由。"
+            ),
+        )
+    except Exception as exc:
+        logger.warning(f"游戏推荐空结果 LLM 兜底失败，使用规则 formatter：{exc}")
+        return ""
+
+    text = str(getattr(response, "completion_text", "") or "").strip()
+    if not text:
+        return ""
+    if EMPTY_LLM_FALLBACK_TITLE not in text:
+        text = f"{EMPTY_LLM_FALLBACK_TITLE}\n{text}"
+    return text
 
 
 def format_game_block(index: int, game: RankedGame) -> list[str]:

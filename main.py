@@ -98,6 +98,7 @@ class GameRecommenderPlugin(Star):
         timeout = safe_int(self.config.get("timeout_seconds"), 15)
         self.max_results = min(max(safe_int(self.config.get("max_results"), 5), 1), 10)
         self.provider_id = str(self.config.get("llm_provider_id", "") or "").strip()
+        self.enable_llm_fallback = bool(self.config.get("enable_llm_fallback"))
 
         self.http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout),
@@ -395,7 +396,7 @@ class GameRecommenderPlugin(Star):
         preference.library_filter_mode = library_filter_mode
         if warning := steam_only_scope_warning_for(preference):
             preference.parse_warnings.append(warning)
-        if not has_supported_steam_platform(preference):
+        if not has_supported_steam_platform(preference) and not self.enable_llm_fallback:
             raise LibraryFilterModeError(preference.parse_warnings[-1])
         result_limit = effective_result_limit(self.max_results, preference.result_count)
         return PreparedRecommendation(
@@ -414,38 +415,40 @@ class GameRecommenderPlugin(Star):
     ) -> RecommendationRun:
         preference = prepared.preference
         result_limit = prepared.result_limit
-        candidate_pool_size = None
-        if preference.budget is not None or self.price_bridge.is_available():
-            candidate_pool_size = max(result_limit * 3, result_limit)
-        if preference.library_filter_mode:
-            candidate_pool_size = max(
-                candidate_pool_size or result_limit,
-                result_limit * 6,
-                result_limit + 20,
-            )
-        if excluded_appids or excluded_titles:
-            candidate_pool_size = max(
-                candidate_pool_size or result_limit,
-                result_limit * 6,
-                result_limit + 20,
-            )
-        profile_tag_weights = await self._user_profile_tag_weights(event)
-        ranked_games = await self._recommend_with_steam_index(
-            preference,
-            limit=candidate_pool_size or result_limit,
-            profile_tag_weights=profile_tag_weights,
-            diversity_mode=prepared.diversity_mode,
-            excluded_appids=excluded_appids,
-            excluded_titles=excluded_titles,
-        )
-        if preference.library_filter_mode:
-            ranked_games = await self._filter_library_games(
-                event,
+        ranked_games: list[RankedGame] = []
+        if has_supported_steam_platform(preference):
+            candidate_pool_size = None
+            if preference.budget is not None or self.price_bridge.is_available():
+                candidate_pool_size = max(result_limit * 3, result_limit)
+            if preference.library_filter_mode:
+                candidate_pool_size = max(
+                    candidate_pool_size or result_limit,
+                    result_limit * 6,
+                    result_limit + 20,
+                )
+            if excluded_appids or excluded_titles:
+                candidate_pool_size = max(
+                    candidate_pool_size or result_limit,
+                    result_limit * 6,
+                    result_limit + 20,
+                )
+            profile_tag_weights = await self._user_profile_tag_weights(event)
+            ranked_games = await self._recommend_with_steam_index(
                 preference,
-                ranked_games,
-                preference.library_filter_mode,
+                limit=candidate_pool_size or result_limit,
+                profile_tag_weights=profile_tag_weights,
+                diversity_mode=prepared.diversity_mode,
+                excluded_appids=excluded_appids,
+                excluded_titles=excluded_titles,
             )
-        ranked_games = await self.price_bridge.enrich_ranked_games(ranked_games, preference)
+            if preference.library_filter_mode:
+                ranked_games = await self._filter_library_games(
+                    event,
+                    preference,
+                    ranked_games,
+                    preference.library_filter_mode,
+                )
+            ranked_games = await self.price_bridge.enrich_ranked_games(ranked_games, preference)
         messages = await format_recommendation_messages_with_llm(
             self.context,
             event,
@@ -453,6 +456,8 @@ class GameRecommenderPlugin(Star):
             preference,
             ranked_games,
             limit=result_limit,
+            enable_empty_fallback=self.enable_llm_fallback,
+            raw_query=prepared.raw_query,
         )
         return RecommendationRun(
             messages=messages,

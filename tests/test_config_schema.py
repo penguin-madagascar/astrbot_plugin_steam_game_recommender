@@ -22,6 +22,16 @@ class ConfigSchemaTest(unittest.TestCase):
         self.assertEqual(schema["steam_api_key"]["default"], "")
         self.assertIn("GetOwnedGames", schema["steam_api_key"]["hint"])
 
+    def test_llm_fallback_toggle_is_exposed_after_provider(self) -> None:
+        schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        keys = list(schema)
+
+        self.assertEqual(keys.index("enable_llm_fallback"), keys.index("llm_provider_id") + 1)
+        self.assertEqual(schema["enable_llm_fallback"]["type"], "bool")
+        self.assertIs(schema["enable_llm_fallback"]["default"], False)
+        self.assertTrue(schema["enable_llm_fallback"]["hint"].strip())
+
 
 if __name__ == "__main__":
     unittest.main()

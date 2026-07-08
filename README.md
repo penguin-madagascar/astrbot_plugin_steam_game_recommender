@@ -1,6 +1,6 @@
 # astrbot_plugin_game_recommender
 
-无需 API Key 即可运行的 Steam/PC 游戏推荐插件。推荐流程使用本地 Steam 索引、归一化标签相似度、排除标签和 Steam 评测口碑；安装 `astrbot_plugin_steam_price_heybox` 时，会额外补充 Steam 当前价、历史最低价、促销状态和小黑盒跨区价格摘要。LLM 只负责抽取用户需求里的额外标签、排除项、相似游戏名和多样性模式，不直接编造推荐事实。
+无需 API Key 即可运行的 Steam/PC 游戏推荐插件。推荐流程使用本地 Steam 索引、归一化标签相似度、排除标签和 Steam 评测口碑；安装 `astrbot_plugin_steam_price_heybox` 时，会额外补充 Steam 当前价、历史最低价、促销状态和小黑盒跨区价格摘要。LLM 默认只负责抽取用户需求里的额外标签、排除项、相似游戏名和多样性模式，不直接编造推荐事实；仅在启用 LLM 兜底开关且无结果时，才会生成已标注的未验证建议。
 
 ## 功能
 
@@ -9,7 +9,7 @@
 - `/accountbind [steam] <SteamID64|好友码>`：绑定当前聊天用户的 Steam 账号；兼容 alias：`/账号绑定`。
 - `/unplayedrec`：从已绑定 Steam 游戏库中随机推荐一款未游玩且 Steam 评价过线的游戏；兼容 alias：`/未玩推荐`。
 - `/gamedesc <游戏名>`：查询游戏基础资料，并在可用时补充 Steam 价格；兼容 alias：`/游戏详情`。
-- 平台覆盖：当前版本仅支持 Steam/PC，检测到 Switch、PlayStation、Xbox 等平台会明确提示。
+- 平台覆盖：当前版本仅支持 Steam/PC，检测到 Switch、PlayStation、Xbox 等平台会明确提示；启用 LLM 兜底后，超出范围或无结果时可返回已标注的未验证建议。
 - `/gamerec` 和 `/游戏推荐` 支持前置库过滤参数：`排除已有` / `exclude-owned` 会排除 Steam 游戏库中已有的候选；`仅查看已有` / `only-owned` 只保留库内已有的候选。
 - 推荐参考 SteamPeek 思路，优先按归一化标签相似度、排除标签、评测数量和好评率排序，而不是只看评分；默认严格匹配同题材/同机制，LLM 只有在用户明确表达更多样、不同题材/玩法、避免同质化等意图时才提高多样性。
 - 使用 SQLite 缓存 Steam 响应和推荐索引，减少重复请求。
@@ -32,6 +32,7 @@ pip install -r requirements.txt
 可选：
 
 - `llm_provider_id`：用于偏好解析和结果解释；留空时尝试当前会话模型，失败会自动降级。
+- `enable_llm_fallback`：启用后，空结果或超出 Steam/PC 覆盖范围时允许 LLM 生成已标注的未验证建议；默认关闭。
 - `steam_api_key`：Steam Web API Key，用于 `/gamerec` 的已有游戏过滤参数和 `/unplayedrec` 调用 `GetOwnedGames`；留空时账号绑定仍可用，但无法读取游戏库。
 - `max_results`：默认推荐数量，范围 1-10。
 - `steam_index_ttl_hours`：Steam 推荐索引缓存有效期，默认 168 小时。

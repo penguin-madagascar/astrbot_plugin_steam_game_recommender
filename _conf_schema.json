@@ -6,6 +6,12 @@
     "_special": "select_provider",
     "default": ""
   },
+  "enable_llm_fallback": {
+    "type": "bool",
+    "description": "启用 LLM 空结果兜底",
+    "hint": "开启后，如果 Steam 索引和过滤后没有结果，或请求的平台超出 Steam/PC 覆盖范围，会使用 LLM 生成已标注的未验证建议。",
+    "default": false
+  },
   "default_region": {
     "type": "string",
     "description": "默认地区代码",

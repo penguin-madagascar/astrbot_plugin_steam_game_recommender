@@ -41,11 +41,13 @@ command_stub = sys.modules.setdefault("astrbot.core.star.filter.command", comman
 command_stub.GreedyStr = getattr(command_stub, "GreedyStr", str)
 
 try:
-    from astrbot_plugin_game_recommender.main import GameRecommenderPlugin
+    from astrbot_plugin_game_recommender.main import GameRecommenderPlugin, PreparedRecommendation
     from astrbot_plugin_game_recommender.services.diversity import (
         DIVERSITY_HIGH,
         DIVERSITY_STRICT,
     )
+    from astrbot_plugin_game_recommender.services.played_filter import LibraryFilterModeError
+    from astrbot_plugin_game_recommender.services.steam_index import STEAM_ONLY_SCOPE_WARNING
     from astrbot_plugin_game_recommender.storage.models import GamePreference
 except ModuleNotFoundError as exc:
     if exc.name in {"astrbot", "pydantic"}:
@@ -92,6 +94,107 @@ class PrepareRecommendationDiversityTest(unittest.IsolatedAsyncioTestCase):
         prepared = await plugin._prepare_recommendation(object(), "Steam 合作解谜")
 
         self.assertEqual(prepared.diversity_mode, DIVERSITY_STRICT)
+
+
+class PrepareRecommendationLlmFallbackTest(unittest.IsolatedAsyncioTestCase):
+    async def test_prepare_rejects_non_steam_platform_when_llm_fallback_is_disabled(self) -> None:
+        preference = GamePreference(
+            platforms=["nintendo switch"],
+            genres_like=["party"],
+            result_count=3,
+        )
+        plugin = object.__new__(GameRecommenderPlugin)
+        plugin.max_results = 5
+        plugin.enable_llm_fallback = False
+        plugin.preference_parser = FakePreferenceParser(preference)
+
+        with self.assertRaises(LibraryFilterModeError) as raised:
+            await plugin._prepare_recommendation(object(), "Switch 聚会游戏")
+
+        self.assertIn("仅覆盖 Steam/PC", str(raised.exception))
+
+    async def test_prepare_allows_non_steam_platform_when_llm_fallback_is_enabled(self) -> None:
+        preference = GamePreference(
+            platforms=["nintendo switch"],
+            genres_like=["party"],
+            result_count=3,
+        )
+        plugin = object.__new__(GameRecommenderPlugin)
+        plugin.max_results = 5
+        plugin.enable_llm_fallback = True
+        plugin.preference_parser = FakePreferenceParser(preference)
+
+        prepared = await plugin._prepare_recommendation(object(), "Switch 聚会游戏")
+
+        self.assertEqual(prepared.preference.platforms, ["nintendo switch"])
+        self.assertEqual(prepared.result_limit, 3)
+        self.assertIn(STEAM_ONLY_SCOPE_WARNING, prepared.preference.parse_warnings)
+
+    async def test_run_uses_llm_fallback_without_calling_steam_index_for_non_steam_only(self) -> None:
+        plugin = object.__new__(GameRecommenderPlugin)
+        plugin.enable_llm_fallback = True
+        plugin.provider_id = "provider-1"
+        plugin.context = FakeLlmContext(
+            "LLM 兜底建议（未经过 Steam 索引验证）\n"
+            "1. 《Mario Kart 8 Deluxe》：适合轻松多人竞速。"
+        )
+        plugin.steam_index = RaisingSteamIndex()
+        plugin.price_bridge = RaisingPriceBridge()
+
+        async def fake_profile(_event):
+            raise AssertionError("pure non-Steam fallback must not load Steam profile")
+
+        plugin._user_profile_tag_weights = fake_profile
+        prepared = PreparedRecommendation(
+            raw_query="Switch 聚会游戏",
+            preference=GamePreference(
+                platforms=["nintendo switch"],
+                genres_like=["party"],
+                parse_warnings=[STEAM_ONLY_SCOPE_WARNING],
+                result_count=2,
+            ),
+            diversity_mode=DIVERSITY_STRICT,
+            result_limit=2,
+        )
+
+        run = await plugin._run_recommendation(FakeEvent(), prepared)
+
+        self.assertEqual(run.ranked_games, [])
+        self.assertEqual(len(plugin.context.calls), 1)
+        self.assertIn("LLM 兜底建议（未经过 Steam 索引验证）", run.messages[0])
+        self.assertIn("Mario Kart 8 Deluxe", run.messages[0])
+
+
+class FakeEvent:
+    unified_msg_origin = "qq:test"
+
+
+class FakeLlmResponse:
+    def __init__(self, text: str) -> None:
+        self.completion_text = text
+
+
+class FakeLlmContext:
+    def __init__(self, response: str) -> None:
+        self.response = response
+        self.calls: list[dict] = []
+
+    async def llm_generate(self, **kwargs):
+        self.calls.append(kwargs)
+        return FakeLlmResponse(self.response)
+
+
+class RaisingSteamIndex:
+    async def recommend(self, **_kwargs):
+        raise AssertionError("pure non-Steam fallback must not call Steam index")
+
+
+class RaisingPriceBridge:
+    def is_available(self) -> bool:
+        raise AssertionError("pure non-Steam fallback must not inspect price bridge")
+
+    async def enrich_ranked_games(self, *_args, **_kwargs):
+        raise AssertionError("pure non-Steam fallback must not enrich prices")
 
 
 if __name__ == "__main__":

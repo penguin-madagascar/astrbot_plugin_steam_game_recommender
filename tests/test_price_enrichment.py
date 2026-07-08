@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT.parent))
@@ -28,6 +29,7 @@ from astrbot_plugin_game_recommender.services.formatter import (  # noqa: E402
     format_game_block,
     format_game_detail,
     format_recommendation_messages,
+    format_recommendation_messages_with_llm,
 )
 from astrbot_plugin_steam_price_heybox.models import (  # noqa: E402
     GameIdentity,
@@ -247,6 +249,82 @@ class PriceFormattingTest(unittest.TestCase):
         self.assertIn("史低 ¥50", text)
 
 
+class EmptyFallbackFormattingTest(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_recommendations_do_not_call_llm_when_fallback_is_disabled(self) -> None:
+        context = FakeLlmContext(
+            "LLM 兜底建议（未经过 Steam 索引验证）\n1. 《Mario Kart 8 Deluxe》：适合聚会。"
+        )
+
+        messages = await format_recommendation_messages_with_llm(
+            context,
+            FakeEvent(),
+            "provider-1",
+            GamePreference(result_count=2),
+            [],
+            limit=2,
+            enable_empty_fallback=False,
+            raw_query="Switch 聚会游戏",
+        )
+
+        self.assertEqual(context.calls, [])
+        self.assertEqual(len(messages), 1)
+        self.assertIn("暂时没有找到满足当前条件的游戏", messages[0])
+
+    async def test_empty_recommendations_use_llm_when_fallback_is_enabled(self) -> None:
+        context = FakeLlmContext(
+            "LLM 兜底建议（未经过 Steam 索引验证）\n"
+            "1. 《Mario Kart 8 Deluxe》：适合轻松多人竞速。"
+        )
+
+        messages = await format_recommendation_messages_with_llm(
+            context,
+            FakeEvent(),
+            "provider-1",
+            GamePreference(platforms=["nintendo switch"], result_count=2),
+            [],
+            limit=2,
+            enable_empty_fallback=True,
+            raw_query="Switch 聚会游戏",
+        )
+
+        self.assertEqual(len(context.calls), 1)
+        self.assertEqual(context.calls[0]["chat_provider_id"], "provider-1")
+        self.assertEqual(len(messages), 1)
+        self.assertIn("LLM 兜底建议（未经过 Steam 索引验证）", messages[0])
+        self.assertIn("Mario Kart 8 Deluxe", messages[0])
+
+    async def test_empty_recommendations_fall_back_when_llm_returns_blank_text(self) -> None:
+        messages = await format_recommendation_messages_with_llm(
+            FakeLlmContext(""),
+            FakeEvent(),
+            "provider-1",
+            GamePreference(result_count=2),
+            [],
+            limit=2,
+            enable_empty_fallback=True,
+            raw_query="Switch 聚会游戏",
+        )
+
+        self.assertEqual(len(messages), 1)
+        self.assertIn("暂时没有找到满足当前条件的游戏", messages[0])
+
+    async def test_empty_recommendations_fall_back_when_llm_raises(self) -> None:
+        with patch("astrbot_plugin_game_recommender.services.formatter.logger.warning"):
+            messages = await format_recommendation_messages_with_llm(
+                FakeLlmContext(RuntimeError("provider unavailable")),
+                FakeEvent(),
+                "provider-1",
+                GamePreference(result_count=2),
+                [],
+                limit=2,
+                enable_empty_fallback=True,
+                raw_query="Switch 聚会游戏",
+            )
+
+        self.assertEqual(len(messages), 1)
+        self.assertIn("暂时没有找到满足当前条件的游戏", messages[0])
+
+
 class PriceBridgeTest(unittest.IsolatedAsyncioTestCase):
     async def test_missing_http_client_leaves_games_unchanged(self) -> None:
         bridge = SteamPriceBridge(client=None, config={})
@@ -464,6 +542,27 @@ class FixedPriceBridge(SteamPriceBridge):
     async def lookup(self, title: str, country: str | None = None) -> GamePriceSummary | None:
         del country
         return self.summaries.get(title)
+
+
+class FakeEvent:
+    unified_msg_origin = "qq:test"
+
+
+class FakeLlmResponse:
+    def __init__(self, text: str) -> None:
+        self.completion_text = text
+
+
+class FakeLlmContext:
+    def __init__(self, response: str | Exception) -> None:
+        self.response = response
+        self.calls: list[dict] = []
+
+    async def llm_generate(self, **kwargs):
+        self.calls.append(kwargs)
+        if isinstance(self.response, Exception):
+            raise self.response
+        return FakeLlmResponse(self.response)
 
 
 class FakeSteamClient:
