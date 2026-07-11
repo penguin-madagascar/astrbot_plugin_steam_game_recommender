@@ -143,7 +143,10 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
                         steam_game("Farm Co-op B", ["Co-op", "Puzzle", "Farming", "Crafting"])
                     ),
                     dump_model(
-                        steam_game("Story Co-op", ["Co-op", "Puzzle", "Story Rich", "Choices Matter"])
+                        steam_game(
+                            "Story Co-op",
+                            ["Co-op", "Puzzle", "Story Rich", "Choices Matter"],
+                        )
                     ),
                     dump_model(
                         steam_game("Lower Match Builder", ["Co-op", "Building", "Automation"])
@@ -174,7 +177,10 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
                         steam_game("Farm Co-op B", ["Co-op", "Puzzle", "Farming", "Crafting"])
                     ),
                     dump_model(
-                        steam_game("Story Co-op", ["Co-op", "Puzzle", "Story Rich", "Choices Matter"])
+                        steam_game(
+                            "Story Co-op",
+                            ["Co-op", "Puzzle", "Story Rich", "Choices Matter"],
+                        )
                     ),
                     dump_model(
                         steam_game("Lower Match Builder", ["Co-op", "Building", "Automation"])
@@ -205,6 +211,7 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
             build_profile_from_preference(
                 GamePreference(
                     platforms=["steam"],
+                    required_tags=["co-op"],
                     genres_like=["co-op", "puzzle"],
                     genres_dislike=["horror"],
                     players=2,

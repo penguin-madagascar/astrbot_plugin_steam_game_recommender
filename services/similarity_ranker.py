@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..storage.models import GameCandidate, GameFacts, GamePreference, RankedGame
+from .constraint_evaluator import evaluate_candidate_constraints
 from .tag_normalizer import candidate_canonical_tags, canonical_tags_from_terms
 
 TIER_ORDER = {"strong": 0, "recommended": 1, "backup": 2}
@@ -29,8 +30,10 @@ TAG_WEIGHTS = {
 @dataclass(frozen=True)
 class SteamTagProfile:
     include_tags: list[str] = field(default_factory=list)
+    required_tags: list[str] = field(default_factory=list)
     exclude_tags: list[str] = field(default_factory=list)
     reference_titles: list[str] = field(default_factory=list)
+    reference_titles_dislike: list[str] = field(default_factory=list)
 
 
 def build_profile_from_preference(
@@ -38,13 +41,12 @@ def build_profile_from_preference(
     reference_candidates: list[GameCandidate] | None = None,
 ) -> SteamTagProfile:
     include = canonical_tags_from_terms([*preference.genres_like, *preference.extra_tags])
+    required = canonical_tags_from_terms(preference.required_tags)
     exclude = canonical_tags_from_terms(preference.genres_dislike)
 
     if preference.players and preference.players >= 2:
         include = merge_tags(include, ["co_op", "multiplayer"])
-    if preference.language and (
-        "中文" in preference.language or "chinese" in preference.language
-    ):
+    if preference.language and ("中文" in preference.language or "chinese" in preference.language):
         include = merge_tags(include, ["chinese"])
     if preference.difficulty and any(
         word in preference.difficulty for word in ("easy", "简单", "轻松", "休闲")
@@ -58,8 +60,10 @@ def build_profile_from_preference(
 
     return SteamTagProfile(
         include_tags=include,
+        required_tags=required,
         exclude_tags=exclude,
         reference_titles=list(preference.reference_games_like),
+        reference_titles_dislike=list(preference.reference_games_dislike),
     )
 
 
@@ -73,13 +77,19 @@ def rank_steam_candidates(
     ranked: list[RankedGame] = []
     profile_weights = profile_tag_weights or {}
     for candidate in candidates:
-        if is_reference_title(candidate.title, profile.reference_titles) or is_reference_query(candidate):
+        if is_reference_title(
+            candidate.title,
+            [*profile.reference_titles, *profile.reference_titles_dislike],
+        ) or is_reference_query(candidate):
+            continue
+        constraints = evaluate_candidate_constraints(
+            candidate,
+            required_tags=profile.required_tags,
+            exclude_tags=profile.exclude_tags,
+        )
+        if constraints.status == "violated":
             continue
         tags = candidate_canonical_tags(candidate)
-        if excluded_by_tags(tags, profile):
-            continue
-        if singleplayer_only(tags, profile):
-            continue
         if below_review_floor(candidate, min_review_count, min_positive_ratio):
             continue
 
@@ -90,11 +100,18 @@ def rank_steam_candidates(
             continue
 
         tier = classify_similarity_tier(match_score)
+        if constraints.status == "unknown" and tier == "strong":
+            tier = "recommended"
         facts = GameFacts(
+            constraint_status=constraints.status,
+            constraint_hits=constraints.hits,
+            constraint_violations=constraints.violations,
+            constraint_unknowns=constraints.unknowns,
             matched_like_terms=matched,
             missing_like_terms=missing,
-            required_hits=matched,
-            required_misses=[],
+            required_hits=constraints.hits,
+            required_misses=constraints.violations,
+            required_unknowns=constraints.unknowns,
             has_coop=bool(set(tags) & {"co_op", "local_coop", "online_coop"}),
             has_local_coop="local_coop" in tags,
             has_online_coop="online_coop" in tags,
@@ -112,15 +129,27 @@ def rank_steam_candidates(
             base_tag_score=match_score,
             profile_weight_bonus=profile_weight_bonus(tags, profile_weights),
             confidence=confidence_for(candidate, tags),
+            tag_coverage_score=match_score,
         )
         score = similarity_score(candidate, facts, tier)
         fit_points = fit_points_for(candidate, matched, match_score)
+        if constraints.hits:
+            fit_points = merge_tags(
+                fit_points,
+                [f"Steam 信息确认硬条件：{'、'.join(constraints.hits)}"],
+            )
         if facts.profile_weight_bonus > 0:
             fit_points = merge_tags(
                 fit_points,
                 [profile_fit_point(tags, profile_weights)],
             )
-        risk_points = risk_points_for(candidate, missing, tier, min_review_count)
+        risk_points = risk_points_for(
+            candidate,
+            missing,
+            tier,
+            min_review_count,
+            constraints.unknowns,
+        )
         ranked.append(
             copy_ranked_game(
                 RankedGame.from_candidate(candidate, score, fit_points, risk_points),
@@ -246,11 +275,7 @@ def diversity_tags_for(game: RankedGame) -> list[str]:
         "chinese",
         *game.facts.matched_like_terms,
     }
-    return [
-        tag
-        for tag in candidate_canonical_tags(game)
-        if tag not in ignored
-    ]
+    return [tag for tag in candidate_canonical_tags(game) if tag not in ignored]
 
 
 def copy_facts(facts: GameFacts, update: dict[str, Any]) -> GameFacts:
@@ -263,15 +288,6 @@ def copy_facts(facts: GameFacts, update: dict[str, Any]) -> GameFacts:
 def reference_expansion_tags(candidate: GameCandidate) -> list[str]:
     ignored = {"singleplayer", "chinese"}
     return [tag for tag in candidate_canonical_tags(candidate) if tag not in ignored]
-
-
-def excluded_by_tags(tags: list[str], profile: SteamTagProfile) -> bool:
-    return bool(set(tags) & set(profile.exclude_tags))
-
-
-def singleplayer_only(tags: list[str], profile: SteamTagProfile) -> bool:
-    wants_multiplayer = bool(set(profile.include_tags) & MULTIPLAYER_TAGS)
-    return wants_multiplayer and "singleplayer" in tags and not bool(set(tags) & MULTIPLAYER_TAGS)
 
 
 def below_review_floor(
@@ -336,22 +352,14 @@ def confidence_for(candidate: GameCandidate, tags: list[str]) -> float:
 def profile_weight_bonus(tags: list[str], weights: dict[str, float]) -> float:
     if not weights:
         return 0.0
-    matched = [
-        min(max(float(weights[tag]), 0.0), 1.0)
-        for tag in tags
-        if tag in weights
-    ]
+    matched = [min(max(float(weights[tag]), 0.0), 1.0) for tag in tags if tag in weights]
     if not matched:
         return 0.0
     return min(sum(matched) / 3, 1.0)
 
 
 def profile_fit_point(tags: list[str], weights: dict[str, float]) -> str:
-    matched = [
-        tag
-        for tag in tags
-        if tag in weights
-    ]
+    matched = [tag for tag in tags if tag in weights]
     ranked = sorted(matched, key=lambda tag: (-weights.get(tag, 0.0), tag))
     return f"个人游戏库偏好命中：{'、'.join(ranked[:4])}"
 
@@ -372,8 +380,11 @@ def risk_points_for(
     missing: list[str],
     tier: str,
     min_review_count: int,
+    constraint_unknowns: list[str] | None = None,
 ) -> list[str]:
     risks: list[str] = []
+    if constraint_unknowns:
+        risks.append(f"硬条件尚未确认：{'、'.join(constraint_unknowns[:5])}")
     if tier == "backup":
         risks.append("标签相似度较弱，仅作为备选")
     if missing and tier != "strong":
@@ -416,9 +427,7 @@ def dedupe(values: list[str]) -> list[str]:
 def is_reference_title(title: str, reference_titles: list[str]) -> bool:
     normalized = normalize_title(title)
     return any(
-        normalized == normalize_title(reference)
-        for reference in reference_titles
-        if reference
+        normalized == normalize_title(reference) for reference in reference_titles if reference
     )
 
 

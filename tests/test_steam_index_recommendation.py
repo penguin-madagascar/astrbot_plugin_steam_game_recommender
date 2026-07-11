@@ -119,6 +119,7 @@ class SimilarityRankerTest(unittest.TestCase):
         ranker = optional_import("astrbot_plugin_game_recommender.services.similarity_ranker")
         profile = ranker.SteamTagProfile(
             include_tags=["co_op", "puzzle"],
+            required_tags=["co_op"],
             exclude_tags=["horror", "soulslike"],
             reference_titles=[],
         )

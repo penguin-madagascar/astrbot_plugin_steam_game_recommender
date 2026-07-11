@@ -303,6 +303,10 @@ class SteamOwnedGame(BaseModel):
 
 
 class GameFacts(BaseModel):
+    constraint_status: str = "satisfied"
+    constraint_hits: list[str] = Field(default_factory=list)
+    constraint_violations: list[str] = Field(default_factory=list)
+    constraint_unknowns: list[str] = Field(default_factory=list)
     platform_families: list[str] = Field(default_factory=list)
     matched_platforms: list[str] = Field(default_factory=list)
     missing_platforms: list[str] = Field(default_factory=list)
@@ -313,6 +317,7 @@ class GameFacts(BaseModel):
     missing_like_terms: list[str] = Field(default_factory=list)
     required_hits: list[str] = Field(default_factory=list)
     required_misses: list[str] = Field(default_factory=list)
+    required_unknowns: list[str] = Field(default_factory=list)
     has_coop: bool = False
     has_local_coop: bool = False
     has_online_coop: bool = False
@@ -330,9 +335,18 @@ class GameFacts(BaseModel):
     profile_weight_bonus: float = 0.0
     diversity_penalty: float = 0.0
     confidence: float = 0.0
+    tag_coverage_score: float = 0.0
+    positive_reference_score: float = 0.0
+    negative_reference_score: float = 0.0
+    library_profile_score: float = 0.0
+    review_confidence_score: float = 0.0
+    base_relevance_score: float = 0.0
 
     @validator(
         "platform_families",
+        "constraint_hits",
+        "constraint_violations",
+        "constraint_unknowns",
         "matched_platforms",
         "missing_platforms",
         "coop_modes",
@@ -342,6 +356,7 @@ class GameFacts(BaseModel):
         "missing_like_terms",
         "required_hits",
         "required_misses",
+        "required_unknowns",
         pre=True,
     )
     def _normalize_lists(cls, value: Any) -> list[str]:
@@ -355,6 +370,12 @@ class GameFacts(BaseModel):
         "profile_weight_bonus",
         "diversity_penalty",
         "confidence",
+        "tag_coverage_score",
+        "positive_reference_score",
+        "negative_reference_score",
+        "library_profile_score",
+        "review_confidence_score",
+        "base_relevance_score",
         pre=True,
     )
     def _normalize_float(cls, value: Any) -> float:
@@ -363,6 +384,11 @@ class GameFacts(BaseModel):
         except (TypeError, ValueError):
             number = 0.0
         return min(max(number, 0.0), 1.0)
+
+    @validator("constraint_status", pre=True)
+    def _normalize_constraint_status(cls, value: Any) -> str:
+        status = str(value or "").strip().lower()
+        return status if status in {"satisfied", "violated", "unknown"} else "satisfied"
 
     class Config:
         extra = "ignore"
