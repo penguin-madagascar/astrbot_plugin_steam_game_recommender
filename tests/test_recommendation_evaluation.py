@@ -28,10 +28,31 @@ class RecommendationEvaluationTest(unittest.TestCase):
         self.assertAlmostEqual(ndcg_at_k(ranking, relevance, k=5), 1.0)
         self.assertAlmostEqual(recall_at_k(ranking, relevance, k=20), 1.0)
 
+    def test_ndcg_ignores_duplicate_ids(self) -> None:
+        relevance = {"best": 3, "good": 2, "fair": 1}
+        duplicated = ndcg_at_k(["best", "best", "good", "fair"], relevance, k=5)
+        deduplicated = ndcg_at_k(["best", "good", "fair"], relevance, k=5)
+
+        self.assertLessEqual(duplicated, 1.0)
+        self.assertAlmostEqual(duplicated, deduplicated)
+
+    def test_recall_ignores_duplicate_ids_before_cutoff(self) -> None:
+        relevance = {"first": 3, "second": 2}
+
+        self.assertAlmostEqual(
+            recall_at_k(["first", "first", "second"], relevance, k=2),
+            1.0,
+        )
+
     def test_constraint_violation_rate_counts_violating_results(self) -> None:
         ranking = ["safe", "over-budget", "excluded-tag", "also-safe"]
 
         rate = constraint_violation_rate(ranking, {"over-budget", "excluded-tag"})
+
+        self.assertAlmostEqual(rate, 0.5)
+
+    def test_constraint_violation_rate_ignores_duplicate_ids(self) -> None:
+        rate = constraint_violation_rate(["blocked", "blocked", "safe"], {"blocked"})
 
         self.assertAlmostEqual(rate, 0.5)
 
@@ -42,6 +63,14 @@ class RecommendationEvaluationTest(unittest.TestCase):
             fill_rate(["a", "b", "c", "d", "e", "f"], target_count=5),
             1.0,
         )
+
+    def test_fill_rate_is_zero_for_non_positive_target_count(self) -> None:
+        for target_count in (0, -1):
+            with self.subTest(target_count=target_count):
+                self.assertEqual(fill_rate(["a"], target_count=target_count), 0.0)
+
+    def test_fill_rate_ignores_duplicate_ids(self) -> None:
+        self.assertAlmostEqual(fill_rate(["a", "a", "b"], target_count=3), 2 / 3)
 
     def test_identical_tag_sets_have_similarity_one(self) -> None:
         ranking = ["a", "b", "c"]
@@ -60,6 +89,12 @@ class RecommendationEvaluationTest(unittest.TestCase):
             "b": {"strategy"},
             "c": {"racing"},
         }
+
+        self.assertAlmostEqual(intra_list_tag_similarity(ranking, tags), 0.0)
+
+    def test_intra_list_similarity_ignores_duplicate_ids(self) -> None:
+        ranking = ["a", "a", "b"]
+        tags = {"a": {"co-op"}, "b": {"strategy"}}
 
         self.assertAlmostEqual(intra_list_tag_similarity(ranking, tags), 0.0)
 
