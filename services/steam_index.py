@@ -388,6 +388,7 @@ def rank_entries(
     profile = build_profile_from_preference(
         preference,
         reference_candidates=reference_candidates(preference, entries),
+        negative_reference_candidates=negative_reference_candidates(preference, entries),
     )
     return rank_steam_candidates(
         entries,

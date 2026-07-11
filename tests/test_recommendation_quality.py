@@ -97,6 +97,36 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(call["search"] == "Dark Souls" for call in steam.calls))
         self.assertTrue(any(call["search"] == "soulslike action rpg" for call in steam.calls))
 
+    async def test_negative_reference_similarity_penalizes_without_excluding_similar_games(
+        self,
+    ) -> None:
+        steam = SearchAwareSteamClient(
+            {
+                "Overcooked": [steam_game("Overcooked", ["Management", "Casual", "Co-op"])],
+                "co op": [
+                    steam_game("Kitchen Shift", ["Management", "Casual", "Co-op"]),
+                    steam_game("Puzzle Team", ["Puzzle", "Adventure", "Co-op"]),
+                ],
+            }
+        )
+        service = SteamGameIndexService(steam, MemoryCache(), min_review_count=50)
+
+        ranked = await service.recommend(
+            GamePreference(
+                genres_like=["co-op"],
+                reference_games_dislike=["Overcooked"],
+                result_count=2,
+            ),
+            limit=2,
+        )
+
+        self.assertEqual([game.title for game in ranked], ["Puzzle Team", "Kitchen Shift"])
+        self.assertNotIn("Overcooked", [game.title for game in ranked])
+        self.assertGreater(
+            ranked[1].facts.negative_reference_score,
+            ranked[0].facts.negative_reference_score,
+        )
+
     async def test_cached_index_orders_tag_coverage_before_reviews(self) -> None:
         cache = MemoryCache(
             {

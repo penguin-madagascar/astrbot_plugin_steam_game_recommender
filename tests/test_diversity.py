@@ -40,18 +40,23 @@ sys.modules.setdefault("astrbot.core.star.filter", types.ModuleType("astrbot.cor
 command_stub = sys.modules.setdefault("astrbot.core.star.filter.command", command_module)
 command_stub.GreedyStr = getattr(command_stub, "GreedyStr", str)
 
-from astrbot_plugin_game_recommender.services.diversity import (
+from astrbot_plugin_game_recommender.services.diversity import (  # noqa: E402
     DIVERSITY_BALANCED,
     DIVERSITY_HIGH,
     DIVERSITY_STRICT,
     select_results_by_diversity,
 )
-from astrbot_plugin_game_recommender.services.similarity_ranker import (
+from astrbot_plugin_game_recommender.services.preference_parser import (  # noqa: E402
+    parse_preference_json,
+)
+from astrbot_plugin_game_recommender.services.similarity_ranker import (  # noqa: E402
     build_profile_from_preference,
     rank_steam_candidates,
 )
-from astrbot_plugin_game_recommender.services.preference_parser import parse_preference_json
-from astrbot_plugin_game_recommender.storage.models import GameCandidate, GamePreference
+from astrbot_plugin_game_recommender.storage.models import (  # noqa: E402
+    GameCandidate,
+    GamePreference,
+)
 
 
 class DiversityPreferenceParsingTest(unittest.TestCase):
@@ -136,7 +141,7 @@ class DiversitySelectionTest(unittest.TestCase):
         self.assertEqual(selected[0].tier, "strong")
         self.assertEqual(selected[1].tier, "strong")
         self.assertEqual(selected[2].tier, "strong")
-        self.assertEqual(selected[3].tier, "backup")
+        self.assertEqual(selected[3].tier, "recommended")
         self.assertEqual(
             [game.title for game in selected[:3]],
             ["Farm Strong", "Story Strong", "Farm Strong 2"],

@@ -7,7 +7,11 @@ from typing import Any
 
 from ..storage.models import GameCandidate, GameFacts, GamePreference, RankedGame
 from .constraint_evaluator import evaluate_candidate_constraints
-from .tag_normalizer import candidate_canonical_tags, canonical_tags_from_terms
+from .tag_normalizer import (
+    candidate_canonical_tags,
+    canonical_tags_from_terms,
+    extract_description_terms,
+)
 
 TIER_ORDER = {"strong": 0, "recommended": 1, "backup": 2}
 MULTIPLAYER_TAGS = {"co_op", "local_coop", "online_coop", "multiplayer"}
@@ -34,11 +38,14 @@ class SteamTagProfile:
     exclude_tags: list[str] = field(default_factory=list)
     reference_titles: list[str] = field(default_factory=list)
     reference_titles_dislike: list[str] = field(default_factory=list)
+    positive_reference_tag_sequences: list[list[str]] = field(default_factory=list)
+    negative_reference_tag_sequences: list[list[str]] = field(default_factory=list)
 
 
 def build_profile_from_preference(
     preference: GamePreference,
     reference_candidates: list[GameCandidate] | None = None,
+    negative_reference_candidates: list[GameCandidate] | None = None,
 ) -> SteamTagProfile:
     include = canonical_tags_from_terms([*preference.genres_like, *preference.extra_tags])
     required = canonical_tags_from_terms(preference.required_tags)
@@ -64,6 +71,12 @@ def build_profile_from_preference(
         exclude_tags=exclude,
         reference_titles=list(preference.reference_games_like),
         reference_titles_dislike=list(preference.reference_games_dislike),
+        positive_reference_tag_sequences=[
+            ordered_tag_sequence(candidate) for candidate in reference_candidates or []
+        ],
+        negative_reference_tag_sequences=[
+            ordered_tag_sequence(candidate) for candidate in negative_reference_candidates or []
+        ],
     )
 
 
@@ -74,8 +87,12 @@ def rank_steam_candidates(
     min_positive_ratio: float = 0.65,
     profile_tag_weights: dict[str, float] | None = None,
 ) -> list[RankedGame]:
+    del min_positive_ratio
     ranked: list[RankedGame] = []
     profile_weights = profile_tag_weights or {}
+    idf = compute_tag_idf([ordered_tag_sequence(candidate) for candidate in candidates])
+    review_prior = candidate_pool_review_prior(candidates)
+    prior_strength = max(int(min_review_count), 50)
     for candidate in candidates:
         if is_reference_title(
             candidate.title,
@@ -90,16 +107,40 @@ def rank_steam_candidates(
         if constraints.status == "violated":
             continue
         tags = candidate_canonical_tags(candidate)
-        if below_review_floor(candidate, min_review_count, min_positive_ratio):
-            continue
 
         matched = [tag for tag in profile.include_tags if tag in tags]
         missing = [tag for tag in profile.include_tags if tag not in matched]
-        match_score = weighted_overlap(matched, profile.include_tags)
-        if profile.include_tags and match_score <= 0:
-            continue
+        tag_coverage = weighted_overlap(matched, profile.include_tags)
+        candidate_weights = candidate_tag_weights(candidate, idf)
+        positive_reference = maximum_reference_similarity(
+            candidate_weights,
+            profile.positive_reference_tag_sequences,
+            idf,
+        )
+        negative_reference = maximum_reference_similarity(
+            candidate_weights,
+            profile.negative_reference_tag_sequences,
+            idf,
+        )
+        library_profile = profile_weight_bonus(tags, profile_weights) if profile_weights else None
+        data_confidence = confidence_for(candidate, tags)
+        review_reputation = bayesian_review_score(
+            candidate,
+            prior=review_prior,
+            prior_strength=prior_strength,
+        )
+        review_confidence = min(review_reputation * 0.8 + data_confidence * 0.2, 1.0)
+        base_relevance = blend_relevance_components(
+            tag_coverage=tag_coverage if profile.include_tags else None,
+            positive_reference=(
+                positive_reference if profile.positive_reference_tag_sequences else None
+            ),
+            library_profile=library_profile,
+            review_confidence=review_confidence,
+            negative_reference=negative_reference,
+        )
 
-        tier = classify_similarity_tier(match_score)
+        tier = classify_similarity_tier(base_relevance)
         if constraints.status == "unknown" and tier == "strong":
             tier = "recommended"
         facts = GameFacts(
@@ -121,18 +162,28 @@ def rank_steam_candidates(
             ),
             singleplayer_only="singleplayer" in tags and not bool(set(tags) & MULTIPLAYER_TAGS),
             chinese="chinese" in tags,
-            reference_similarity=match_score,
+            reference_similarity=positive_reference,
             match_coverage=(
                 len(matched) / len(profile.include_tags) if profile.include_tags else 0.0
             ),
-            match_score=match_score,
-            base_tag_score=match_score,
-            profile_weight_bonus=profile_weight_bonus(tags, profile_weights),
-            confidence=confidence_for(candidate, tags),
-            tag_coverage_score=match_score,
+            match_score=tag_coverage,
+            base_tag_score=tag_coverage,
+            profile_weight_bonus=library_profile or 0.0,
+            confidence=data_confidence,
+            tag_coverage_score=tag_coverage,
+            positive_reference_score=positive_reference,
+            negative_reference_score=negative_reference,
+            library_profile_score=library_profile or 0.0,
+            review_confidence_score=review_confidence,
+            base_relevance_score=base_relevance,
         )
-        score = similarity_score(candidate, facts, tier)
-        fit_points = fit_points_for(candidate, matched, match_score)
+        score = similarity_score(facts)
+        fit_points = fit_points_for(candidate, matched, tag_coverage)
+        if positive_reference > 0:
+            fit_points = merge_tags(
+                fit_points,
+                [f"正向参考相似度 {positive_reference:.0%}"],
+            )
         if constraints.hits:
             fit_points = merge_tags(
                 fit_points,
@@ -149,6 +200,7 @@ def rank_steam_candidates(
             tier,
             min_review_count,
             constraints.unknowns,
+            negative_reference,
         )
         ranked.append(
             copy_ranked_game(
@@ -167,6 +219,7 @@ def rank_steam_candidates(
         ranked,
         key=lambda game: (
             TIER_ORDER.get(game.tier, 9),
+            -game.facts.base_relevance_score,
             -game.facts.match_score,
             -float(game.score),
             -release_year(game.release_date or game.released),
@@ -287,18 +340,151 @@ def copy_facts(facts: GameFacts, update: dict[str, Any]) -> GameFacts:
 
 def reference_expansion_tags(candidate: GameCandidate) -> list[str]:
     ignored = {"singleplayer", "chinese"}
-    return [tag for tag in candidate_canonical_tags(candidate) if tag not in ignored]
+    direct_tags = canonical_tags_from_terms([*candidate.tags, *candidate.genres])
+    return [tag for tag in direct_tags if tag not in ignored]
 
 
-def below_review_floor(
+def ordered_tag_sequence(candidate: GameCandidate) -> list[str]:
+    inferred = [*candidate.inferred_tags]
+    if candidate.description:
+        inferred.extend(extract_description_terms(candidate.description))
+    return merge_tags(
+        canonical_tags_from_terms(candidate.tags),
+        merge_tags(
+            canonical_tags_from_terms(candidate.genres),
+            canonical_tags_from_terms(inferred),
+        ),
+    )
+
+
+def compute_tag_idf(documents: list[list[str]]) -> dict[str, float]:
+    document_count = len(documents)
+    frequencies: dict[str, int] = {}
+    for document in documents:
+        for tag in set(document):
+            frequencies[tag] = frequencies.get(tag, 0) + 1
+    return {
+        tag: math.log((document_count + 1) / (frequency + 1)) + 1
+        for tag, frequency in frequencies.items()
+    }
+
+
+def position_weight(position: int) -> float:
+    return 1 / math.log2(position + 2)
+
+
+def ordered_sequence_weights(
+    tags: list[str],
+    idf: dict[str, float],
+    scale: float = 1.0,
+) -> dict[str, float]:
+    weights: dict[str, float] = {}
+    for position, tag in enumerate(canonical_tags_from_terms(tags)):
+        value = idf.get(tag, 1.0) * position_weight(position) * scale
+        weights[tag] = max(weights.get(tag, 0.0), value)
+    return weights
+
+
+def candidate_tag_weights(
     candidate: GameCandidate,
-    min_review_count: int,
-    min_positive_ratio: float,
-) -> bool:
-    if candidate.review_total is not None and candidate.review_total < min_review_count:
-        return True
+    idf: dict[str, float],
+) -> dict[str, float]:
+    weights = ordered_sequence_weights(candidate.tags, idf)
+    for tag in canonical_tags_from_terms(candidate.genres):
+        weights[tag] = max(weights.get(tag, 0.0), idf.get(tag, 1.0))
+    inferred = [*candidate.inferred_tags]
+    if candidate.description:
+        inferred.extend(extract_description_terms(candidate.description))
+    for tag in canonical_tags_from_terms(inferred):
+        weights[tag] = max(weights.get(tag, 0.0), idf.get(tag, 1.0) * 0.5)
+    return weights
+
+
+def weighted_cosine(left: dict[str, float], right: dict[str, float]) -> float:
+    if not left or not right:
+        return 0.0
+    dot = sum(value * right.get(tag, 0.0) for tag, value in left.items())
+    left_norm = math.sqrt(sum(value * value for value in left.values()))
+    right_norm = math.sqrt(sum(value * value for value in right.values()))
+    if not left_norm or not right_norm:
+        return 0.0
+    return min(max(dot / (left_norm * right_norm), 0.0), 1.0)
+
+
+def ordered_tfidf_cosine(
+    left: list[str],
+    right: list[str],
+    idf: dict[str, float],
+) -> float:
+    return weighted_cosine(
+        ordered_sequence_weights(left, idf),
+        ordered_sequence_weights(right, idf),
+    )
+
+
+def maximum_reference_similarity(
+    candidate_weights: dict[str, float],
+    reference_sequences: list[list[str]],
+    idf: dict[str, float],
+) -> float:
+    return max(
+        (
+            weighted_cosine(
+                candidate_weights,
+                ordered_sequence_weights(sequence, idf),
+            )
+            for sequence in reference_sequences
+        ),
+        default=0.0,
+    )
+
+
+def candidate_pool_review_prior(candidates: list[GameCandidate]) -> float:
+    ratios = [
+        min(max(float(candidate.review_positive_ratio), 0.0), 1.0)
+        for candidate in candidates
+        if candidate.review_positive_ratio is not None
+    ]
+    return sum(ratios) / len(ratios) if ratios else 0.75
+
+
+def bayesian_review_score(
+    candidate: GameCandidate,
+    prior: float,
+    prior_strength: int,
+) -> float:
+    baseline = min(max(float(prior), 0.0), 1.0)
+    total = max(int(candidate.review_total or 0), 0)
     ratio = candidate.review_positive_ratio
-    return ratio is not None and ratio < min_positive_ratio
+    if total <= 0 or ratio is None:
+        return baseline
+    strength = max(int(prior_strength), 1)
+    observed = min(max(float(ratio), 0.0), 1.0)
+    return (total * observed + strength * baseline) / (total + strength)
+
+
+def blend_relevance_components(
+    tag_coverage: float | None,
+    positive_reference: float | None,
+    library_profile: float | None,
+    review_confidence: float | None,
+    negative_reference: float,
+) -> float:
+    components = (
+        (0.55, tag_coverage),
+        (0.20, positive_reference),
+        (0.10, library_profile),
+        (0.15, review_confidence),
+    )
+    available = [(weight, value) for weight, value in components if value is not None]
+    total_weight = sum(weight for weight, _value in available)
+    positive_score = (
+        sum(weight * min(max(float(value), 0.0), 1.0) for weight, value in available) / total_weight
+        if total_weight
+        else 0.0
+    )
+    score = positive_score - 0.20 * min(max(float(negative_reference), 0.0), 1.0)
+    return min(max(score, 0.0), 1.0)
 
 
 def weighted_overlap(matched: list[str], include_tags: list[str]) -> float:
@@ -321,19 +507,8 @@ def classify_similarity_tier(match_score: float) -> str:
     return "backup"
 
 
-def similarity_score(candidate: GameCandidate, facts: GameFacts, tier: str) -> float:
-    score = {"strong": 300.0, "recommended": 200.0, "backup": 100.0}[tier]
-    score += facts.match_score * 120
-    score += facts.confidence * 10
-    score += facts.profile_weight_bonus * 8
-    if candidate.review_positive_ratio is not None:
-        score += candidate.review_positive_ratio * 8
-    if candidate.review_total:
-        score += min(math.log10(max(candidate.review_total, 1)), 6) * 0.8
-    year = release_year(candidate.release_date or candidate.released)
-    if year:
-        score += min(max(year - 2000, 0), 40) * 0.03
-    return score
+def similarity_score(facts: GameFacts) -> float:
+    return round(facts.base_relevance_score * 100, 6)
 
 
 def confidence_for(candidate: GameCandidate, tags: list[str]) -> float:
@@ -381,10 +556,13 @@ def risk_points_for(
     tier: str,
     min_review_count: int,
     constraint_unknowns: list[str] | None = None,
+    negative_reference_similarity: float = 0.0,
 ) -> list[str]:
     risks: list[str] = []
     if constraint_unknowns:
         risks.append(f"硬条件尚未确认：{'、'.join(constraint_unknowns[:5])}")
+    if negative_reference_similarity > 0:
+        risks.append(f"与负向参考相似度 {negative_reference_similarity:.0%}")
     if tier == "backup":
         risks.append("标签相似度较弱，仅作为备选")
     if missing and tier != "strong":
