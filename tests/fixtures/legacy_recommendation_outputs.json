@@ -1,0 +1,386 @@
+{
+  "schema_version": 1,
+  "legacy_source": {
+    "commit": "c6af3a9ae310e2ac6b0dcca970d96bbae8086ec6",
+    "method": "curated offline legacy behavior snapshot"
+  },
+  "legacy_baseline": {
+    "ndcg_at_target": 0.605947,
+    "recall_at_20": 0.989583,
+    "constraint_violation_rate": 0.194444,
+    "fill_rate": 0.861111,
+    "intra_list_tag_similarity": 0.337227
+  },
+  "outputs": [
+    {
+      "id": "polarity-horror-positive",
+      "legacy_candidate_ranking": [
+        "p1-a",
+        "p1-b",
+        "p1-c"
+      ],
+      "legacy_ranking": [
+        "p1-b",
+        "p1-a",
+        "p1-c"
+      ],
+      "violating_ids": []
+    },
+    {
+      "id": "polarity-horror-negative",
+      "legacy_candidate_ranking": [
+        "p2-a",
+        "p2-b",
+        "p2-c"
+      ],
+      "legacy_ranking": [
+        "p2-b",
+        "p2-c",
+        "p2-a"
+      ],
+      "violating_ids": [
+        "p2-b"
+      ]
+    },
+    {
+      "id": "polarity-souls-positive",
+      "legacy_candidate_ranking": [
+        "p3-a",
+        "p3-b",
+        "p3-c"
+      ],
+      "legacy_ranking": [
+        "p3-c",
+        "p3-b",
+        "p3-a"
+      ],
+      "violating_ids": []
+    },
+    {
+      "id": "polarity-souls-negative",
+      "legacy_candidate_ranking": [
+        "p4-a",
+        "p4-b",
+        "p4-c"
+      ],
+      "legacy_ranking": [
+        "p4-b",
+        "p4-a"
+      ],
+      "violating_ids": [
+        "p4-b"
+      ]
+    },
+    {
+      "id": "required-chinese",
+      "legacy_candidate_ranking": [
+        "h1-a",
+        "h1-b",
+        "h1-c"
+      ],
+      "legacy_ranking": [
+        "h1-b",
+        "h1-c",
+        "h1-a"
+      ],
+      "violating_ids": [
+        "h1-c"
+      ]
+    },
+    {
+      "id": "required-local-coop",
+      "legacy_candidate_ranking": [
+        "h2-a",
+        "h2-b",
+        "h2-c"
+      ],
+      "legacy_ranking": [
+        "h2-b",
+        "h2-c",
+        "h2-a"
+      ],
+      "violating_ids": [
+        "h2-c"
+      ]
+    },
+    {
+      "id": "required-multiplayer",
+      "legacy_candidate_ranking": [
+        "h3-a",
+        "h3-b",
+        "h3-c"
+      ],
+      "legacy_ranking": [
+        "h3-c",
+        "h3-a",
+        "h3-b"
+      ],
+      "violating_ids": [
+        "h3-c"
+      ]
+    },
+    {
+      "id": "required-relaxing",
+      "legacy_candidate_ranking": [
+        "h4-a",
+        "h4-b",
+        "h4-c"
+      ],
+      "legacy_ranking": [
+        "h4-b"
+      ],
+      "violating_ids": [
+        "h4-c"
+      ]
+    },
+    {
+      "id": "reference-stardew-positive",
+      "legacy_candidate_ranking": [
+        "r1-a",
+        "r1-b",
+        "r1-c"
+      ],
+      "legacy_ranking": [
+        "r1-b",
+        "r1-c",
+        "r1-a"
+      ],
+      "violating_ids": []
+    },
+    {
+      "id": "reference-dark-souls-negative-tag",
+      "legacy_candidate_ranking": [
+        "r2-a",
+        "r2-b",
+        "r2-c"
+      ],
+      "legacy_ranking": [
+        "r2-b",
+        "r2-c",
+        "r2-a"
+      ],
+      "violating_ids": [
+        "r2-b"
+      ]
+    },
+    {
+      "id": "reference-slay-spire-negative",
+      "legacy_candidate_ranking": [
+        "r3-a",
+        "r3-b",
+        "r3-c"
+      ],
+      "legacy_ranking": [
+        "r3-b",
+        "r3-a",
+        "r3-c"
+      ],
+      "violating_ids": [
+        "r3-b"
+      ]
+    },
+    {
+      "id": "reference-positive-and-negative",
+      "legacy_candidate_ranking": [
+        "r4-a",
+        "r4-b",
+        "r4-c"
+      ],
+      "legacy_ranking": [
+        "r4-b",
+        "r4-c",
+        "r4-a"
+      ],
+      "violating_ids": [
+        "r4-b"
+      ]
+    },
+    {
+      "id": "aaa-open-world",
+      "legacy_candidate_ranking": [
+        "a1-a",
+        "a1-b",
+        "a1-c"
+      ],
+      "legacy_ranking": [
+        "a1-c",
+        "a1-b",
+        "a1-a"
+      ],
+      "violating_ids": []
+    },
+    {
+      "id": "aaa-story-rich",
+      "legacy_candidate_ranking": [
+        "a2-a",
+        "a2-b",
+        "a2-c"
+      ],
+      "legacy_ranking": [
+        "a2-c",
+        "a2-a",
+        "a2-b"
+      ],
+      "violating_ids": []
+    },
+    {
+      "id": "aaa-broad-empty",
+      "legacy_candidate_ranking": [
+        "a3-a",
+        "a3-b",
+        "a3-c",
+        "a3-d01",
+        "a3-d02",
+        "a3-d03",
+        "a3-d04",
+        "a3-d05",
+        "a3-d06",
+        "a3-d07",
+        "a3-d08",
+        "a3-d09",
+        "a3-d10",
+        "a3-d11",
+        "a3-d12",
+        "a3-d13",
+        "a3-d14",
+        "a3-d15",
+        "a3-d16",
+        "a3-d17",
+        "a3-d18"
+      ],
+      "legacy_ranking": [],
+      "violating_ids": []
+    },
+    {
+      "id": "budget-soft-ranking",
+      "legacy_candidate_ranking": [
+        "b1-a",
+        "b1-b",
+        "b1-c"
+      ],
+      "legacy_ranking": [
+        "b1-c",
+        "b1-b"
+      ],
+      "violating_ids": []
+    },
+    {
+      "id": "library-exclude-owned",
+      "legacy_candidate_ranking": [
+        "b2-a",
+        "b2-b",
+        "b2-c"
+      ],
+      "legacy_ranking": [
+        "b2-b",
+        "b2-a"
+      ],
+      "violating_ids": [
+        "b2-b"
+      ]
+    },
+    {
+      "id": "library-only-owned",
+      "legacy_candidate_ranking": [
+        "b3-a",
+        "b3-b",
+        "b3-c"
+      ],
+      "legacy_ranking": [
+        "b3-b",
+        "b3-c"
+      ],
+      "violating_ids": [
+        "b3-b"
+      ]
+    },
+    {
+      "id": "diversity-strict-similar",
+      "legacy_candidate_ranking": [
+        "d1-a",
+        "d1-b",
+        "d1-c"
+      ],
+      "legacy_ranking": [
+        "d1-a",
+        "d1-b",
+        "d1-c"
+      ],
+      "violating_ids": []
+    },
+    {
+      "id": "diversity-balanced",
+      "legacy_candidate_ranking": [
+        "d2-a",
+        "d2-b",
+        "d2-c"
+      ],
+      "legacy_ranking": [
+        "d2-a",
+        "d2-b",
+        "d2-c"
+      ],
+      "violating_ids": []
+    },
+    {
+      "id": "diversity-high",
+      "legacy_candidate_ranking": [
+        "d3-a",
+        "d3-b",
+        "d3-c",
+        "d3-d"
+      ],
+      "legacy_ranking": [
+        "d3-a",
+        "d3-b",
+        "d3-c"
+      ],
+      "violating_ids": []
+    },
+    {
+      "id": "retry-too-hard",
+      "legacy_candidate_ranking": [
+        "t1-a",
+        "t1-b",
+        "t1-c"
+      ],
+      "legacy_ranking": [
+        "t1-b",
+        "t1-c",
+        "t1-a"
+      ],
+      "violating_ids": [
+        "t1-b"
+      ]
+    },
+    {
+      "id": "retry-like-second",
+      "legacy_candidate_ranking": [
+        "t2-a",
+        "t2-b",
+        "t2-c"
+      ],
+      "legacy_ranking": [
+        "t2-b",
+        "t2-c",
+        "t2-a"
+      ],
+      "violating_ids": []
+    },
+    {
+      "id": "retry-dislike-first",
+      "legacy_candidate_ranking": [
+        "t3-a",
+        "t3-b",
+        "t3-c"
+      ],
+      "legacy_ranking": [
+        "t3-b",
+        "t3-c"
+      ],
+      "violating_ids": [
+        "t3-b"
+      ]
+    }
+  ]
+}

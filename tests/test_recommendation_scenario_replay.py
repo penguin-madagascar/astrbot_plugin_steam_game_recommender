@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import unittest
 from collections import Counter
 from statistics import fmean
@@ -15,12 +17,18 @@ from astrbot_plugin_game_recommender.services.recommendation_evaluation import (
 
 try:
     from astrbot_plugin_game_recommender.tests.recommendation_scenario_loader import (
+        EXPECTED_LEGACY_OUTPUT_SHA256,
+        FIXTURE_PATH,
+        LEGACY_OUTPUT_PATH,
         load_recommendation_quality_fixture,
     )
 except ModuleNotFoundError as error:
     if not error.name or not error.name.endswith("recommendation_scenario_loader"):
         raise
     load_recommendation_quality_fixture = None
+    EXPECTED_LEGACY_OUTPUT_SHA256 = ""
+    FIXTURE_PATH = None
+    LEGACY_OUTPUT_PATH = None
 
 
 EXPECTED_CATEGORY_COUNTS = {
@@ -65,6 +73,7 @@ METRIC_NAMES = {
     "fill_rate",
     "intra_list_tag_similarity",
 }
+FROZEN_LEGACY_OUTPUT_SHA256 = "411b01e746fa12d95e357f65d1ae5a0cf06e337fc29fd44f4e66d47df77465cd"
 
 
 class RecommendationScenarioReplayTest(unittest.TestCase):
@@ -86,6 +95,21 @@ class RecommendationScenarioReplayTest(unittest.TestCase):
             Counter(scenario["category"] for scenario in scenarios),
             EXPECTED_CATEGORY_COUNTS,
         )
+
+    def test_legacy_outputs_are_separate_and_hash_locked(self) -> None:
+        self.assertIsNotNone(FIXTURE_PATH)
+        self.assertIsNotNone(LEGACY_OUTPUT_PATH)
+        self.assertNotEqual(FIXTURE_PATH, LEGACY_OUTPUT_PATH)
+        source_fixture = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+        self.assertNotIn("legacy_baseline", source_fixture)
+        self.assertNotIn("legacy_source", source_fixture)
+        for scenario in source_fixture["scenarios"]:
+            self.assertFalse(
+                {"legacy_candidate_ranking", "legacy_ranking", "violating_ids"} & scenario.keys()
+            )
+        actual_hash = hashlib.sha256(LEGACY_OUTPUT_PATH.read_bytes()).hexdigest()
+        self.assertEqual(EXPECTED_LEGACY_OUTPUT_SHA256, FROZEN_LEGACY_OUTPUT_SHA256)
+        self.assertEqual(actual_hash, FROZEN_LEGACY_OUTPUT_SHA256)
 
     def test_scenarios_have_complete_valid_references(self) -> None:
         fixture = self._load_fixture()
@@ -154,7 +178,9 @@ class RecommendationScenarioReplayTest(unittest.TestCase):
                     "legacy ranking must only reference candidates from its scenario",
                 )
                 self.assertIsInstance(scenario["legacy_candidate_ranking"], list)
-                self.assertLessEqual(len(scenario["legacy_candidate_ranking"]), 20)
+                self.assertLessEqual(
+                    len(scenario["legacy_candidate_ranking"]), len(scenario["candidates"])
+                )
                 self.assertEqual(
                     len(scenario["legacy_candidate_ranking"]),
                     len(set(scenario["legacy_candidate_ranking"])),
@@ -185,6 +211,12 @@ class RecommendationScenarioReplayTest(unittest.TestCase):
             )
         )
         self.assertTrue(any(len(scenario["candidates"]) > 20 for scenario in fixture["scenarios"]))
+        self.assertTrue(
+            any(
+                _recall_for(scenario, 20) < _recall_for(scenario, 21)
+                for scenario in fixture["scenarios"]
+            )
+        )
         self.assertTrue(any(result["fill_rate"] < 1.0 for result in evaluations))
         self.assertTrue(any(result["constraint_violation_rate"] > 0.0 for result in evaluations))
         self.assertTrue(any(result["intra_list_tag_similarity"] >= 0.8 for result in evaluations))
@@ -197,10 +229,6 @@ class RecommendationScenarioReplayTest(unittest.TestCase):
             {
                 "commit": "c6af3a9ae310e2ac6b0dcca970d96bbae8086ec6",
                 "method": "curated offline legacy behavior snapshot",
-                "replay_command": (
-                    "PYTHONPATH=/Users/jiangxingda/Projects/QQChatbot "
-                    ".venv/bin/python -m unittest tests/test_recommendation_scenario_replay.py"
-                ),
             },
         )
         per_scenario = {
@@ -243,6 +271,13 @@ def _evaluate_scenario(scenario: dict[str, Any]) -> dict[str, float]:
         "fill_rate": fill_rate(ranking, target_count=target_count),
         "intra_list_tag_similarity": intra_list_tag_similarity(ranking, tags_by_id),
     }
+
+
+def _recall_for(scenario: dict[str, Any], k: int) -> float:
+    relevance_by_id = {
+        candidate["id"]: candidate["relevance"] for candidate in scenario["candidates"]
+    }
+    return recall_at_k(scenario["legacy_candidate_ranking"], relevance_by_id, k=k)
 
 
 if __name__ == "__main__":
