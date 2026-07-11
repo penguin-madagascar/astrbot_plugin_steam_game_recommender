@@ -33,6 +33,8 @@ class TagNormalizerTest(unittest.TestCase):
         self.assertEqual(normalizer.normalize_tag("Simplified Chinese"), "chinese")
         self.assertEqual(normalizer.normalize_tag("开放世界"), "open_world")
         self.assertEqual(normalizer.normalize_tag("Story Rich"), "story_rich")
+        self.assertEqual(normalizer.normalize_tag("魂类"), "soulslike")
+        self.assertEqual(normalizer.normalize_tag("类魂"), "soulslike")
 
         tags = normalizer.canonical_tags_from_terms(
             ["双人", "Local Co-op", "休闲", "Puzzle", "恐怖", "剧情向"]

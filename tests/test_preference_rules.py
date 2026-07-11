@@ -11,6 +11,123 @@ from astrbot_plugin_game_recommender.storage.models import GamePreference
 
 
 class PreferenceRulesTest(unittest.TestCase):
+    def test_positive_horror_and_soulslike_intent_is_not_treated_as_exclusion(self) -> None:
+        cases = (
+            ("想玩恐怖合作游戏", "horror"),
+            ("想玩魂类动作游戏", "soulslike"),
+        )
+
+        for text, tag in cases:
+            with self.subTest(text=text):
+                preference = infer_preference_from_text(text)
+                self.assertIn(tag, [*preference.genres_like, *preference.extra_tags])
+                self.assertNotIn(tag, preference.genres_dislike)
+
+    def test_explicit_negative_horror_and_soulslike_intent_is_excluded(self) -> None:
+        cases = (
+            ("推荐合作游戏，不要恐怖", "horror"),
+            ("别推荐魂类游戏", "soulslike"),
+        )
+
+        for text, tag in cases:
+            with self.subTest(text=text):
+                preference = infer_preference_from_text(text)
+                self.assertIn(tag, preference.genres_dislike)
+                self.assertNotIn(tag, [*preference.genres_like, *preference.extra_tags])
+
+    def test_latest_explicit_text_polarity_overrides_llm_conflicts(self) -> None:
+        negative = merge_text_preference(
+            GamePreference(genres_like=["horror"], extra_tags=["horror"]),
+            "这次不要恐怖游戏",
+        )
+        positive = merge_text_preference(
+            GamePreference(genres_dislike=["horror"]),
+            "之前不要恐怖，但现在想玩恐怖游戏",
+        )
+        chinese_alias = merge_text_preference(
+            GamePreference(genres_like=["魂类"], extra_tags=["类魂"]),
+            "不要魂类",
+        )
+
+        self.assertIn("horror", negative.genres_dislike)
+        self.assertNotIn("horror", [*negative.genres_like, *negative.extra_tags])
+        self.assertIn("horror", [*positive.genres_like, *positive.extra_tags])
+        self.assertNotIn("horror", positive.genres_dislike)
+        self.assertNotIn("魂类", chinese_alias.genres_like)
+        self.assertNotIn("类魂", chinese_alias.extra_tags)
+        self.assertIn("soulslike", chinese_alias.genres_dislike)
+
+    def test_latest_polarity_wins_without_punctuation(self) -> None:
+        preference = infer_preference_from_text("不要恐怖但现在想玩恐怖，也不要魂类但改成想玩魂类")
+
+        self.assertIn("horror", [*preference.genres_like, *preference.extra_tags])
+        self.assertNotIn("horror", preference.genres_dislike)
+        self.assertIn("soulslike", [*preference.genres_like, *preference.extra_tags])
+        self.assertNotIn("soulslike", preference.genres_dislike)
+
+    def test_extracts_explicit_hard_requirements_as_required_tags(self) -> None:
+        preference = infer_preference_from_text(
+            "必须支持中文和本地合作，而且一定要多人联机，最好轻松一点"
+        )
+
+        self.assertEqual(
+            preference.required_tags,
+            ["chinese", "local_coop", "multiplayer"],
+        )
+        self.assertNotIn("relaxing", preference.required_tags)
+        self.assertIn("relaxing", preference.extra_tags)
+
+    def test_hard_requirement_scope_stops_before_soft_gameplay_description(self) -> None:
+        preference = infer_preference_from_text("必须支持中文的合作解谜游戏")
+
+        self.assertEqual(preference.required_tags, ["chinese"])
+        self.assertIn("co-op", preference.genres_like)
+        self.assertIn("puzzle", preference.genres_like)
+
+    def test_local_coop_requires_explicit_local_semantics(self) -> None:
+        required = infer_preference_from_text("必须本地双人合作")
+        soft = infer_preference_from_text("想找双人合作游戏")
+
+        self.assertEqual(required.required_tags, ["local_coop"])
+        self.assertNotIn("local co-op", soft.genres_like)
+
+    def test_separates_positive_and_negative_reference_games(self) -> None:
+        preference = infer_preference_from_text(
+            "想找类似星露谷物语的游戏，不要像黑暗之魂，也不喜欢杀戮尖塔这类游戏"
+        )
+
+        self.assertEqual(preference.reference_games_like, ["星露谷物语"])
+        self.assertEqual(
+            preference.reference_games_dislike,
+            ["黑暗之魂", "杀戮尖塔"],
+        )
+
+    def test_extracts_explicit_positive_reference_wording(self) -> None:
+        preference = infer_preference_from_text("喜欢双人成行，不喜欢胡闹厨房这类游戏")
+
+        self.assertEqual(preference.reference_games_like, ["双人成行"])
+        self.assertEqual(preference.reference_games_dislike, ["胡闹厨房"])
+
+    def test_plain_tag_exclusions_are_not_misclassified_as_reference_games(self) -> None:
+        preference = infer_preference_from_text("不要恐怖，不要魂类，不要高难，也不要双人合作")
+
+        self.assertEqual(preference.reference_games_dislike, [])
+
+    def test_explicit_negative_tag_wins_over_positive_reference_expansion(self) -> None:
+        preference = infer_preference_from_text("类似黑暗之魂的氛围，但不要魂类战斗")
+
+        self.assertIn("soulslike", preference.genres_dislike)
+        self.assertNotIn("soulslike", [*preference.genres_like, *preference.extra_tags])
+
+    def test_explicit_negative_reference_overrides_llm_positive_reference(self) -> None:
+        merged = merge_text_preference(
+            GamePreference(reference_games_like=["黑暗之魂"]),
+            "不要像黑暗之魂",
+        )
+
+        self.assertNotIn("黑暗之魂", merged.reference_games_like)
+        self.assertIn("黑暗之魂", merged.reference_games_dislike)
+
     def test_infers_steampeek_profile_terms_from_user_text(self) -> None:
         preference = infer_preference_from_text(
             "推荐几个适合 Switch 和 Steam 的双人游戏，不要恐怖，"

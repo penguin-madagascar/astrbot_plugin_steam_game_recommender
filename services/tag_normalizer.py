@@ -120,6 +120,8 @@ TAG_ALIASES = {
     "souls like": "soulslike",
     "魂like": "soulslike",
     "魂系": "soulslike",
+    "魂类": "soulslike",
+    "类魂": "soulslike",
     "roguelike": "roguelike",
     "rogue like": "roguelike",
     "roguelite": "roguelike",

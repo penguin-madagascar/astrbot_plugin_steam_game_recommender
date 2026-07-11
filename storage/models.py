@@ -76,6 +76,7 @@ def normalize_platform(value: str) -> str:
 
 class GamePreference(BaseModel):
     platforms: list[str] = Field(default_factory=list)
+    required_tags: list[str] = Field(default_factory=list)
     genres_like: list[str] = Field(default_factory=list)
     extra_tags: list[str] = Field(default_factory=list)
     genres_dislike: list[str] = Field(default_factory=list)
@@ -102,6 +103,7 @@ class GamePreference(BaseModel):
         "genres_like",
         "extra_tags",
         "genres_dislike",
+        "required_tags",
         "reference_games_like",
         "reference_games_dislike",
         "parse_warnings",

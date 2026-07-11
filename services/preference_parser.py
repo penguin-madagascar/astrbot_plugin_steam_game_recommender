@@ -20,6 +20,7 @@ PREFERENCE_SCHEMA_HINT = """
 返回 JSON 字段必须包括：
 {
   "platforms": ["steam", "pc"],
+  "required_tags": [],
   "genres_like": [],
   "extra_tags": [],
   "genres_dislike": [],
@@ -36,15 +37,20 @@ PREFERENCE_SCHEMA_HINT = """
   "result_count": 5
 }
 说明：
+- required_tags 只放用户用“必须”“一定要”“只接受”等措辞明确要求的硬条件，
+  使用规范标签，例如 chinese、local_coop、online_coop、multiplayer。
 - genres_like 放用户明确说出的类型/玩法标签。
 - extra_tags 放你从自然语言总结出的补充标签，例如“轻松”“本地合作”“剧情合作”“短流程”。
 - reference_games_like 只放用户提到的相似游戏名，不要把相似游戏扩写成推荐结果。
 - reference_search_terms 放参考游戏的 Steam 搜索友好标题候选，例如“黑暗之魂”对应 “Dark Souls”。
 - genres_dislike 放排除标签，例如恐怖、魂类、肉鸽、纯单人、pvp。
+- 同一标签出现冲突时，以用户文本中最后一次明确表达的喜欢/排除极性为准。
+- reference_games_dislike 只放用户明确表示不想要类似体验的参考游戏名。
 - 用户说 3A、AAA、triple-A、大作、单机大作时，按宽泛的 Steam/PC 大作意图处理：
   genres_like 可包含 action、adventure、rpg；extra_tags 包含 aaa、story rich、open world。
   不要把 3A 当成推荐数量，不要因此编造具体游戏名。
-- library_filter_mode 只在用户明确要求时填写：排除已有/exclude-owned 为 "exclude_owned"；仅查看已有/only-owned 为 "only_owned"；否则为 null。
+- library_filter_mode 只在用户明确要求时填写：排除已有/exclude-owned 为 "exclude_owned"；
+  仅查看已有/only-owned 为 "only_owned"；否则为 null。
 - diversity_mode 只允许 "strict"、"balanced"、"high"：
   默认使用 "strict"；用户要求更像、同类优先、严格匹配时也使用 "strict"。
   用户要求适度变化但仍以相似为主时使用 "balanced"。
@@ -75,7 +81,9 @@ class PreferenceParser:
             logger.warning(f"游戏推荐偏好 JSON 修复失败，使用关键词 fallback：{exc}")
 
         preference = keyword_fallback(text)
-        preference.parse_warnings.append("LLM 偏好解析失败，已使用关键词 fallback，结果可能不完整。")
+        preference.parse_warnings.append(
+            "LLM 偏好解析失败，已使用关键词 fallback，结果可能不完整。"
+        )
         return preference
 
     async def _llm_parse(self, event: AstrMessageEvent, text: str) -> str:
