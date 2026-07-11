@@ -235,11 +235,44 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertIn("open_world_survival_craft", enriched.tags)
-        self.assertIn("automation", enriched.tags)
-        self.assertIn("building", enriched.tags)
-        self.assertIn("farming", enriched.tags)
-        self.assertIn("relaxing", enriched.tags)
+        self.assertIn("open_world_survival_craft", enriched.inferred_tags)
+        self.assertIn("automation", enriched.inferred_tags)
+        self.assertIn("building", enriched.inferred_tags)
+        self.assertIn("farming", enriched.inferred_tags)
+        self.assertIn("relaxing", enriched.inferred_tags)
+
+    async def test_description_inference_never_becomes_hard_constraint_evidence(self) -> None:
+        index_module = optional_import("astrbot_plugin_game_recommender.services.steam_index")
+        constraints = optional_import(
+            "astrbot_plugin_game_recommender.services.constraint_evaluator"
+        )
+        service = index_module.SteamGameIndexService(
+            steam_client=NoLiveSearchSteamClient(),
+            cache=MemoryCache({}),
+            min_review_count=0,
+        )
+
+        enriched = await service.enrich_candidate(
+            GameCandidate(
+                title="Unverified Description",
+                platforms=["PC"],
+                tags=["Co-op"],
+                stores=["Steam"],
+                description="A horror story that mentions Chinese only in prose.",
+            )
+        )
+        assessment = constraints.evaluate_candidate_constraints(
+            enriched,
+            required_tags=["chinese"],
+            exclude_tags=["horror"],
+        )
+
+        self.assertNotIn("horror", enriched.tags)
+        self.assertNotIn("chinese", enriched.tags)
+        self.assertIn("horror", enriched.inferred_tags)
+        self.assertIn("chinese", enriched.inferred_tags)
+        self.assertEqual(assessment.status, "unknown")
+        self.assertEqual(assessment.violations, [])
 
     async def test_enrich_candidate_loads_english_steam_tags_and_store_page_tags(self) -> None:
         index_module = optional_import("astrbot_plugin_game_recommender.services.steam_index")

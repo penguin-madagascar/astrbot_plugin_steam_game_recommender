@@ -3,17 +3,23 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from ..storage.models import GameCandidate, GamePreference, RankedGame
+from .diversity import DIVERSITY_STRICT, select_results_by_diversity
 from .similarity_ranker import (
     SteamTagProfile,
     build_profile_from_preference,
     rank_steam_candidates,
 )
-from .diversity import DIVERSITY_STRICT, select_results_by_diversity
-from .tag_normalizer import candidate_canonical_tags, register_steam_tag_aliases
+from .tag_normalizer import (
+    candidate_direct_canonical_tags,
+    canonical_tags_from_terms,
+    extract_description_terms,
+    register_steam_tag_aliases,
+)
 
 STEAM_INDEX_CACHE_KEY = "steam_index:entries"
 STEAM_INDEX_FALLBACK_WARNING = (
-    "Steam 索引暂不可用，已尝试通过 Steam 公共搜索刷新候选；如果仍为空，请换更明确的标签或参考游戏。"
+    "Steam 索引暂不可用，已尝试通过 Steam 公共搜索刷新候选；"
+    "如果仍为空，请换更明确的标签或参考游戏。"
 )
 STEAM_ONLY_SCOPE_WARNING = (
     "当前版本仅覆盖 Steam/PC 推荐，暂不支持 Switch、PlayStation、Xbox 等跨平台候选。"
@@ -24,16 +30,13 @@ AAA_INTENT_MARKERS = {"aaa", "3a", "triple-a", "triple a", "大作", "单机大�
 
 
 class SteamIndexCache(Protocol):
-    async def get_json(self, key: str, ttl_hours: int) -> Any | None:
-        ...
+    async def get_json(self, key: str, ttl_hours: int) -> Any | None: ...
 
-    async def set_json(self, key: str, payload: Any) -> None:
-        ...
+    async def set_json(self, key: str, payload: Any) -> None: ...
 
 
 class SteamIndexClient(Protocol):
-    async def search_games(self, **kwargs: Any) -> list[GameCandidate]:
-        ...
+    async def search_games(self, **kwargs: Any) -> list[GameCandidate]: ...
 
 
 class SteamGameIndexService:
@@ -185,12 +188,19 @@ class SteamGameIndexService:
         data["source_reasons"] = reasons
 
         enriched_candidate = validate_candidate(data)
-        canonical_tags = candidate_canonical_tags(enriched_candidate)
-        if canonical_tags:
-            data["tags"] = dedupe_texts([*(data.get("tags") or []), *canonical_tags])
+        direct_tags = candidate_direct_canonical_tags(enriched_candidate)
+        if direct_tags:
+            data["tags"] = dedupe_texts([*(data.get("tags") or []), *direct_tags])
             if "tag_enrichment:steam_detail" not in reasons:
                 reasons.append("tag_enrichment:steam_detail")
             data["source_reasons"] = reasons
+        if enriched_candidate.description:
+            inferred_tags = canonical_tags_from_terms(
+                extract_description_terms(enriched_candidate.description)
+            )
+            data["inferred_tags"] = dedupe_texts(
+                [*(data.get("inferred_tags") or []), *inferred_tags]
+            )
         if appid is not None and hasattr(self.steam_client, "get_review_summary"):
             try:
                 summary = await self.steam_client.get_review_summary(int(appid))
@@ -216,11 +226,7 @@ def has_supported_steam_platform(preference: GamePreference) -> bool:
 
 
 def unsupported_platforms(preference: GamePreference) -> list[str]:
-    return [
-        platform
-        for platform in preference.platforms
-        if platform not in STEAM_INDEX_PLATFORMS
-    ]
+    return [platform for platform in preference.platforms if platform not in STEAM_INDEX_PLATFORMS]
 
 
 def rank_entries(
@@ -270,7 +276,8 @@ def reference_candidates(
     if not references:
         return []
     return [
-        entry for entry in entries
+        entry
+        for entry in entries
         if entry.title.lower() in references
         or any(reference in entry.title.lower() for reference in references)
         or any(reason.startswith("reference_query:") for reason in entry.source_reasons)
@@ -301,10 +308,12 @@ def has_aaa_intent(preference: GamePreference) -> bool:
 
 
 def reference_terms_for(preference: GamePreference) -> list[str]:
-    return dedupe_texts([
-        *preference.reference_games_like,
-        *preference.reference_search_terms,
-    ])
+    return dedupe_texts(
+        [
+            *preference.reference_games_like,
+            *preference.reference_search_terms,
+        ]
+    )
 
 
 def parse_entries(payload: Any) -> list[GameCandidate]:

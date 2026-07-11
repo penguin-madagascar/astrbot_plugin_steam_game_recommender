@@ -34,7 +34,7 @@ TAG_INTENT_TERMS: dict[str, tuple[str, ...]] = {
     "multiplayer": ("多人联机", "多人", "联机", "multiplayer"),
     "puzzle": ("解谜", "谜题", "puzzle"),
     "adventure": ("冒险", "剧情", "adventure"),
-    "casual": ("休闲", "轻松", "casual"),
+    "casual": ("休闲", "casual"),
     "relaxing": ("轻松", "治愈", "cozy", "relaxing"),
     "action": ("动作", "action"),
     "rpg": ("角色扮演", "rpg"),
@@ -54,15 +54,7 @@ TAG_INTENT_TERMS: dict[str, tuple[str, ...]] = {
     "chinese": ("简体中文", "繁体中文", "中文", "汉化", "chinese"),
 }
 
-REQUIRED_TAG_TERMS: dict[str, tuple[str, ...]] = {
-    "chinese": TAG_INTENT_TERMS["chinese"],
-    "local_coop": TAG_INTENT_TERMS["local_coop"],
-    "online_coop": TAG_INTENT_TERMS["online_coop"],
-    "multiplayer": TAG_INTENT_TERMS["multiplayer"],
-    "co_op": TAG_INTENT_TERMS["co_op"],
-    "relaxing": TAG_INTENT_TERMS["relaxing"],
-    "puzzle": TAG_INTENT_TERMS["puzzle"],
-}
+REQUIRED_TAG_TERMS: dict[str, tuple[str, ...]] = dict(TAG_INTENT_TERMS)
 
 POLARITY_ONLY_TAGS = {"horror", "soulslike", "roguelike", "violent", "singleplayer", "pvp"}
 NEGATIVE_MARKERS = (
@@ -177,6 +169,7 @@ def infer_preference_from_text(text: str) -> GamePreference:
 
     reference_like = extract_reference_games(text)
     reference_dislike = extract_disliked_reference_games(text)
+    reference_like = remove_reference_titles(reference_like, reference_dislike)
     if references_imply_soulslike(reference_like):
         genres_like = merge_lists(genres_like, ["soulslike"])
     if has_aaa_intent(lower):
@@ -281,8 +274,8 @@ def merge_text_preference(preference: GamePreference, text: str) -> GamePreferen
 def extract_reference_games(text: str) -> list[str]:
     titles: list[str] = []
     patterns = [
-        r"(?:类似|像|接近|参考|像是|像\s*)(?:《([^》]+)》|([^，。,.；;!?！？\n]{1,60}))",
-        r"(?:similar to|like)\s+([^，。,.；;!?！？\n]{2,60})",
+        r"(?:类似|像是|接近|参考|像\s*)(?:《([^》]+)》|([^，。,.；;!?！？\n]{1,60}))",
+        r"(?<![0-9a-z_])(?:similar to|like)\b\s+([^，。,.；;!?！？\n]{2,60})",
         r"(?:喜欢|偏爱|钟爱)\s*(?:《([^》]+)》|([^，。,.；;!?！？\n]{2,60}))",
     ]
     for pattern in patterns:
@@ -306,7 +299,7 @@ def extract_disliked_reference_games(text: str) -> list[str]:
         ),
         r"(?:不要|别|不想要|不喜欢|排除|避免)\s*《([^》]+)》",
         r"(?:不喜欢|讨厌)\s*([^，。,.；;!?！？\n]{1,60}?)(?=\s*(?:这类|这种|这一类|这款))",
-        r"(?:not like|unlike|avoid|dislike)\s+([^，。,.；;!?！？\n]{2,60})",
+        r"(?<![0-9a-z_])(?:not like|unlike|avoid|dislike)\b\s+([^，。,.；;!?！？\n]{2,60})",
     ]
     for pattern in patterns:
         for match in re.finditer(pattern, text, flags=re.I):
@@ -323,10 +316,25 @@ def clean_reference_title(value: str | None) -> str:
     if not text:
         return ""
     text = re.split(
-        r"(?:这类|这种|这一类|的|但|不过|不要|别|最好|可以|能|，|。|,|\.|；|;|!|！|\?)",
+        r"(?:这类|这种|这一类|但|不过|不要|别|最好|可以|能|，|。|,|\.|；|;|!|！|\?)",
         text,
         maxsplit=1,
     )[0].strip()
+    if "的" in text:
+        title, suffix = text.rsplit("的", maxsplit=1)
+        descriptive_prefixes = (
+            "游戏",
+            "作品",
+            "玩法",
+            "多人",
+            "双人",
+            "单人",
+            "合作",
+            "同类",
+            "风格",
+        )
+        if suffix.startswith(descriptive_prefixes) or suffix.endswith("游戏"):
+            text = title.strip()
     return text[:80]
 
 
@@ -396,7 +404,7 @@ def extract_required_tags(text: str, polarities: dict[str, str] | None = None) -
         covered_spans.append((start, end))
         if final_polarities.get(tag) == "negative":
             continue
-        requirement_left = re.split(r"[，。,.；;!?！？\n的]", lower[:start])[-1]
+        requirement_left = re.split(r"的", clause_left(lower, start))[-1]
         if any(marker in requirement_left[-24:] for marker in HARD_REQUIREMENT_MARKERS):
             required = merge_lists(required, [tag])
     return required

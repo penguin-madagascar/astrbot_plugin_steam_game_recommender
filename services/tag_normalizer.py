@@ -189,10 +189,14 @@ def canonical_tags_from_terms(values: list[str] | tuple[str, ...]) -> list[str]:
 
 
 def candidate_canonical_tags(candidate: GameCandidate) -> list[str]:
-    values = [*candidate.genres, *candidate.tags]
+    values = [*candidate.genres, *candidate.tags, *candidate.inferred_tags]
     if candidate.description:
         values.extend(extract_description_terms(candidate.description))
     return canonical_tags_from_terms(values)
+
+
+def candidate_direct_canonical_tags(candidate: GameCandidate) -> list[str]:
+    return canonical_tags_from_terms([*candidate.genres, *candidate.tags])
 
 
 def extract_description_terms(text: str) -> list[str]:

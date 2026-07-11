@@ -253,6 +253,7 @@ class GameCandidate(BaseModel):
     platforms: list[str] = Field(default_factory=list)
     genres: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
+    inferred_tags: list[str] = Field(default_factory=list)
     metacritic: int | None = None
     released: str | None = None
     release_date: str | None = None
@@ -274,7 +275,7 @@ class GameCandidate(BaseModel):
     facts: "GameFacts" = Field(default_factory=lambda: GameFacts())
     description: str | None = None
 
-    @validator("platforms", "genres", "tags", "stores", pre=True)
+    @validator("platforms", "genres", "tags", "inferred_tags", "stores", pre=True)
     def _normalize_lists(cls, value: Any) -> list[str]:
         return split_text_list(value)
 

@@ -77,12 +77,24 @@ class PreferenceRulesTest(unittest.TestCase):
         self.assertNotIn("relaxing", preference.required_tags)
         self.assertIn("relaxing", preference.extra_tags)
 
+    def test_all_recognized_tags_can_be_explicit_hard_requirements(self) -> None:
+        preference = infer_preference_from_text("必须恐怖，而且一定要魂类动作")
+
+        self.assertEqual(
+            preference.required_tags,
+            ["horror", "soulslike", "action"],
+        )
+
     def test_hard_requirement_scope_stops_before_soft_gameplay_description(self) -> None:
         preference = infer_preference_from_text("必须支持中文的合作解谜游戏")
 
         self.assertEqual(preference.required_tags, ["chinese"])
         self.assertIn("co-op", preference.genres_like)
         self.assertIn("puzzle", preference.genres_like)
+
+        contrasted = infer_preference_from_text("必须中文但合作解谜只要轻松就好")
+
+        self.assertEqual(contrasted.required_tags, ["chinese", "relaxing"])
 
     def test_local_coop_requires_explicit_local_semantics(self) -> None:
         required = infer_preference_from_text("必须本地双人合作")
@@ -107,6 +119,22 @@ class PreferenceRulesTest(unittest.TestCase):
 
         self.assertEqual(preference.reference_games_like, ["双人成行"])
         self.assertEqual(preference.reference_games_dislike, ["胡闹厨房"])
+
+    def test_english_negative_reference_does_not_leak_into_positive_references(self) -> None:
+        preference = infer_preference_from_text("I dislike Dark Souls")
+
+        self.assertEqual(preference.reference_games_like, [])
+        self.assertEqual(preference.reference_games_dislike, ["dark souls"])
+        self.assertNotIn("soulslike", preference.genres_like)
+
+    def test_preserves_chinese_titles_containing_de_and_matches_xiangshi(self) -> None:
+        plain = infer_preference_from_text("类似我的世界的游戏")
+        bracketed = infer_preference_from_text("类似《我的世界》的游戏")
+        xiangshi = infer_preference_from_text("像是双人成行")
+
+        self.assertEqual(plain.reference_games_like, ["我的世界"])
+        self.assertEqual(bracketed.reference_games_like, ["我的世界"])
+        self.assertEqual(xiangshi.reference_games_like, ["双人成行"])
 
     def test_plain_tag_exclusions_are_not_misclassified_as_reference_games(self) -> None:
         preference = infer_preference_from_text("不要恐怖，不要魂类，不要高难，也不要双人合作")
