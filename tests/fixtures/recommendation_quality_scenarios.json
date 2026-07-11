@@ -1,0 +1,1061 @@
+{
+  "schema_version": 1,
+  "legacy_baseline": {
+    "ndcg_at_target": 0.605947,
+    "recall_at_20": 0.829861,
+    "constraint_violation_rate": 0.194444,
+    "fill_rate": 0.861111,
+    "intra_list_tag_similarity": 0.337227
+  },
+  "scenarios": [
+    {
+      "id": "polarity-horror-positive",
+      "category": "polarity",
+      "query": "想玩恐怖合作游戏",
+      "target_count": 3,
+      "candidates": [
+        {
+          "id": "p1-a",
+          "title": "Night Shift Co-op",
+          "tags": [
+            "horror",
+            "co_op",
+            "adventure"
+          ],
+          "relevance": 3
+        },
+        {
+          "id": "p1-b",
+          "title": "Cozy Partners",
+          "tags": [
+            "relaxing",
+            "co_op",
+            "casual"
+          ],
+          "relevance": 1
+        },
+        {
+          "id": "p1-c",
+          "title": "Solo Puzzle",
+          "tags": [
+            "singleplayer",
+            "puzzle"
+          ],
+          "relevance": 0
+        }
+      ],
+      "legacy_ranking": [
+        "p1-b",
+        "p1-a",
+        "p1-c"
+      ],
+      "violating_ids": []
+    },
+    {
+      "id": "polarity-horror-negative",
+      "category": "polarity",
+      "query": "推荐合作游戏，不要恐怖",
+      "target_count": 3,
+      "candidates": [
+        {
+          "id": "p2-a",
+          "title": "Safe Puzzle Crew",
+          "tags": [
+            "co_op",
+            "puzzle"
+          ],
+          "relevance": 3
+        },
+        {
+          "id": "p2-b",
+          "title": "Haunted Crew",
+          "tags": [
+            "co_op",
+            "puzzle",
+            "horror"
+          ],
+          "relevance": 0
+        },
+        {
+          "id": "p2-c",
+          "title": "Friendly Expedition",
+          "tags": [
+            "co_op",
+            "adventure"
+          ],
+          "relevance": 2
+        }
+      ],
+      "legacy_ranking": [
+        "p2-b",
+        "p2-c",
+        "p2-a"
+      ],
+      "violating_ids": [
+        "p2-b"
+      ]
+    },
+    {
+      "id": "polarity-souls-positive",
+      "category": "polarity",
+      "query": "想玩魂类动作游戏",
+      "target_count": 3,
+      "candidates": [
+        {
+          "id": "p3-a",
+          "title": "Ashen Trial",
+          "tags": [
+            "soulslike",
+            "action",
+            "rpg"
+          ],
+          "relevance": 3
+        },
+        {
+          "id": "p3-b",
+          "title": "Easy Quest",
+          "tags": [
+            "casual",
+            "adventure"
+          ],
+          "relevance": 1
+        },
+        {
+          "id": "p3-c",
+          "title": "Action Realm",
+          "tags": [
+            "action",
+            "rpg"
+          ],
+          "relevance": 2
+        }
+      ],
+      "legacy_ranking": [
+        "p3-c",
+        "p3-b",
+        "p3-a"
+      ],
+      "violating_ids": []
+    },
+    {
+      "id": "polarity-souls-negative",
+      "category": "polarity",
+      "query": "动作冒险，但不要魂类",
+      "target_count": 3,
+      "candidates": [
+        {
+          "id": "p4-a",
+          "title": "Bright Expedition",
+          "tags": [
+            "action",
+            "adventure"
+          ],
+          "relevance": 3
+        },
+        {
+          "id": "p4-b",
+          "title": "Punishing Kingdom",
+          "tags": [
+            "soulslike",
+            "action",
+            "rpg"
+          ],
+          "relevance": 0
+        },
+        {
+          "id": "p4-c",
+          "title": "Puzzle Journey",
+          "tags": [
+            "adventure",
+            "puzzle"
+          ],
+          "relevance": 2
+        }
+      ],
+      "legacy_ranking": [
+        "p4-b",
+        "p4-a"
+      ],
+      "violating_ids": [
+        "p4-b"
+      ]
+    },
+    {
+      "id": "required-chinese",
+      "category": "hard_constraints",
+      "query": "必须支持中文的合作解谜",
+      "target_count": 3,
+      "candidates": [
+        {
+          "id": "h1-a",
+          "title": "Chinese Puzzle Duo",
+          "tags": [
+            "co_op",
+            "puzzle",
+            "chinese"
+          ],
+          "relevance": 3
+        },
+        {
+          "id": "h1-b",
+          "title": "Unknown Language Duo",
+          "tags": [
+            "co_op",
+            "puzzle"
+          ],
+          "relevance": 2
+        },
+        {
+          "id": "h1-c",
+          "title": "English Solo Puzzle",
+          "tags": [
+            "singleplayer",
+            "puzzle",
+            "english_only"
+          ],
+          "relevance": 0
+        }
+      ],
+      "legacy_ranking": [
+        "h1-b",
+        "h1-c",
+        "h1-a"
+      ],
+      "violating_ids": [
+        "h1-c"
+      ]
+    },
+    {
+      "id": "required-local-coop",
+      "category": "hard_constraints",
+      "query": "必须本地双人合作",
+      "target_count": 3,
+      "candidates": [
+        {
+          "id": "h2-a",
+          "title": "Couch Heroes",
+          "tags": [
+            "co_op",
+            "local_coop"
+          ],
+          "relevance": 3
+        },
+        {
+          "id": "h2-b",
+          "title": "Online Partners",
+          "tags": [
+            "co_op",
+            "online_coop"
+          ],
+          "relevance": 1
+        },
+        {
+          "id": "h2-c",
+          "title": "Solo Hero",
+          "tags": [
+            "singleplayer",
+            "action"
+          ],
+          "relevance": 0
+        }
+      ],
+      "legacy_ranking": [
+        "h2-b",
+        "h2-c",
+        "h2-a"
+      ],
+      "violating_ids": [
+        "h2-c"
+      ]
+    },
+    {
+      "id": "required-multiplayer",
+      "category": "hard_constraints",
+      "query": "必须支持多人游玩",
+      "target_count": 3,
+      "candidates": [
+        {
+          "id": "h3-a",
+          "title": "Team Workshop",
+          "tags": [
+            "co_op",
+            "multiplayer",
+            "building"
+          ],
+          "relevance": 3
+        },
+        {
+          "id": "h3-b",
+          "title": "Arena Friends",
+          "tags": [
+            "multiplayer",
+            "action"
+          ],
+          "relevance": 2
+        },
+        {
+          "id": "h3-c",
+          "title": "Lonely Workshop",
+          "tags": [
+            "singleplayer",
+            "building"
+          ],
+          "relevance": 0
+        }
+      ],
+      "legacy_ranking": [
+        "h3-c",
+        "h3-a",
+        "h3-b"
+      ],
+      "violating_ids": [
+        "h3-c"
+      ]
+    },
+    {
+      "id": "required-relaxing",
+      "category": "hard_constraints",
+      "query": "必须轻松，不要高难",
+      "target_count": 3,
+      "candidates": [
+        {
+          "id": "h4-a",
+          "title": "Calm Farm",
+          "tags": [
+            "relaxing",
+            "farming",
+            "casual"
+          ],
+          "relevance": 3
+        },
+        {
+          "id": "h4-b",
+          "title": "Casual Builder",
+          "tags": [
+            "casual",
+            "building"
+          ],
+          "relevance": 2
+        },
+        {
+          "id": "h4-c",
+          "title": "Brutal Run",
+          "tags": [
+            "difficult",
+            "action"
+          ],
+          "relevance": 0
+        }
+      ],
+      "legacy_ranking": [
+        "h4-b"
+      ],
+      "violating_ids": [
+        "h4-c"
+      ]
+    },
+    {
+      "id": "reference-stardew-positive",
+      "category": "positive_negative_reference",
+      "query": "类似星露谷物语的游戏",
+      "target_count": 3,
+      "candidates": [
+        {
+          "id": "r1-a",
+          "title": "Village Seasons",
+          "tags": [
+            "farming",
+            "life_sim",
+            "relaxing"
+          ],
+          "relevance": 3
+        },
+        {
+          "id": "r1-b",
+          "title": "Factory Manager",
+          "tags": [
+            "management",
+            "automation"
+          ],
+          "relevance": 2
+        },
+        {
+          "id": "r1-c",
+          "title": "Combat Arena",
+          "tags": [
+            "action",
+            "pvp"
+          ],
+          "relevance": 0
+        }
+      ],
+      "legacy_ranking": [
+        "r1-b",
+        "r1-c",
+        "r1-a"
+      ],
+      "violating_ids": []
+    },
+    {
+      "id": "reference-dark-souls-negative-tag",
+      "category": "positive_negative_reference",
+      "query": "类似黑暗之魂的氛围，但不要魂类战斗",
+      "target_count": 3,
+      "candidates": [
+        {
+          "id": "r2-a",
+          "title": "Gothic Adventure",
+          "tags": [
+            "dark_fantasy",
+            "adventure",
+            "story_rich"
+          ],
+          "relevance": 3
+        },
+        {
+          "id": "r2-b",
+          "title": "Punishing Souls",
+          "tags": [
+            "dark_fantasy",
+            "soulslike",
+            "action"
+          ],
+          "relevance": 0
+        },
+        {
+          "id": "r2-c",
+          "title": "Shadow RPG",
+          "tags": [
+            "dark_fantasy",
+            "rpg"
+          ],
+          "relevance": 2
+        }
+      ],
+      "legacy_ranking": [
+        "r2-b",
+        "r2-c",
+        "r2-a"
+      ],
+      "violating_ids": [
+        "r2-b"
+      ]
+    },
+    {
+      "id": "reference-slay-spire-negative",
+      "category": "positive_negative_reference",
+      "query": "不要类似杀戮尖塔的牌组构筑",
+      "target_count": 3,
+      "candidates": [
+        {
+          "id": "r3-a",
+          "title": "Turn Tactics",
+          "tags": [
+            "strategy",
+            "turn_based"
+          ],
+          "relevance": 3
+        },
+        {
+          "id": "r3-b",
+          "title": "Deck Dungeon",
+          "tags": [
+            "deckbuilding",
+            "card_battler"
+          ],
+          "relevance": 0
+        },
+        {
+          "id": "r3-c",
+          "title": "Logic Campaign",
+          "tags": [
+            "puzzle",
+            "strategy"
+          ],
+          "relevance": 2
+        }
+      ],
+      "legacy_ranking": [
+        "r3-b",
+        "r3-a",
+        "r3-c"
+      ],
+      "violating_ids": [
+        "r3-b"
+      ]
+    },
+    {
+      "id": "reference-positive-and-negative",
+      "category": "positive_negative_reference",
+      "query": "喜欢双人成行，不喜欢胡闹厨房这类",
+      "target_count": 3,
+      "candidates": [
+        {
+          "id": "r4-a",
+          "title": "Story Partners",
+          "tags": [
+            "co_op",
+            "puzzle",
+            "story_rich"
+          ],
+          "relevance": 3
+        },
+        {
+          "id": "r4-b",
+          "title": "Kitchen Panic",
+          "tags": [
+            "co_op",
+            "cooking",
+            "time_management"
+          ],
+          "relevance": 0
+        },
+        {
+          "id": "r4-c",
+          "title": "Puzzle Partners",
+          "tags": [
+            "co_op",
+            "puzzle"
+          ],
+          "relevance": 2
+        }
+      ],
+      "legacy_ranking": [
+        "r4-b",
+        "r4-c",
+        "r4-a"
+      ],
+      "violating_ids": [
+        "r4-b"
+      ]
+    },
+    {
+      "id": "aaa-open-world",
+      "category": "aaa",
+      "query": "推荐开放世界3A大作",
+      "target_count": 3,
+      "candidates": [
+        {
+          "id": "a1-a",
+          "title": "Grand Frontier",
+          "tags": [
+            "aaa",
+            "open_world",
+            "action",
+            "story_rich"
+          ],
+          "relevance": 3
+        },
+        {
+          "id": "a1-b",
+          "title": "Small Adventure",
+          "tags": [
+            "indie",
+            "adventure"
+          ],
+          "relevance": 1
+        },
+        {
+          "id": "a1-c",
+          "title": "Action Campaign",
+          "tags": [
+            "aaa",
+            "action"
+          ],
+          "relevance": 2
+        }
+      ],
+      "legacy_ranking": [
+        "a1-c",
+        "a1-b",
+        "a1-a"
+      ],
+      "violating_ids": []
+    },
+    {
+      "id": "aaa-story-rich",
+      "category": "aaa",
+      "query": "想玩剧情丰富的3A单机",
+      "target_count": 3,
+      "candidates": [
+        {
+          "id": "a2-a",
+          "title": "Cinematic Realm",
+          "tags": [
+            "aaa",
+            "story_rich",
+            "adventure"
+          ],
+          "relevance": 3
+        },
+        {
+          "id": "a2-b",
+          "title": "Arena Blockbuster",
+          "tags": [
+            "aaa",
+            "pvp",
+            "action"
+          ],
+          "relevance": 1
+        },
+        {
+          "id": "a2-c",
+          "title": "Epic RPG",
+          "tags": [
+            "aaa",
+            "rpg",
+            "story_rich"
+          ],
+          "relevance": 2
+        }
+      ],
+      "legacy_ranking": [
+        "a2-c",
+        "a2-a",
+        "a2-b"
+      ],
+      "violating_ids": []
+    },
+    {
+      "id": "aaa-broad-empty",
+      "category": "aaa",
+      "query": "随便推荐几款3A游戏",
+      "target_count": 3,
+      "candidates": [
+        {
+          "id": "a3-a",
+          "title": "Open World Saga",
+          "tags": [
+            "aaa",
+            "open_world",
+            "action"
+          ],
+          "relevance": 3
+        },
+        {
+          "id": "a3-b",
+          "title": "Big Budget Shooter",
+          "tags": [
+            "aaa",
+            "shooter"
+          ],
+          "relevance": 2
+        },
+        {
+          "id": "a3-c",
+          "title": "Niche Simulator",
+          "tags": [
+            "simulation"
+          ],
+          "relevance": 1
+        }
+      ],
+      "legacy_ranking": [],
+      "violating_ids": []
+    },
+    {
+      "id": "budget-soft-ranking",
+      "category": "budget_library",
+      "query": "预算100元以内，推荐合作游戏",
+      "target_count": 3,
+      "candidates": [
+        {
+          "id": "b1-a",
+          "title": "Affordable Duo",
+          "tags": [
+            "co_op",
+            "puzzle"
+          ],
+          "relevance": 3,
+          "price_cny": 68
+        },
+        {
+          "id": "b1-b",
+          "title": "Unknown Price Duo",
+          "tags": [
+            "co_op",
+            "adventure"
+          ],
+          "relevance": 2,
+          "price_cny": null
+        },
+        {
+          "id": "b1-c",
+          "title": "Premium Duo",
+          "tags": [
+            "co_op",
+            "puzzle"
+          ],
+          "relevance": 1,
+          "price_cny": 199
+        }
+      ],
+      "legacy_ranking": [
+        "b1-c",
+        "b1-b"
+      ],
+      "violating_ids": []
+    },
+    {
+      "id": "library-exclude-owned",
+      "category": "budget_library",
+      "query": "排除已有的合作游戏",
+      "target_count": 3,
+      "candidates": [
+        {
+          "id": "b2-a",
+          "title": "Fresh Co-op",
+          "tags": [
+            "co_op",
+            "puzzle"
+          ],
+          "relevance": 3,
+          "owned": false
+        },
+        {
+          "id": "b2-b",
+          "title": "Owned Co-op",
+          "tags": [
+            "co_op",
+            "puzzle"
+          ],
+          "relevance": 0,
+          "owned": true
+        },
+        {
+          "id": "b2-c",
+          "title": "Fresh Adventure",
+          "tags": [
+            "co_op",
+            "adventure"
+          ],
+          "relevance": 2,
+          "owned": false
+        }
+      ],
+      "legacy_ranking": [
+        "b2-b",
+        "b2-a"
+      ],
+      "violating_ids": [
+        "b2-b"
+      ]
+    },
+    {
+      "id": "library-only-owned",
+      "category": "budget_library",
+      "query": "仅查看已有的轻松游戏",
+      "target_count": 3,
+      "candidates": [
+        {
+          "id": "b3-a",
+          "title": "Owned Farm",
+          "tags": [
+            "farming",
+            "relaxing"
+          ],
+          "relevance": 3,
+          "owned": true
+        },
+        {
+          "id": "b3-b",
+          "title": "Unowned Farm",
+          "tags": [
+            "farming",
+            "relaxing"
+          ],
+          "relevance": 0,
+          "owned": false
+        },
+        {
+          "id": "b3-c",
+          "title": "Owned Builder",
+          "tags": [
+            "building",
+            "casual"
+          ],
+          "relevance": 2,
+          "owned": true
+        }
+      ],
+      "legacy_ranking": [
+        "b3-b",
+        "b3-c"
+      ],
+      "violating_ids": [
+        "b3-b"
+      ]
+    },
+    {
+      "id": "diversity-strict-similar",
+      "category": "diversity",
+      "query": "严格匹配合作种田",
+      "target_count": 3,
+      "candidates": [
+        {
+          "id": "d1-a",
+          "title": "Farm Team A",
+          "tags": [
+            "co_op",
+            "farming",
+            "crafting"
+          ],
+          "relevance": 3
+        },
+        {
+          "id": "d1-b",
+          "title": "Farm Team B",
+          "tags": [
+            "co_op",
+            "farming",
+            "crafting"
+          ],
+          "relevance": 3
+        },
+        {
+          "id": "d1-c",
+          "title": "Farm Team C",
+          "tags": [
+            "co_op",
+            "farming",
+            "crafting"
+          ],
+          "relevance": 2
+        }
+      ],
+      "legacy_ranking": [
+        "d1-a",
+        "d1-b",
+        "d1-c"
+      ],
+      "violating_ids": []
+    },
+    {
+      "id": "diversity-balanced",
+      "category": "diversity",
+      "query": "适度多样的合作游戏",
+      "target_count": 3,
+      "candidates": [
+        {
+          "id": "d2-a",
+          "title": "Farm Partners",
+          "tags": [
+            "co_op",
+            "farming",
+            "crafting"
+          ],
+          "relevance": 3
+        },
+        {
+          "id": "d2-b",
+          "title": "Farm Partners Two",
+          "tags": [
+            "co_op",
+            "farming",
+            "crafting"
+          ],
+          "relevance": 2
+        },
+        {
+          "id": "d2-c",
+          "title": "Story Partners",
+          "tags": [
+            "co_op",
+            "story_rich",
+            "choices_matter"
+          ],
+          "relevance": 3
+        }
+      ],
+      "legacy_ranking": [
+        "d2-a",
+        "d2-b",
+        "d2-c"
+      ],
+      "violating_ids": []
+    },
+    {
+      "id": "diversity-high",
+      "category": "diversity",
+      "query": "更多样，避免同质化",
+      "target_count": 3,
+      "candidates": [
+        {
+          "id": "d3-a",
+          "title": "Farm Crew",
+          "tags": [
+            "co_op",
+            "farming",
+            "crafting"
+          ],
+          "relevance": 3
+        },
+        {
+          "id": "d3-b",
+          "title": "Farm Crew Two",
+          "tags": [
+            "co_op",
+            "farming",
+            "crafting"
+          ],
+          "relevance": 2
+        },
+        {
+          "id": "d3-c",
+          "title": "Mystery Crew",
+          "tags": [
+            "co_op",
+            "puzzle",
+            "mystery"
+          ],
+          "relevance": 3
+        },
+        {
+          "id": "d3-d",
+          "title": "Builder Crew",
+          "tags": [
+            "co_op",
+            "building",
+            "automation"
+          ],
+          "relevance": 2
+        }
+      ],
+      "legacy_ranking": [
+        "d3-a",
+        "d3-b",
+        "d3-c"
+      ],
+      "violating_ids": []
+    },
+    {
+      "id": "retry-too-hard",
+      "category": "retry_feedback",
+      "query": "换一批，刚才的太难了",
+      "target_count": 3,
+      "candidates": [
+        {
+          "id": "t1-a",
+          "title": "Gentle Journey",
+          "tags": [
+            "casual",
+            "relaxing",
+            "adventure"
+          ],
+          "relevance": 3
+        },
+        {
+          "id": "t1-b",
+          "title": "Brutal Challenge",
+          "tags": [
+            "difficult",
+            "soulslike"
+          ],
+          "relevance": 0
+        },
+        {
+          "id": "t1-c",
+          "title": "Moderate Quest",
+          "tags": [
+            "adventure",
+            "rpg"
+          ],
+          "relevance": 2
+        }
+      ],
+      "legacy_ranking": [
+        "t1-b",
+        "t1-c",
+        "t1-a"
+      ],
+      "violating_ids": [
+        "t1-b"
+      ]
+    },
+    {
+      "id": "retry-like-second",
+      "category": "retry_feedback",
+      "query": "喜欢第2款这类，再换一批",
+      "target_count": 3,
+      "candidates": [
+        {
+          "id": "t2-a",
+          "title": "Similar Follow-up",
+          "tags": [
+            "co_op",
+            "puzzle",
+            "story_rich"
+          ],
+          "relevance": 3
+        },
+        {
+          "id": "t2-b",
+          "title": "Unrelated Arena",
+          "tags": [
+            "pvp",
+            "shooter"
+          ],
+          "relevance": 1
+        },
+        {
+          "id": "t2-c",
+          "title": "Safe Puzzle",
+          "tags": [
+            "co_op",
+            "puzzle"
+          ],
+          "relevance": 2
+        }
+      ],
+      "legacy_ranking": [
+        "t2-b",
+        "t2-c",
+        "t2-a"
+      ],
+      "violating_ids": []
+    },
+    {
+      "id": "retry-dislike-first",
+      "category": "retry_feedback",
+      "query": "不喜欢第1款这类，换不同玩法",
+      "target_count": 3,
+      "candidates": [
+        {
+          "id": "t3-a",
+          "title": "Different Builder",
+          "tags": [
+            "building",
+            "automation",
+            "casual"
+          ],
+          "relevance": 3
+        },
+        {
+          "id": "t3-b",
+          "title": "Same Roguelike",
+          "tags": [
+            "roguelike",
+            "action"
+          ],
+          "relevance": 0
+        },
+        {
+          "id": "t3-c",
+          "title": "Neutral Strategy",
+          "tags": [
+            "strategy",
+            "turn_based"
+          ],
+          "relevance": 2
+        }
+      ],
+      "legacy_ranking": [
+        "t3-b",
+        "t3-c"
+      ],
+      "violating_ids": [
+        "t3-b"
+      ]
+    }
+  ]
+}
