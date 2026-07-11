@@ -23,6 +23,12 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
                         ["Co-op", "Local Co-op", "Puzzle", "Adventure", "Split Screen"],
                     )
                 ],
+                "It Takes Two": [
+                    steam_game(
+                        "It Takes Two",
+                        ["Co-op", "Local Co-op", "Puzzle", "Adventure", "Split Screen"],
+                    )
+                ],
                 "co op relaxing multiplayer": [
                     steam_game(
                         "Focused Co-op Puzzle",
@@ -44,6 +50,7 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
                 genres_like=["co-op"],
                 extra_tags=["轻松"],
                 reference_games_like=["双人成行"],
+                reference_search_terms=["It Takes Two"],
                 players=2,
                 result_count=3,
             ),
@@ -93,7 +100,7 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
     async def test_cached_index_orders_tag_coverage_before_reviews(self) -> None:
         cache = MemoryCache(
             {
-                "steam_index:entries": [
+                "steam_index:v2": [
                     dump_model(
                         steam_game(
                             "High Review Generic Co-op",
@@ -135,7 +142,7 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
     async def test_cached_index_defaults_to_strict_primary_ranking(self) -> None:
         cache = MemoryCache(
             {
-                "steam_index:entries": [
+                "steam_index:v2": [
                     dump_model(
                         steam_game("Farm Co-op A", ["Co-op", "Puzzle", "Farming", "Crafting"])
                     ),
@@ -169,7 +176,7 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
     async def test_cached_index_applies_explicit_balanced_diversity(self) -> None:
         cache = MemoryCache(
             {
-                "steam_index:entries": [
+                "steam_index:v2": [
                     dump_model(
                         steam_game("Farm Co-op A", ["Co-op", "Puzzle", "Farming", "Crafting"])
                     ),
@@ -277,7 +284,14 @@ class MemoryCache:
         self.writes: dict[str, Any] = {}
 
     async def get_json(self, key: str, _ttl_hours: int) -> Any | None:
-        return self.payloads.get(key)
+        payload = self.payloads.get(key)
+        if key == "steam_index:v2" and isinstance(payload, list):
+            return {
+                "version": 2,
+                "entries": [{"candidate": entry, "refreshed_at": 1.0} for entry in payload],
+                "search_coverage": {},
+            }
+        return payload
 
     async def set_json(self, key: str, payload: Any) -> None:
         self.writes[key] = payload
@@ -300,7 +314,7 @@ class SearchAwareSteamClient:
 
 class NoLiveSearchSteamClient:
     async def search_games(self, **_kwargs: Any) -> list[GameCandidate]:
-        raise AssertionError("cached index recommendations must not call live Steam search")
+        return []
 
 
 if __name__ == "__main__":

@@ -145,15 +145,21 @@ class IndexCache:
         self.entries = entries
 
     async def get_json(self, _key: str, _ttl_hours: int) -> Any:
-        return [entry.model_dump() for entry in self.entries]
+        return {
+            "version": 2,
+            "entries": [
+                {"candidate": entry.model_dump(), "refreshed_at": 1.0} for entry in self.entries
+            ],
+            "search_coverage": {},
+        }
 
     async def set_json(self, _key: str, _payload: Any) -> None:
-        raise AssertionError("cached test should not refresh")
+        return None
 
 
 class NoLiveSearchSteamClient:
     async def search_games(self, **_kwargs: Any):
-        raise AssertionError("cached test should not search")
+        return []
 
 
 if __name__ == "__main__":

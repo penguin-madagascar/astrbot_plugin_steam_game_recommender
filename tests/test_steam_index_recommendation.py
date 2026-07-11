@@ -304,7 +304,7 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
         index_module = optional_import("astrbot_plugin_game_recommender.services.steam_index")
         cache = MemoryCache(
             {
-                "steam_index:entries": [
+                "steam_index:v2": [
                     dump_model(
                         steam_index_game(
                             "Generic Multiplayer",
@@ -341,11 +341,11 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
             ["Farm Life Match", "Generic Multiplayer"],
         )
 
-    async def test_recommend_uses_cached_index_without_live_search(self) -> None:
+    async def test_recommend_keeps_cached_results_when_supplemental_search_is_empty(self) -> None:
         index_module = optional_import("astrbot_plugin_game_recommender.services.steam_index")
         cache = MemoryCache(
             {
-                "steam_index:entries": [
+                "steam_index:v2": [
                     dump_model(
                         steam_index_game(
                             "Generic High Review",
@@ -436,7 +436,14 @@ class MemoryCache:
         self.writes: dict[str, Any] = {}
 
     async def get_json(self, key: str, _ttl_hours: int) -> Any | None:
-        return self.payloads.get(key)
+        payload = self.payloads.get(key)
+        if key == "steam_index:v2" and isinstance(payload, list):
+            return {
+                "version": 2,
+                "entries": [{"candidate": entry, "refreshed_at": 1.0} for entry in payload],
+                "search_coverage": {},
+            }
+        return payload
 
     async def set_json(self, key: str, payload: Any) -> None:
         self.writes[key] = payload
@@ -445,7 +452,7 @@ class MemoryCache:
 
 class NoLiveSearchSteamClient:
     async def search_games(self, **_kwargs: Any) -> list[GameCandidate]:
-        raise AssertionError("cached index recommendations must not call live Steam search")
+        return []
 
 
 class TagAwareSteamClient(NoLiveSearchSteamClient):

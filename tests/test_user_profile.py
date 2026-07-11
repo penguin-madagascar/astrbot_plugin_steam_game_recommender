@@ -48,10 +48,13 @@ class UserProfileRankerTest(unittest.TestCase):
             profile_tag_weights={"farming": 1.0, "crafting": 0.9},
         )
 
-        self.assertEqual([game.title for game in ranked], [
-            "Craft Co-op Puzzle",
-            "Generic Co-op Puzzle",
-        ])
+        self.assertEqual(
+            [game.title for game in ranked],
+            [
+                "Craft Co-op Puzzle",
+                "Generic Co-op Puzzle",
+            ],
+        )
         self.assertGreater(ranked[0].facts.profile_weight_bonus, 0)
         self.assertEqual(ranked[0].facts.base_tag_score, ranked[0].facts.match_score)
 
@@ -70,10 +73,13 @@ class UserProfileRankerTest(unittest.TestCase):
             profile_tag_weights={"farming": 1.0, "crafting": 0.9},
         )
 
-        self.assertEqual([game.title for game in ranked], [
-            "Focused Co-op Puzzle",
-            "Profile Favorite Co-op",
-        ])
+        self.assertEqual(
+            [game.title for game in ranked],
+            [
+                "Focused Co-op Puzzle",
+                "Profile Favorite Co-op",
+            ],
+        )
 
 
 class UserProfileSteamIndexTest(unittest.IsolatedAsyncioTestCase):
@@ -94,10 +100,13 @@ class UserProfileSteamIndexTest(unittest.IsolatedAsyncioTestCase):
             profile_tag_weights={"farming": 1.0},
         )
 
-        self.assertEqual([game.title for game in ranked], [
-            "Craft Co-op Puzzle",
-            "Generic Co-op Puzzle",
-        ])
+        self.assertEqual(
+            [game.title for game in ranked],
+            [
+                "Craft Co-op Puzzle",
+                "Generic Co-op Puzzle",
+            ],
+        )
 
 
 class BoundUserProfileLoaderTest(unittest.IsolatedAsyncioTestCase):
@@ -178,15 +187,21 @@ class MemoryCache:
         self.entries = entries
 
     async def get_json(self, _key: str, _ttl_hours: int):
-        return [entry.model_dump() for entry in self.entries]
+        return {
+            "version": 2,
+            "entries": [
+                {"candidate": entry.model_dump(), "refreshed_at": 1.0} for entry in self.entries
+            ],
+            "search_coverage": {},
+        }
 
     async def set_json(self, _key: str, _payload) -> None:
-        raise AssertionError("cached recommendation should not refresh entries")
+        return None
 
 
 class NoLiveSearchSteamClient:
     async def search_games(self, **_kwargs):
-        raise AssertionError("cached recommendation should not call live search")
+        return []
 
 
 class FakeBindingCache:

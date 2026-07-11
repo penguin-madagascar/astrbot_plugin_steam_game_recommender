@@ -1,8 +1,19 @@
 from __future__ import annotations
 
-from typing import Any, Protocol
+import asyncio
+import re
+import time
+from dataclasses import dataclass, field
+from difflib import SequenceMatcher
+from typing import Any, Callable, Protocol
 
-from ..storage.models import GameCandidate, GamePreference, RankedGame
+from ..storage.models import (
+    GameCandidate,
+    GamePreference,
+    RankedGame,
+    ResolvedReferenceGame,
+    SteamSearchHit,
+)
 from .diversity import DIVERSITY_STRICT, select_results_by_diversity
 from .similarity_ranker import (
     SteamTagProfile,
@@ -16,7 +27,17 @@ from .tag_normalizer import (
     register_steam_tag_aliases,
 )
 
-STEAM_INDEX_CACHE_KEY = "steam_index:entries"
+STEAM_INDEX_CACHE_KEY = "steam_index:v2"
+STEAM_INDEX_VERSION = 2
+STEAM_INDEX_MAX_ENTRIES = 3_000
+STEAM_INDEX_MAX_SEARCH_TERMS = 256
+STEAM_INDEX_MAX_SEARCHES_PER_ROUND = 8
+STEAM_INDEX_SEARCH_RESULTS_PER_TERM = 10
+STEAM_INDEX_MAX_NEW_APPIDS_PER_ROUND = 60
+STEAM_HTTP_CONCURRENCY = 6
+SNAPSHOT_STORAGE_TTL_HOURS = 24 * 3650
+REFERENCE_MATCH_THRESHOLD = 0.75
+
 STEAM_INDEX_FALLBACK_WARNING = (
     "Steam 索引暂不可用，已尝试通过 Steam 公共搜索刷新候选；"
     "如果仍为空，请换更明确的标签或参考游戏。"
@@ -29,6 +50,19 @@ AAA_SEARCH_TERMS = ["popular", "action adventure", "open world", "story rich", "
 AAA_INTENT_MARKERS = {"aaa", "3a", "triple-a", "triple a", "大作", "单机大作"}
 
 
+@dataclass(frozen=True)
+class SteamIndexEntry:
+    candidate: GameCandidate
+    refreshed_at: float
+
+
+@dataclass(frozen=True)
+class SteamIndexSnapshot:
+    entries: list[SteamIndexEntry] = field(default_factory=list)
+    search_coverage: dict[str, float] = field(default_factory=dict)
+    version: int = STEAM_INDEX_VERSION
+
+
 class SteamIndexCache(Protocol):
     async def get_json(self, key: str, ttl_hours: int) -> Any | None: ...
 
@@ -36,7 +70,7 @@ class SteamIndexCache(Protocol):
 
 
 class SteamIndexClient(Protocol):
-    async def search_games(self, **kwargs: Any) -> list[GameCandidate]: ...
+    async def search_game_refs(self, **kwargs: Any) -> list[SteamSearchHit]: ...
 
 
 class SteamGameIndexService:
@@ -47,14 +81,19 @@ class SteamGameIndexService:
         ttl_hours: int = 168,
         min_review_count: int = 50,
         min_positive_ratio: float = 0.65,
-        page_size: int = 20,
+        page_size: int = STEAM_INDEX_SEARCH_RESULTS_PER_TERM,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         self.steam_client = steam_client
         self.cache = cache
         self.ttl_hours = max(int(ttl_hours), 1)
         self.min_review_count = max(int(min_review_count), 0)
         self.min_positive_ratio = min(max(float(min_positive_ratio), 0.0), 1.0)
-        self.page_size = min(max(int(page_size), 1), 40)
+        self.page_size = min(max(int(page_size), 1), STEAM_INDEX_SEARCH_RESULTS_PER_TERM)
+        self.clock = clock
+        self._tag_aliases_attempted = False
+        self._tag_aliases_loaded = False
+        self._round_prefetched: dict[int, GameCandidate] = {}
 
     async def recommend(
         self,
@@ -67,8 +106,10 @@ class SteamGameIndexService:
     ) -> list[RankedGame]:
         if preference.platforms and not has_supported_steam_platform(preference):
             return []
+
         await self.ensure_steam_tag_aliases()
-        entries = await self.load_entries()
+        snapshot = await self.load_snapshot()
+        entries = [record.candidate for record in snapshot.entries]
         ranked = rank_entries(
             entries,
             preference,
@@ -77,10 +118,18 @@ class SteamGameIndexService:
             profile_tag_weights=profile_tag_weights,
         )
         ranked = exclude_previously_shown(ranked, excluded_appids, excluded_titles)
-        if ranked:
+        quality_target = max(10, max(int(limit), 0) * 2)
+        quality_count = sum(game.tier in {"strong", "recommended"} for game in ranked)
+        if quality_count >= quality_target:
             return select_results_by_diversity(ranked, limit, diversity_mode)
 
-        refreshed = await self.refresh_entries(preference, entries)
+        target_pool = min(60, max(30, max(int(limit), 0) * 6))
+        refreshed = await self.refresh_entries(
+            preference,
+            entries,
+            target_pool=target_pool,
+            snapshot=snapshot,
+        )
         ranked = rank_entries(
             refreshed,
             preference,
@@ -92,6 +141,9 @@ class SteamGameIndexService:
         return select_results_by_diversity(ranked, limit, diversity_mode)
 
     async def ensure_steam_tag_aliases(self) -> bool:
+        if self._tag_aliases_attempted:
+            return self._tag_aliases_loaded
+        self._tag_aliases_attempted = True
         getter = getattr(self.steam_client, "get_popular_tags", None)
         if not getter:
             return False
@@ -100,73 +152,170 @@ class SteamGameIndexService:
         except Exception:
             return False
         register_steam_tag_aliases(tags)
-        return bool(tags)
+        self._tag_aliases_loaded = bool(tags)
+        return self._tag_aliases_loaded
+
+    async def load_snapshot(self) -> SteamIndexSnapshot:
+        payload = await self.cache.get_json(
+            STEAM_INDEX_CACHE_KEY,
+            SNAPSHOT_STORAGE_TTL_HOURS,
+        )
+        return parse_snapshot(payload)
 
     async def load_entries(self) -> list[GameCandidate]:
-        payload = await self.cache.get_json(STEAM_INDEX_CACHE_KEY, self.ttl_hours)
-        return parse_entries(payload)
+        snapshot = await self.load_snapshot()
+        return [record.candidate for record in snapshot.entries]
 
     async def refresh_entries(
         self,
         preference: GamePreference,
         existing: list[GameCandidate] | None = None,
+        target_pool: int = STEAM_INDEX_MAX_NEW_APPIDS_PER_ROUND,
+        snapshot: SteamIndexSnapshot | None = None,
     ) -> list[GameCandidate]:
-        entries = list(existing or [])
-        searched: set[str] = set()
+        await self.ensure_steam_tag_aliases()
+        now = float(self.clock())
+        current = snapshot or await self.load_snapshot()
+        records = {entry_key(record.candidate): record for record in current.entries}
+        for candidate in existing or []:
+            key = entry_key(candidate)
+            if key not in records:
+                records[key] = SteamIndexEntry(candidate=candidate, refreshed_at=now)
+
         profile = build_profile_from_preference(preference)
-        entries = await self.search_and_append(
-            entries,
-            search_terms_for(preference, profile),
-            searched,
-            reference_terms=reference_terms_for(preference),
-        )
+        queries = search_terms_for(preference, profile)[:STEAM_INDEX_MAX_SEARCHES_PER_ROUND]
+        queries = [
+            query
+            for query in queries
+            if not query_is_covered(query, current.search_coverage, now, self.ttl_hours)
+        ]
+        self._round_prefetched = {}
+        search_results = await self._search_queries(queries)
+        coverage = dict(current.search_coverage)
+        markers: dict[int, list[tuple[str, str]]] = {}
+        ordered_hits: list[SteamSearchHit] = []
+        seen_hits: set[int] = set()
+        for query, hits, succeeded in search_results:
+            if succeeded:
+                coverage[normalize_text(query)] = now
+            polarity = reference_polarity_for(query, preference)
+            if polarity:
+                accepted = record_reference_resolution(preference, query, hits, polarity)
+                if accepted and hits:
+                    markers.setdefault(hits[0].appid, []).append((query, polarity))
+            for hit in hits:
+                if hit.appid not in seen_hits:
+                    ordered_hits.append(hit)
+                    seen_hits.add(hit.appid)
 
-        expanded_profile = build_profile_from_preference(
-            preference,
-            reference_candidates=reference_candidates(preference, entries),
+        for key, record in list(records.items()):
+            candidate = record.candidate
+            if candidate.appid is None or candidate.appid not in markers:
+                continue
+            marked = candidate
+            for query, polarity in markers[candidate.appid]:
+                marked = mark_reference_query(marked, query, polarity)
+            records[key] = SteamIndexEntry(marked, record.refreshed_at)
+
+        existing_appids = {
+            int(record.candidate.appid)
+            for record in records.values()
+            if record.candidate.appid is not None
+        }
+        new_hits = [hit for hit in ordered_hits if hit.appid not in existing_appids]
+        enrichment_limit = min(
+            STEAM_INDEX_MAX_NEW_APPIDS_PER_ROUND,
+            max(int(target_pool), 0),
         )
-        entries = await self.search_and_append(
-            entries,
-            search_terms_for(preference, expanded_profile),
-            searched,
-            reference_terms=reference_terms_for(preference),
-        )
-        entries = dedupe_entries(entries)
-        if entries:
-            await self.cache.set_json(
-                STEAM_INDEX_CACHE_KEY,
-                [dump_model(candidate) for candidate in entries],
+        enriched = await self._enrich_hits(new_hits[:enrichment_limit])
+        for candidate in enriched:
+            if candidate.appid is not None:
+                for query, polarity in markers.get(int(candidate.appid), []):
+                    candidate = mark_reference_query(candidate, query, polarity)
+            records[entry_key(candidate)] = SteamIndexEntry(candidate, now)
+
+        refreshed_snapshot = prune_snapshot(
+            SteamIndexSnapshot(
+                entries=list(records.values()),
+                search_coverage=coverage,
             )
-        return entries
+        )
+        await self.cache.set_json(
+            STEAM_INDEX_CACHE_KEY,
+            snapshot_payload(refreshed_snapshot),
+        )
+        return [record.candidate for record in refreshed_snapshot.entries]
 
-    async def search_and_append(
+    async def _search_queries(
         self,
-        entries: list[GameCandidate],
         queries: list[str],
-        searched: set[str],
-        reference_terms: list[str],
-    ) -> list[GameCandidate]:
-        reference_keys = {normalize_text(title) for title in reference_terms}
-        for query in queries:
-            key = query.lower()
-            if key in searched:
+    ) -> list[tuple[str, list[SteamSearchHit], bool]]:
+        semaphore = asyncio.Semaphore(STEAM_HTTP_CONCURRENCY)
+
+        async def search_one(query: str) -> tuple[str, list[SteamSearchHit], bool]:
+            async with semaphore:
+                try:
+                    return query, await self._search_refs(query), True
+                except Exception:
+                    return query, [], False
+
+        return list(await asyncio.gather(*(search_one(query) for query in queries)))
+
+    async def _search_refs(self, query: str) -> list[SteamSearchHit]:
+        search_refs = getattr(self.steam_client, "search_game_refs", None)
+        if search_refs:
+            results = await search_refs(
+                search=query,
+                page_size=self.page_size,
+                ordering="-relevance",
+            )
+            return [validate_search_hit(hit) for hit in results]
+
+        search_games = getattr(self.steam_client, "search_games", None)
+        if not search_games:
+            return []
+        candidates = await search_games(
+            search=query,
+            page_size=self.page_size,
+            ordering="-relevance",
+        )
+        hits: list[SteamSearchHit] = []
+        for candidate in candidates:
+            if candidate.appid is None:
                 continue
-            searched.add(key)
-            try:
-                results = await self.steam_client.search_games(
-                    search=query,
-                    page_size=self.page_size,
-                    ordering="-relevance",
+            self._round_prefetched[int(candidate.appid)] = candidate
+            hits.append(
+                SteamSearchHit(
+                    appid=int(candidate.appid),
+                    title=candidate.title,
+                    store_url=candidate.raw_url,
                 )
-            except Exception:
-                continue
-            is_reference_query = normalize_text(query) in reference_keys
-            for index, candidate in enumerate(results):
-                enriched = await self.enrich_candidate(candidate)
-                if is_reference_query and index == 0:
-                    enriched = mark_reference_query(enriched, query)
-                entries.append(enriched)
-        return entries
+            )
+        return hits
+
+    async def _enrich_hits(self, hits: list[SteamSearchHit]) -> list[GameCandidate]:
+        semaphore = asyncio.Semaphore(STEAM_HTTP_CONCURRENCY)
+
+        async def enrich_one(hit: SteamSearchHit) -> GameCandidate:
+            async with semaphore:
+                candidate = self._round_prefetched.get(hit.appid)
+                detail_getter = getattr(self.steam_client, "get_game_detail", None)
+                if candidate is None and detail_getter:
+                    try:
+                        candidate = await detail_getter(hit.appid)
+                    except Exception:
+                        candidate = None
+                if candidate is None:
+                    candidate = GameCandidate(
+                        appid=hit.appid,
+                        title=hit.title,
+                        platforms=["PC"],
+                        stores=["Steam"],
+                        raw_url=hit.store_url,
+                    )
+                return await self.enrich_candidate(candidate)
+
+        return list(await asyncio.gather(*(enrich_one(hit) for hit in hits)))
 
     async def enrich_candidate(self, candidate: GameCandidate) -> GameCandidate:
         has_steam_tags = await self.ensure_steam_tag_aliases()
@@ -272,15 +421,39 @@ def reference_candidates(
     preference: GamePreference,
     entries: list[GameCandidate],
 ) -> list[GameCandidate]:
-    references = {title.lower() for title in preference.reference_games_like if title}
-    if not references:
-        return []
+    return matching_reference_candidates(
+        preference.reference_games_like,
+        entries,
+        polarity="like",
+    )
+
+
+def negative_reference_candidates(
+    preference: GamePreference,
+    entries: list[GameCandidate],
+) -> list[GameCandidate]:
+    return matching_reference_candidates(
+        preference.reference_games_dislike,
+        entries,
+        polarity="dislike",
+    )
+
+
+def matching_reference_candidates(
+    titles: list[str],
+    entries: list[GameCandidate],
+    polarity: str,
+) -> list[GameCandidate]:
+    references = [title for title in titles if title]
+    marker_prefix = f"reference_query:{polarity}:"
     return [
         entry
         for entry in entries
-        if entry.title.lower() in references
-        or any(reference in entry.title.lower() for reference in references)
-        or any(reason.startswith("reference_query:") for reason in entry.source_reasons)
+        if any(
+            title_match_confidence(reference, entry.title) >= REFERENCE_MATCH_THRESHOLD
+            for reference in references
+        )
+        or any(reason.startswith(marker_prefix) for reason in entry.source_reasons)
     ]
 
 
@@ -290,6 +463,7 @@ def search_terms_for(preference: GamePreference, profile: SteamTagProfile) -> li
         terms.extend(AAA_SEARCH_TERMS)
     terms.extend(preference.reference_games_like[:3])
     terms.extend(preference.reference_search_terms[:3])
+    terms.extend(preference.reference_games_dislike[:3])
     include = [tag.replace("_", " ") for tag in profile.include_tags[:6]]
     if include:
         terms.append(" ".join(include[:3]))
@@ -312,28 +486,159 @@ def reference_terms_for(preference: GamePreference) -> list[str]:
         [
             *preference.reference_games_like,
             *preference.reference_search_terms,
+            *preference.reference_games_dislike,
         ]
     )
 
 
-def parse_entries(payload: Any) -> list[GameCandidate]:
-    if not isinstance(payload, list):
-        return []
-    entries: list[GameCandidate] = []
-    for item in payload:
-        if isinstance(item, GameCandidate):
-            entries.append(item)
-        elif isinstance(item, dict):
-            entries.append(validate_candidate(item))
-    return entries
+def reference_polarity_for(query: str, preference: GamePreference) -> str | None:
+    key = normalize_text(query)
+    disliked = {normalize_text(title) for title in preference.reference_games_dislike}
+    if key in disliked:
+        return "dislike"
+    liked = {
+        normalize_text(title)
+        for title in [*preference.reference_games_like, *preference.reference_search_terms]
+    }
+    return "like" if key in liked else None
+
+
+def record_reference_resolution(
+    preference: GamePreference,
+    query: str,
+    hits: list[SteamSearchHit],
+    polarity: str,
+) -> bool:
+    hit = hits[0] if hits else None
+    confidence = title_match_confidence(query, hit.title) if hit else 0.0
+    resolved = ResolvedReferenceGame(
+        raw_text=query,
+        normalized_title=normalize_title_key(query),
+        canonical_title=hit.title if hit else "",
+        appid=hit.appid if hit else None,
+        store_url=hit.store_url if hit else None,
+        confidence=confidence,
+        source="steam_search",
+        polarity=polarity,
+        stores=["steam"] if hit else [],
+    )
+    preference.resolved_reference_games = [
+        item
+        for item in preference.resolved_reference_games
+        if not (
+            normalize_text(item.raw_text) == normalize_text(query) and item.polarity == polarity
+        )
+    ]
+    preference.resolved_reference_games.append(resolved)
+    if confidence >= REFERENCE_MATCH_THRESHOLD:
+        return True
+    warning = f"参考游戏“{query}”未能可靠解析，未扩展其标签。"
+    if warning not in preference.parse_warnings:
+        preference.parse_warnings.append(warning)
+    return False
+
+
+def title_match_confidence(query: str, candidate_title: str) -> float:
+    expected = normalize_title_key(query)
+    actual = normalize_title_key(candidate_title)
+    if not expected or not actual:
+        return 0.0
+    if expected == actual:
+        return 1.0
+    if actual.startswith(expected) or expected.startswith(actual):
+        coverage = min(len(expected), len(actual)) / max(len(expected), len(actual))
+        return min(0.8 + coverage * 0.2, 0.99)
+    return SequenceMatcher(None, expected, actual).ratio()
+
+
+def normalize_title_key(value: str) -> str:
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(value or "").lower())
+
+
+def query_is_covered(
+    query: str,
+    coverage: dict[str, float],
+    now: float,
+    ttl_hours: int,
+) -> bool:
+    covered_at = float(coverage.get(normalize_text(query), 0.0) or 0.0)
+    return covered_at > 0 and now - covered_at < max(ttl_hours, 1) * 3600
+
+
+def parse_snapshot(payload: Any) -> SteamIndexSnapshot:
+    if not isinstance(payload, dict) or payload.get("version") != STEAM_INDEX_VERSION:
+        return SteamIndexSnapshot()
+    entries: list[SteamIndexEntry] = []
+    for item in payload.get("entries") or []:
+        if not isinstance(item, dict) or not isinstance(item.get("candidate"), dict):
+            continue
+        try:
+            refreshed_at = float(item.get("refreshed_at") or 0.0)
+        except (TypeError, ValueError):
+            refreshed_at = 0.0
+        entries.append(
+            SteamIndexEntry(
+                candidate=validate_candidate(item["candidate"]),
+                refreshed_at=refreshed_at,
+            )
+        )
+    raw_coverage = payload.get("search_coverage")
+    coverage: dict[str, float] = {}
+    if isinstance(raw_coverage, dict):
+        for query, covered_at in raw_coverage.items():
+            try:
+                coverage[normalize_text(query)] = float(covered_at)
+            except (TypeError, ValueError):
+                continue
+    return prune_snapshot(SteamIndexSnapshot(entries=entries, search_coverage=coverage))
+
+
+def prune_snapshot(snapshot: SteamIndexSnapshot) -> SteamIndexSnapshot:
+    newest_by_key: dict[str, SteamIndexEntry] = {}
+    for record in snapshot.entries:
+        key = entry_key(record.candidate)
+        current = newest_by_key.get(key)
+        if current is None or record.refreshed_at >= current.refreshed_at:
+            newest_by_key[key] = record
+    entries = sorted(
+        newest_by_key.values(),
+        key=lambda record: (-record.refreshed_at, entry_key(record.candidate)),
+    )[:STEAM_INDEX_MAX_ENTRIES]
+    coverage = dict(
+        sorted(
+            snapshot.search_coverage.items(),
+            key=lambda item: (-float(item[1]), item[0]),
+        )[:STEAM_INDEX_MAX_SEARCH_TERMS]
+    )
+    return SteamIndexSnapshot(entries=entries, search_coverage=coverage)
+
+
+def snapshot_payload(snapshot: SteamIndexSnapshot) -> dict[str, Any]:
+    return {
+        "version": STEAM_INDEX_VERSION,
+        "entries": [
+            {
+                "candidate": dump_model(record.candidate),
+                "refreshed_at": record.refreshed_at,
+            }
+            for record in snapshot.entries
+        ],
+        "search_coverage": snapshot.search_coverage,
+    }
+
+
+def entry_key(candidate: GameCandidate) -> str:
+    if candidate.appid is not None:
+        return f"appid:{int(candidate.appid)}"
+    return f"title:{normalize_text(candidate.title)}"
 
 
 def dedupe_entries(entries: list[GameCandidate]) -> list[GameCandidate]:
     result: list[GameCandidate] = []
     seen: set[str] = set()
     for entry in entries:
-        key = str(entry.appid or entry.title.lower())
-        if key and key not in seen:
+        key = entry_key(entry)
+        if key not in seen:
             result.append(entry)
             seen.add(key)
     return result
@@ -361,10 +666,21 @@ def validate_candidate(data: dict[str, Any]) -> GameCandidate:
     return validator(data) if validator else GameCandidate.parse_obj(data)
 
 
-def mark_reference_query(candidate: GameCandidate, query: str) -> GameCandidate:
+def validate_search_hit(value: Any) -> SteamSearchHit:
+    if isinstance(value, SteamSearchHit):
+        return value
+    validator = getattr(SteamSearchHit, "model_validate", None)
+    return validator(value) if validator else SteamSearchHit.parse_obj(value)
+
+
+def mark_reference_query(
+    candidate: GameCandidate,
+    query: str,
+    polarity: str = "like",
+) -> GameCandidate:
     data = dump_model(candidate)
     reasons = list(data.get("source_reasons") or [])
-    marker = f"reference_query:{query}"
+    marker = f"reference_query:{polarity}:{query}"
     if marker not in reasons:
         reasons.append(marker)
     data["source_reasons"] = reasons
