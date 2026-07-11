@@ -4,9 +4,32 @@ import unittest
 from typing import Any
 
 from astrbot_plugin_game_recommender.clients.steam import SteamApiError, SteamClient
+from astrbot_plugin_game_recommender.storage.models import SteamSearchHit
 
 
 class SteamClientTest(unittest.IsolatedAsyncioTestCase):
+    async def test_search_game_refs_returns_lightweight_hits_without_detail_calls(self) -> None:
+        cache = MemoryCache()
+        http_client = FakeHttpClient(
+            {
+                "https://store.steampowered.com/api/storesearch/": {
+                    "items": [
+                        {"id": 123, "name": "Co-op Test Game"},
+                        {"appid": 456, "name": "Other Game"},
+                    ]
+                }
+            }
+        )
+        client = SteamClient(http_client, cache, cache_ttl_hours=24)
+
+        hits = await client.search_game_refs(search="co-op", page_size=2)
+
+        self.assertTrue(all(isinstance(hit, SteamSearchHit) for hit in hits))
+        self.assertEqual([hit.appid for hit in hits], [123, 456])
+        self.assertEqual([hit.title for hit in hits], ["Co-op Test Game", "Other Game"])
+        self.assertEqual(hits[0].store_url, "https://store.steampowered.com/app/123/")
+        self.assertEqual(http_client.call_count, 1)
+
     async def test_search_games_parses_steam_details_and_uses_cache(self) -> None:
         cache = MemoryCache()
         http_client = FakeHttpClient(

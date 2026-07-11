@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from ..storage.models import GameCandidate, SteamOwnedGame
+from ..storage.models import GameCandidate, SteamOwnedGame, SteamSearchHit
 from ..storage.repository import SQLiteCacheRepository
 
 STEAM_STORE_SEARCH_URL = "https://store.steampowered.com/api/storesearch/"
@@ -103,7 +103,32 @@ class SteamClient:
         page_size: int = 20,
         ordering: str = "-relevance",
     ) -> list[GameCandidate]:
-        del ordering
+        hits = await self.search_game_refs(
+            search=search,
+            platforms=platforms,
+            genres=genres,
+            tags=tags,
+            page_size=page_size,
+            ordering=ordering,
+        )
+        games: list[GameCandidate] = []
+        for hit in hits:
+            try:
+                games.append(await self.get_game_detail(hit.appid))
+            except SteamApiError:
+                games.append(steam_search_item_to_candidate(hit.appid, hit.title))
+        return games
+
+    async def search_game_refs(
+        self,
+        search: str | None = None,
+        platforms: list[str] | None = None,
+        genres: list[str] | None = None,
+        tags: list[str] | None = None,
+        page_size: int = 10,
+        ordering: str = "-relevance",
+    ) -> list[SteamSearchHit]:
+        del ordering, platforms
         query = build_search_query(search, genres or [], tags or [])
         data = await self._get_json(
             STEAM_STORE_SEARCH_URL,
@@ -114,7 +139,7 @@ class SteamClient:
             },
         )
         items = data.get("items") if isinstance(data, dict) else []
-        games: list[GameCandidate] = []
+        hits: list[SteamSearchHit] = []
         for item in (items or [])[: min(max(page_size, 1), 40)]:
             if not isinstance(item, dict):
                 continue
@@ -122,11 +147,14 @@ class SteamClient:
             title = str(item.get("name") or "").strip()
             if not appid or not title:
                 continue
-            try:
-                games.append(await self.get_game_detail(appid))
-            except SteamApiError:
-                games.append(steam_search_item_to_candidate(appid, title))
-        return games
+            hits.append(
+                SteamSearchHit(
+                    appid=appid,
+                    title=title,
+                    store_url=f"{STEAM_STORE_BASE_URL}/{appid}/",
+                )
+            )
+        return hits
 
     async def get_game_detail(self, appid: int) -> GameCandidate:
         payload = await self._get_json(
@@ -299,9 +327,7 @@ def parse_steam_game(appid: int, data: dict[str, Any]) -> GameCandidate:
         release_date=release_date,
         stores=["Steam"],
         raw_url=f"{STEAM_STORE_BASE_URL}/{appid}/",
-        description=clean_html_text(
-            data.get("short_description") or data.get("about_the_game")
-        ),
+        description=clean_html_text(data.get("short_description") or data.get("about_the_game")),
     )
 
 

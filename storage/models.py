@@ -230,6 +230,23 @@ class ResolvedReferenceGame(BaseModel):
         extra = "ignore"
 
 
+class SteamSearchHit(BaseModel):
+    appid: int
+    title: str
+    store_url: str | None = None
+
+    @validator("appid", pre=True)
+    def _normalize_appid(cls, value: Any) -> int:
+        return int(value)
+
+    @validator("title", "store_url", pre=True)
+    def _normalize_text(cls, value: Any) -> str:
+        return re.sub(r"\s+", " ", str(value or "")).strip()
+
+    class Config:
+        extra = "ignore"
+
+
 class GameCandidate(BaseModel):
     title: str
     appid: int | None = None
