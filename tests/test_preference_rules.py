@@ -124,7 +124,7 @@ class PreferenceRulesTest(unittest.TestCase):
         preference = infer_preference_from_text("I dislike Dark Souls")
 
         self.assertEqual(preference.reference_games_like, [])
-        self.assertEqual(preference.reference_games_dislike, ["dark souls"])
+        self.assertEqual(preference.reference_games_dislike, ["Dark Souls"])
         self.assertNotIn("soulslike", preference.genres_like)
 
     def test_preserves_chinese_titles_containing_de_and_matches_xiangshi(self) -> None:
@@ -144,6 +144,7 @@ class PreferenceRulesTest(unittest.TestCase):
     def test_explicit_negative_tag_wins_over_positive_reference_expansion(self) -> None:
         preference = infer_preference_from_text("类似黑暗之魂的氛围，但不要魂类战斗")
 
+        self.assertEqual(preference.reference_games_like, ["黑暗之魂"])
         self.assertIn("soulslike", preference.genres_dislike)
         self.assertNotIn("soulslike", [*preference.genres_like, *preference.extra_tags])
 

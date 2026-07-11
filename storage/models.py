@@ -104,8 +104,6 @@ class GamePreference(BaseModel):
         "extra_tags",
         "genres_dislike",
         "required_tags",
-        "reference_games_like",
-        "reference_games_dislike",
         "parse_warnings",
         pre=True,
     )
@@ -114,6 +112,10 @@ class GamePreference(BaseModel):
 
     @validator("reference_search_terms", pre=True)
     def _normalize_reference_search_terms(cls, value: Any) -> list[str]:
+        return split_display_list(value)
+
+    @validator("reference_games_like", "reference_games_dislike", pre=True)
+    def _normalize_reference_titles(cls, value: Any) -> list[str]:
         return split_display_list(value)
 
     @validator("library_filter_mode", pre=True)
@@ -205,6 +207,7 @@ class ResolvedReferenceGame(BaseModel):
     store_url: str | None = None
     confidence: float = 0.0
     source: str = "text"
+    polarity: str = "like"
     genres: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     platforms: list[str] = Field(default_factory=list)
@@ -225,6 +228,10 @@ class ResolvedReferenceGame(BaseModel):
         except (TypeError, ValueError):
             number = 0.0
         return min(max(number, 0.0), 1.0)
+
+    @validator("polarity", pre=True)
+    def _normalize_polarity(cls, value: Any) -> str:
+        return "dislike" if str(value or "").strip().lower() == "dislike" else "like"
 
     class Config:
         extra = "ignore"

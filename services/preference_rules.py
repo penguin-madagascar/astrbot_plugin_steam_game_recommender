@@ -57,6 +57,18 @@ TAG_INTENT_TERMS: dict[str, tuple[str, ...]] = {
 REQUIRED_TAG_TERMS: dict[str, tuple[str, ...]] = dict(TAG_INTENT_TERMS)
 
 POLARITY_ONLY_TAGS = {"horror", "soulslike", "roguelike", "violent", "singleplayer", "pvp"}
+REFERENCE_DESCRIPTION_SUFFIXES = (
+    "游戏",
+    "作品",
+    "玩法",
+    "题材",
+    "风格",
+    "类型",
+    "战斗",
+    "氛围",
+    "合作",
+    "解谜",
+)
 NEGATIVE_MARKERS = (
     "不要",
     "不想",
@@ -333,7 +345,9 @@ def clean_reference_title(value: str | None) -> str:
             "同类",
             "风格",
         )
-        if suffix.startswith(descriptive_prefixes) or suffix.endswith("游戏"):
+        if suffix.startswith(descriptive_prefixes) or suffix.endswith(
+            REFERENCE_DESCRIPTION_SUFFIXES
+        ):
             text = title.strip()
     return text[:80]
 
@@ -344,18 +358,7 @@ def is_probable_reference_title(value: str) -> bool:
         return False
     if title in {"高难", "太难", "简单", "困难"}:
         return False
-    generic_suffixes = (
-        "游戏",
-        "玩法",
-        "题材",
-        "风格",
-        "类型",
-        "战斗",
-        "氛围",
-        "合作",
-        "解谜",
-    )
-    return not title.endswith(generic_suffixes)
+    return not title.endswith(REFERENCE_DESCRIPTION_SUFFIXES)
 
 
 def has_negative_reference_prefix(text: str, start: int) -> bool:
