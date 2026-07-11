@@ -2,7 +2,7 @@
   "schema_version": 1,
   "legacy_baseline": {
     "ndcg_at_target": 0.605947,
-    "recall_at_20": 0.829861,
+    "recall_at_20": 0.989583,
     "constraint_violation_rate": 0.194444,
     "fill_rate": 0.861111,
     "intra_list_tag_similarity": 0.337227
@@ -49,7 +49,12 @@
         "p1-a",
         "p1-c"
       ],
-      "violating_ids": []
+      "violating_ids": [],
+      "legacy_candidate_ranking": [
+        "p1-a",
+        "p1-b",
+        "p1-c"
+      ]
     },
     {
       "id": "polarity-horror-negative",
@@ -93,6 +98,11 @@
       ],
       "violating_ids": [
         "p2-b"
+      ],
+      "legacy_candidate_ranking": [
+        "p2-a",
+        "p2-b",
+        "p2-c"
       ]
     },
     {
@@ -135,7 +145,12 @@
         "p3-b",
         "p3-a"
       ],
-      "violating_ids": []
+      "violating_ids": [],
+      "legacy_candidate_ranking": [
+        "p3-a",
+        "p3-b",
+        "p3-c"
+      ]
     },
     {
       "id": "polarity-souls-negative",
@@ -178,6 +193,11 @@
       ],
       "violating_ids": [
         "p4-b"
+      ],
+      "legacy_candidate_ranking": [
+        "p4-a",
+        "p4-b",
+        "p4-c"
       ]
     },
     {
@@ -223,6 +243,11 @@
       ],
       "violating_ids": [
         "h1-c"
+      ],
+      "legacy_candidate_ranking": [
+        "h1-a",
+        "h1-b",
+        "h1-c"
       ]
     },
     {
@@ -265,6 +290,11 @@
         "h2-a"
       ],
       "violating_ids": [
+        "h2-c"
+      ],
+      "legacy_candidate_ranking": [
+        "h2-a",
+        "h2-b",
         "h2-c"
       ]
     },
@@ -310,6 +340,11 @@
       ],
       "violating_ids": [
         "h3-c"
+      ],
+      "legacy_candidate_ranking": [
+        "h3-a",
+        "h3-b",
+        "h3-c"
       ]
     },
     {
@@ -351,6 +386,11 @@
         "h4-b"
       ],
       "violating_ids": [
+        "h4-c"
+      ],
+      "legacy_candidate_ranking": [
+        "h4-a",
+        "h4-b",
         "h4-c"
       ]
     },
@@ -394,7 +434,12 @@
         "r1-c",
         "r1-a"
       ],
-      "violating_ids": []
+      "violating_ids": [],
+      "legacy_candidate_ranking": [
+        "r1-a",
+        "r1-b",
+        "r1-c"
+      ]
     },
     {
       "id": "reference-dark-souls-negative-tag",
@@ -439,6 +484,11 @@
       ],
       "violating_ids": [
         "r2-b"
+      ],
+      "legacy_candidate_ranking": [
+        "r2-a",
+        "r2-b",
+        "r2-c"
       ]
     },
     {
@@ -482,6 +532,11 @@
       ],
       "violating_ids": [
         "r3-b"
+      ],
+      "legacy_candidate_ranking": [
+        "r3-a",
+        "r3-b",
+        "r3-c"
       ]
     },
     {
@@ -527,6 +582,11 @@
       ],
       "violating_ids": [
         "r4-b"
+      ],
+      "legacy_candidate_ranking": [
+        "r4-a",
+        "r4-b",
+        "r4-c"
       ]
     },
     {
@@ -570,7 +630,12 @@
         "a1-b",
         "a1-a"
       ],
-      "violating_ids": []
+      "violating_ids": [],
+      "legacy_candidate_ranking": [
+        "a1-a",
+        "a1-b",
+        "a1-c"
+      ]
     },
     {
       "id": "aaa-story-rich",
@@ -614,7 +679,12 @@
         "a2-a",
         "a2-b"
       ],
-      "violating_ids": []
+      "violating_ids": [],
+      "legacy_candidate_ranking": [
+        "a2-a",
+        "a2-b",
+        "a2-c"
+      ]
     },
     {
       "id": "aaa-broad-empty",
@@ -648,10 +718,195 @@
             "simulation"
           ],
           "relevance": 1
+        },
+        {
+          "id": "a3-d01",
+          "title": "Catalog Distractor 01",
+          "tags": [
+            "indie",
+            "catalog_1"
+          ],
+          "relevance": 0
+        },
+        {
+          "id": "a3-d02",
+          "title": "Catalog Distractor 02",
+          "tags": [
+            "indie",
+            "catalog_2"
+          ],
+          "relevance": 0
+        },
+        {
+          "id": "a3-d03",
+          "title": "Catalog Distractor 03",
+          "tags": [
+            "indie",
+            "catalog_3"
+          ],
+          "relevance": 0
+        },
+        {
+          "id": "a3-d04",
+          "title": "Catalog Distractor 04",
+          "tags": [
+            "indie",
+            "catalog_4"
+          ],
+          "relevance": 0
+        },
+        {
+          "id": "a3-d05",
+          "title": "Catalog Distractor 05",
+          "tags": [
+            "indie",
+            "catalog_5"
+          ],
+          "relevance": 0
+        },
+        {
+          "id": "a3-d06",
+          "title": "Catalog Distractor 06",
+          "tags": [
+            "indie",
+            "catalog_6"
+          ],
+          "relevance": 0
+        },
+        {
+          "id": "a3-d07",
+          "title": "Catalog Distractor 07",
+          "tags": [
+            "indie",
+            "catalog_7"
+          ],
+          "relevance": 0
+        },
+        {
+          "id": "a3-d08",
+          "title": "Catalog Distractor 08",
+          "tags": [
+            "indie",
+            "catalog_8"
+          ],
+          "relevance": 0
+        },
+        {
+          "id": "a3-d09",
+          "title": "Catalog Distractor 09",
+          "tags": [
+            "indie",
+            "catalog_9"
+          ],
+          "relevance": 0
+        },
+        {
+          "id": "a3-d10",
+          "title": "Catalog Distractor 10",
+          "tags": [
+            "indie",
+            "catalog_10"
+          ],
+          "relevance": 0
+        },
+        {
+          "id": "a3-d11",
+          "title": "Catalog Distractor 11",
+          "tags": [
+            "indie",
+            "catalog_11"
+          ],
+          "relevance": 0
+        },
+        {
+          "id": "a3-d12",
+          "title": "Catalog Distractor 12",
+          "tags": [
+            "indie",
+            "catalog_12"
+          ],
+          "relevance": 0
+        },
+        {
+          "id": "a3-d13",
+          "title": "Catalog Distractor 13",
+          "tags": [
+            "indie",
+            "catalog_13"
+          ],
+          "relevance": 0
+        },
+        {
+          "id": "a3-d14",
+          "title": "Catalog Distractor 14",
+          "tags": [
+            "indie",
+            "catalog_14"
+          ],
+          "relevance": 0
+        },
+        {
+          "id": "a3-d15",
+          "title": "Catalog Distractor 15",
+          "tags": [
+            "indie",
+            "catalog_15"
+          ],
+          "relevance": 0
+        },
+        {
+          "id": "a3-d16",
+          "title": "Catalog Distractor 16",
+          "tags": [
+            "indie",
+            "catalog_16"
+          ],
+          "relevance": 0
+        },
+        {
+          "id": "a3-d17",
+          "title": "Catalog Distractor 17",
+          "tags": [
+            "indie",
+            "catalog_17"
+          ],
+          "relevance": 0
+        },
+        {
+          "id": "a3-d18",
+          "title": "Missed Relevant Blockbuster",
+          "tags": [
+            "aaa",
+            "story_rich",
+            "adventure"
+          ],
+          "relevance": 2
         }
       ],
       "legacy_ranking": [],
-      "violating_ids": []
+      "violating_ids": [],
+      "legacy_candidate_ranking": [
+        "a3-a",
+        "a3-b",
+        "a3-c",
+        "a3-d01",
+        "a3-d02",
+        "a3-d03",
+        "a3-d04",
+        "a3-d05",
+        "a3-d06",
+        "a3-d07",
+        "a3-d08",
+        "a3-d09",
+        "a3-d10",
+        "a3-d11",
+        "a3-d12",
+        "a3-d13",
+        "a3-d14",
+        "a3-d15",
+        "a3-d16",
+        "a3-d17"
+      ]
     },
     {
       "id": "budget-soft-ranking",
@@ -694,7 +949,12 @@
         "b1-c",
         "b1-b"
       ],
-      "violating_ids": []
+      "violating_ids": [],
+      "legacy_candidate_ranking": [
+        "b1-a",
+        "b1-b",
+        "b1-c"
+      ]
     },
     {
       "id": "library-exclude-owned",
@@ -739,6 +999,11 @@
       ],
       "violating_ids": [
         "b2-b"
+      ],
+      "legacy_candidate_ranking": [
+        "b2-a",
+        "b2-b",
+        "b2-c"
       ]
     },
     {
@@ -784,6 +1049,11 @@
       ],
       "violating_ids": [
         "b3-b"
+      ],
+      "legacy_candidate_ranking": [
+        "b3-a",
+        "b3-b",
+        "b3-c"
       ]
     },
     {
@@ -828,7 +1098,12 @@
         "d1-b",
         "d1-c"
       ],
-      "violating_ids": []
+      "violating_ids": [],
+      "legacy_candidate_ranking": [
+        "d1-a",
+        "d1-b",
+        "d1-c"
+      ]
     },
     {
       "id": "diversity-balanced",
@@ -872,7 +1147,12 @@
         "d2-b",
         "d2-c"
       ],
-      "violating_ids": []
+      "violating_ids": [],
+      "legacy_candidate_ranking": [
+        "d2-a",
+        "d2-b",
+        "d2-c"
+      ]
     },
     {
       "id": "diversity-high",
@@ -926,7 +1206,13 @@
         "d3-b",
         "d3-c"
       ],
-      "violating_ids": []
+      "violating_ids": [],
+      "legacy_candidate_ranking": [
+        "d3-a",
+        "d3-b",
+        "d3-c",
+        "d3-d"
+      ]
     },
     {
       "id": "retry-too-hard",
@@ -970,6 +1256,11 @@
       ],
       "violating_ids": [
         "t1-b"
+      ],
+      "legacy_candidate_ranking": [
+        "t1-a",
+        "t1-b",
+        "t1-c"
       ]
     },
     {
@@ -1012,7 +1303,12 @@
         "t2-c",
         "t2-a"
       ],
-      "violating_ids": []
+      "violating_ids": [],
+      "legacy_candidate_ranking": [
+        "t2-a",
+        "t2-b",
+        "t2-c"
+      ]
     },
     {
       "id": "retry-dislike-first",
@@ -1055,7 +1351,17 @@
       ],
       "violating_ids": [
         "t3-b"
+      ],
+      "legacy_candidate_ranking": [
+        "t3-a",
+        "t3-b",
+        "t3-c"
       ]
     }
-  ]
+  ],
+  "legacy_source": {
+    "commit": "c6af3a9ae310e2ac6b0dcca970d96bbae8086ec6",
+    "method": "curated offline legacy behavior snapshot",
+    "replay_command": "PYTHONPATH=/Users/jiangxingda/Projects/QQChatbot .venv/bin/python -m unittest tests/test_recommendation_scenario_replay.py"
+  }
 }

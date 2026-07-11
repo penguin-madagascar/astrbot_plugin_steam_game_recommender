@@ -32,6 +32,32 @@ EXPECTED_CATEGORY_COUNTS = {
     "diversity": 3,
     "retry_feedback": 3,
 }
+EXPECTED_SCENARIO_IDS = {
+    "polarity-horror-positive",
+    "polarity-horror-negative",
+    "polarity-souls-positive",
+    "polarity-souls-negative",
+    "required-chinese",
+    "required-local-coop",
+    "required-multiplayer",
+    "required-relaxing",
+    "reference-stardew-positive",
+    "reference-dark-souls-negative-tag",
+    "reference-slay-spire-negative",
+    "reference-positive-and-negative",
+    "aaa-open-world",
+    "aaa-story-rich",
+    "aaa-broad-empty",
+    "budget-soft-ranking",
+    "library-exclude-owned",
+    "library-only-owned",
+    "diversity-strict-similar",
+    "diversity-balanced",
+    "diversity-high",
+    "retry-too-hard",
+    "retry-like-second",
+    "retry-dislike-first",
+}
 METRIC_NAMES = {
     "ndcg_at_target",
     "recall_at_20",
@@ -52,8 +78,10 @@ class RecommendationScenarioReplayTest(unittest.TestCase):
         fixture = self._load_fixture()
         scenarios = fixture["scenarios"]
 
+        self.assertIs(type(fixture["schema_version"]), int)
         self.assertEqual(fixture["schema_version"], 1)
         self.assertEqual(len(scenarios), 24)
+        self.assertEqual({scenario["id"] for scenario in scenarios}, EXPECTED_SCENARIO_IDS)
         self.assertEqual(
             Counter(scenario["category"] for scenario in scenarios),
             EXPECTED_CATEGORY_COUNTS,
@@ -74,6 +102,7 @@ class RecommendationScenarioReplayTest(unittest.TestCase):
                         "query",
                         "target_count",
                         "candidates",
+                        "legacy_candidate_ranking",
                         "legacy_ranking",
                         "violating_ids",
                     }
@@ -91,7 +120,6 @@ class RecommendationScenarioReplayTest(unittest.TestCase):
                 self.assertLessEqual(scenario["target_count"], 6)
                 self.assertIsInstance(scenario["candidates"], list)
                 self.assertGreaterEqual(len(scenario["candidates"]), 3)
-                self.assertLessEqual(len(scenario["candidates"]), 6)
 
                 local_candidate_ids: set[str] = set()
                 for candidate in scenario["candidates"]:
@@ -125,7 +153,21 @@ class RecommendationScenarioReplayTest(unittest.TestCase):
                     set(scenario["legacy_ranking"]) <= local_candidate_ids,
                     "legacy ranking must only reference candidates from its scenario",
                 )
+                self.assertIsInstance(scenario["legacy_candidate_ranking"], list)
+                self.assertLessEqual(len(scenario["legacy_candidate_ranking"]), 20)
+                self.assertEqual(
+                    len(scenario["legacy_candidate_ranking"]),
+                    len(set(scenario["legacy_candidate_ranking"])),
+                    "legacy candidate ranking must not contain duplicate ids",
+                )
+                self.assertTrue(
+                    set(scenario["legacy_candidate_ranking"]) <= local_candidate_ids,
+                    "legacy candidate ranking must only reference candidates from its scenario",
+                )
                 self.assertIsInstance(scenario["violating_ids"], list)
+                self.assertEqual(
+                    len(scenario["violating_ids"]), len(set(scenario["violating_ids"]))
+                )
                 self.assertTrue(
                     set(scenario["violating_ids"]) <= local_candidate_ids,
                     "violations must only reference candidates from their scenario",
@@ -136,6 +178,13 @@ class RecommendationScenarioReplayTest(unittest.TestCase):
         evaluations = [_evaluate_scenario(scenario) for scenario in fixture["scenarios"]]
 
         self.assertTrue(any(not scenario["legacy_ranking"] for scenario in fixture["scenarios"]))
+        self.assertTrue(
+            any(
+                0 < len(scenario["legacy_ranking"]) < scenario["target_count"]
+                for scenario in fixture["scenarios"]
+            )
+        )
+        self.assertTrue(any(len(scenario["candidates"]) > 20 for scenario in fixture["scenarios"]))
         self.assertTrue(any(result["fill_rate"] < 1.0 for result in evaluations))
         self.assertTrue(any(result["constraint_violation_rate"] > 0.0 for result in evaluations))
         self.assertTrue(any(result["intra_list_tag_similarity"] >= 0.8 for result in evaluations))
@@ -143,6 +192,17 @@ class RecommendationScenarioReplayTest(unittest.TestCase):
 
     def test_legacy_baseline_replays_from_explicit_fixed_values(self) -> None:
         fixture = self._load_fixture()
+        self.assertEqual(
+            fixture["legacy_source"],
+            {
+                "commit": "c6af3a9ae310e2ac6b0dcca970d96bbae8086ec6",
+                "method": "curated offline legacy behavior snapshot",
+                "replay_command": (
+                    "PYTHONPATH=/Users/jiangxingda/Projects/QQChatbot "
+                    ".venv/bin/python -m unittest tests/test_recommendation_scenario_replay.py"
+                ),
+            },
+        )
         per_scenario = {
             scenario["id"]: _evaluate_scenario(scenario) for scenario in fixture["scenarios"]
         }
@@ -178,7 +238,7 @@ def _evaluate_scenario(scenario: dict[str, Any]) -> dict[str, float]:
     target_count = scenario["target_count"]
     return {
         "ndcg_at_target": ndcg_at_k(ranking, relevance_by_id, k=target_count),
-        "recall_at_20": recall_at_k(ranking, relevance_by_id, k=20),
+        "recall_at_20": recall_at_k(scenario["legacy_candidate_ranking"], relevance_by_id, k=20),
         "constraint_violation_rate": constraint_violation_rate(ranking, scenario["violating_ids"]),
         "fill_rate": fill_rate(ranking, target_count=target_count),
         "intra_list_tag_similarity": intra_list_tag_similarity(ranking, tags_by_id),
