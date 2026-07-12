@@ -91,32 +91,10 @@ def attach_review_summary(
 
 def format_unplayed_recommendation(
     recommendation: UnplayedRecommendation,
-    min_review_count: int,
-    min_positive_ratio: float,
+    reason: str,
 ) -> str:
     game = recommendation.game
-    genres = "、".join(game.genres[:6]) if game.genres else "不确定"
-    tags = "、".join(game.tags[:8]) if game.tags else "不确定"
-    lines = [
-        "随机从你的 Steam 未游玩游戏里挑了这款：",
-        f"《{game.title}》",
-        f"Steam 好评率：{format_ratio(game.review_positive_ratio)}",
-        f"Steam 评测数：{game.review_total if game.review_total is not None else '不确定'}",
-        f"类型：{genres}",
-        f"标签：{tags}",
-        (
-            "筛选条件：游玩时长 0 分钟；"
-            f"至少 {max(int(min_review_count), 0)} 条评测；"
-            f"好评率不低于 {min(max(float(min_positive_ratio), 0.0), 1.0):.0%}"
-        ),
-    ]
-    if game.raw_url:
-        lines.append(f"数据来源：{game.raw_url}")
-    return "\n".join(lines)
-
-
-def format_ratio(value: float | None) -> str:
-    return f"{value:.0%}" if value is not None else "不确定"
+    return f"《{game.title}》\n{reason.strip()}"
 
 
 def optional_int(value: Any) -> int | None:

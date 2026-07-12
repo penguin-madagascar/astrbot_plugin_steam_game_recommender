@@ -12,6 +12,7 @@ from astrbot_plugin_game_recommender.storage.models import (
 class UnplayedPickerTest(unittest.IsolatedAsyncioTestCase):
     async def test_randomly_picks_unplayed_game_that_meets_review_floor(self) -> None:
         from astrbot_plugin_game_recommender.services.unplayed_picker import (
+            format_unplayed_recommendation,
             pick_random_unplayed_game,
         )
 
@@ -38,6 +39,17 @@ class UnplayedPickerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.game.review_total, 3000)
         self.assertEqual(result.game.review_positive_ratio, 0.92)
         self.assertEqual(result.owned_game.playtime_forever, 0)
+        message = format_unplayed_recommendation(
+            result,
+            "它主打冒险玩法。较高好评率和充足评测量说明口碑与知名度较稳。",
+        )
+        self.assertEqual(
+            message,
+            "《Random Winner》\n它主打冒险玩法。较高好评率和充足评测量说明口碑与知名度较稳。",
+        )
+        self.assertNotIn("推荐分", message)
+        self.assertNotIn("价格", message)
+        self.assertNotIn("http", message)
 
     async def test_skips_played_and_low_review_games(self) -> None:
         from astrbot_plugin_game_recommender.services.unplayed_picker import (

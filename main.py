@@ -18,6 +18,10 @@ from .services.account_binding import (
     chat_identity_from_event,
     parse_account_binding_command,
 )
+from .services.explanation_builder import (
+    generate_recommendation_reasons,
+    generate_unplayed_reason,
+)
 from .services.formatter import format_recommendation_messages_with_llm
 from .services.message_delivery import build_forward_message_chain
 from .services.played_filter import (
@@ -281,6 +285,12 @@ class GameRecommenderPlugin(Star):
                 min_review_count=min_review_count,
                 min_positive_ratio=min_positive_ratio,
             )
+            reason = await generate_unplayed_reason(
+                self.context,
+                event,
+                self.provider_id,
+                recommendation.game,
+            )
         except AccountBindingError as exc:
             yield event.plain_result(f"未玩游戏推荐失败：{exc}")
             return
@@ -299,8 +309,7 @@ class GameRecommenderPlugin(Star):
         yield event.plain_result(
             format_unplayed_recommendation(
                 recommendation,
-                min_review_count=min_review_count,
-                min_positive_ratio=min_positive_ratio,
+                reason,
             )
         )
 
@@ -474,11 +483,18 @@ class GameRecommenderPlugin(Star):
             )
             ranked_games = ranked_games[:result_limit]
             finish_phase("final_selection")
+            ranked_games = await generate_recommendation_reasons(
+                self.context,
+                event,
+                self.provider_id,
+                ranked_games,
+            )
+            finish_phase("reasons")
         logger.debug(
             "Game recommendation pipeline: elapsed_ms=%.1f candidates=%d "
             "filtered=%d selected=%d refill_pool=%d degradation=%s "
             "profile_ms=%.1f recall_rank_ms=%.1f "
-            "library_filter_ms=%.1f final_selection_ms=%.1f",
+            "library_filter_ms=%.1f final_selection_ms=%.1f reasons_ms=%.1f",
             (time.perf_counter() - started_at) * 1000,
             retrieved_count,
             filtered_count,
@@ -489,6 +505,7 @@ class GameRecommenderPlugin(Star):
             phase_times.get("recall_rank", 0.0),
             phase_times.get("library_filter", 0.0),
             phase_times.get("final_selection", 0.0),
+            phase_times.get("reasons", 0.0),
         )
         messages = await format_recommendation_messages_with_llm(
             self.context,

@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from astrbot.api.star import Context
 
 from ..storage.models import GamePreference, GamePriceSummary, RankedGame
+from .explanation_builder import fallback_reason
 
 EMPTY_LLM_FALLBACK_TITLE = "LLM 兜底建议（未经过 Steam 索引验证）"
 
@@ -170,20 +171,7 @@ def format_game_block(index: int, game: RankedGame, region: str | None = None) -
 
 
 def fallback_recommendation_reason(game: RankedGame) -> str:
-    positives = [item.text for item in game.recommendation_evidence if item.sentiment == "positive"]
-    risks = [
-        item.text
-        for item in game.recommendation_evidence
-        if item.sentiment != "positive" and item.important
-    ]
-    first = "；".join(positives[:2]) or "现有 Steam 数据显示它与主要偏好有一定匹配。"
-    second = risks[0] if risks else "建议结合具体玩法偏好再做最终选择。"
-    return f"{ensure_sentence(first)}{ensure_sentence(second)}"
-
-
-def ensure_sentence(text: str) -> str:
-    value = text.strip()
-    return value if value.endswith(("。", "！", "？", ".", "!", "?")) else f"{value}。"
+    return fallback_reason(game.recommendation_evidence)
 
 
 def valid_game_message(text: str, index: int, title: str) -> bool:
