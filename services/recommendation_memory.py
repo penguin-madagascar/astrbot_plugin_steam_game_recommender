@@ -16,7 +16,6 @@ class RecommendationResultSummary:
     appid: int | None
     title: str
     tags: list[str]
-    tier: str
 
 
 @dataclass(frozen=True)
@@ -42,7 +41,6 @@ class RecommendationMemory:
     chat_user_id: str
     raw_query: str
     preference: GamePreference
-    diversity_mode: str
     result_limit: int
     shown_appids: list[int]
     shown_titles: list[str]
@@ -56,7 +54,6 @@ def build_recommendation_memory(
     chat_user_id: str,
     raw_query: str,
     preference: GamePreference,
-    diversity_mode: str,
     result_limit: int,
     games: list[RankedGame],
     now: float | None = None,
@@ -66,7 +63,6 @@ def build_recommendation_memory(
         chat_user_id=chat_user_id,
         raw_query=raw_query,
         preference=preference,
-        diversity_mode=diversity_mode,
         result_limit=result_limit,
         shown_appids=[],
         shown_titles=[],
@@ -128,7 +124,6 @@ def summarize_games(games: list[RankedGame]) -> list[RecommendationResultSummary
             appid=int(game.appid) if game.appid is not None else None,
             title=game.title,
             tags=list(dict.fromkeys([*game.ordered_tags, *game.tags, *game.genres]))[:12],
-            tier=game.tier,
         )
         for game in games
     ]
@@ -159,7 +154,6 @@ def dump_memory(memory: RecommendationMemory) -> dict[str, Any]:
         "chat_user_id": memory.chat_user_id,
         "raw_query": memory.raw_query,
         "preference": dump_model(memory.preference),
-        "diversity_mode": memory.diversity_mode,
         "result_limit": memory.result_limit,
         "shown_appids": memory.shown_appids,
         "shown_titles": memory.shown_titles,
@@ -169,7 +163,6 @@ def dump_memory(memory: RecommendationMemory) -> dict[str, Any]:
                 "appid": item.appid,
                 "title": item.title,
                 "tags": item.tags,
-                "tier": item.tier,
             }
             for item in memory.last_results
         ],
@@ -206,7 +199,6 @@ def parse_memory(payload: Any) -> RecommendationMemory | None:
         chat_user_id=str(payload.get("chat_user_id") or ""),
         raw_query=str(payload.get("raw_query") or ""),
         preference=preference,
-        diversity_mode=str(payload.get("diversity_mode") or "strict"),
         result_limit=max(int(payload.get("result_limit") or 1), 1),
         shown_appids=[
             int(appid) for appid in payload.get("shown_appids") or [] if safe_int(appid) is not None
@@ -238,7 +230,6 @@ def parse_result_summaries(value: Any) -> list[RecommendationResultSummary]:
                 appid=appid,
                 title=title,
                 tags=[str(tag) for tag in item.get("tags") or [] if str(tag).strip()][:12],
-                tier=str(item.get("tier") or ""),
             )
         )
     return results

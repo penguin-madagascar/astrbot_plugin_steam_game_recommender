@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .models import AccountBinding
+from .models import SteamAccountBinding
 
 
 class SQLiteCacheRepository:
@@ -32,17 +32,16 @@ class SQLiteCacheRepository:
             )
             conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS account_bindings (
+                CREATE TABLE IF NOT EXISTS steam_account_bindings (
                     chat_platform TEXT NOT NULL,
                     chat_user_id TEXT NOT NULL,
-                    provider TEXT NOT NULL,
-                    account_id TEXT NOT NULL,
+                    steam_id64 TEXT NOT NULL,
                     account_kind TEXT NOT NULL,
                     display_value TEXT NOT NULL,
                     metadata_json TEXT NOT NULL DEFAULT '{}',
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
-                    PRIMARY KEY (chat_platform, chat_user_id, provider)
+                    PRIMARY KEY (chat_platform, chat_user_id)
                 )
                 """
             )
@@ -80,28 +79,33 @@ class SQLiteCacheRepository:
                 (key, json.dumps(payload, ensure_ascii=False), time.time()),
             )
 
-    async def upsert_account_binding(self, binding: AccountBinding) -> AccountBinding:
-        return await asyncio.to_thread(self._upsert_account_binding_sync, binding)
+    async def upsert_steam_account_binding(
+        self,
+        binding: SteamAccountBinding,
+    ) -> SteamAccountBinding:
+        return await asyncio.to_thread(self._upsert_steam_account_binding_sync, binding)
 
-    def _upsert_account_binding_sync(self, binding: AccountBinding) -> AccountBinding:
+    def _upsert_steam_account_binding_sync(
+        self,
+        binding: SteamAccountBinding,
+    ) -> SteamAccountBinding:
         now = time.time()
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO account_bindings(
+                INSERT INTO steam_account_bindings(
                     chat_platform,
                     chat_user_id,
-                    provider,
-                    account_id,
+                    steam_id64,
                     account_kind,
                     display_value,
                     metadata_json,
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(chat_platform, chat_user_id, provider) DO UPDATE SET
-                    account_id = excluded.account_id,
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chat_platform, chat_user_id) DO UPDATE SET
+                    steam_id64 = excluded.steam_id64,
                     account_kind = excluded.account_kind,
                     display_value = excluded.display_value,
                     metadata_json = excluded.metadata_json,
@@ -110,8 +114,7 @@ class SQLiteCacheRepository:
                 (
                     binding.chat_platform,
                     binding.chat_user_id,
-                    binding.provider,
-                    binding.account_id,
+                    binding.steam_id64,
                     binding.account_kind,
                     binding.display_value,
                     json.dumps(binding.metadata, ensure_ascii=False),
@@ -119,100 +122,57 @@ class SQLiteCacheRepository:
                     now,
                 ),
             )
-        saved = self._get_account_binding_sync(
+        saved = self._get_steam_account_binding_sync(
             binding.chat_platform,
             binding.chat_user_id,
-            binding.provider,
         )
         if saved is None:
             raise RuntimeError("account binding was not saved")
         return saved
 
-    async def get_account_binding(
+    async def get_steam_account_binding(
         self,
         chat_platform: str,
         chat_user_id: str,
-        provider: str,
-    ) -> AccountBinding | None:
+    ) -> SteamAccountBinding | None:
         return await asyncio.to_thread(
-            self._get_account_binding_sync,
+            self._get_steam_account_binding_sync,
             chat_platform,
             chat_user_id,
-            provider,
         )
 
-    def _get_account_binding_sync(
+    def _get_steam_account_binding_sync(
         self,
         chat_platform: str,
         chat_user_id: str,
-        provider: str,
-    ) -> AccountBinding | None:
+    ) -> SteamAccountBinding | None:
         with self._connect() as conn:
             row = conn.execute(
                 """
                 SELECT
                     chat_platform,
                     chat_user_id,
-                    provider,
-                    account_id,
+                    steam_id64,
                     account_kind,
                     display_value,
                     metadata_json,
                     created_at,
                     updated_at
-                FROM account_bindings
-                WHERE chat_platform = ? AND chat_user_id = ? AND provider = ?
-                """,
-                (chat_platform or "default", chat_user_id, provider),
-            ).fetchone()
-        return account_binding_from_row(row)
-
-    async def list_account_bindings(
-        self,
-        chat_platform: str,
-        chat_user_id: str,
-    ) -> list[AccountBinding]:
-        return await asyncio.to_thread(
-            self._list_account_bindings_sync,
-            chat_platform,
-            chat_user_id,
-        )
-
-    def _list_account_bindings_sync(
-        self,
-        chat_platform: str,
-        chat_user_id: str,
-    ) -> list[AccountBinding]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT
-                    chat_platform,
-                    chat_user_id,
-                    provider,
-                    account_id,
-                    account_kind,
-                    display_value,
-                    metadata_json,
-                    created_at,
-                    updated_at
-                FROM account_bindings
+                FROM steam_account_bindings
                 WHERE chat_platform = ? AND chat_user_id = ?
-                ORDER BY provider
                 """,
                 (chat_platform or "default", chat_user_id),
-            ).fetchall()
-        return [binding for row in rows if (binding := account_binding_from_row(row))]
+            ).fetchone()
+        return steam_account_binding_from_row(row)
 
 
-def account_binding_from_row(row: Any) -> AccountBinding | None:
+def steam_account_binding_from_row(row: Any) -> SteamAccountBinding | None:
     if not row:
         return None
     (
         chat_platform,
         chat_user_id,
-        provider,
-        account_id,
+        steam_id64,
         account_kind,
         display_value,
         metadata_json,
@@ -223,11 +183,10 @@ def account_binding_from_row(row: Any) -> AccountBinding | None:
         metadata = json.loads(metadata_json or "{}")
     except json.JSONDecodeError:
         metadata = {}
-    return AccountBinding(
+    return SteamAccountBinding(
         chat_platform=chat_platform,
         chat_user_id=chat_user_id,
-        provider=provider,
-        account_id=account_id,
+        steam_id64=steam_id64,
         account_kind=account_kind,
         display_value=display_value,
         metadata=metadata if isinstance(metadata, dict) else {},

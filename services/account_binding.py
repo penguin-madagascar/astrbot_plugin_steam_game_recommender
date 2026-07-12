@@ -13,39 +13,21 @@ class AccountBindingError(ValueError):
 
 
 @dataclass(frozen=True)
-class ParsedAccountBinding:
-    provider: str
-    account_id: str
+class ParsedSteamAccount:
+    steam_id64: str
     account_kind: str
     display_value: str
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-def parse_account_binding_command(text: str) -> ParsedAccountBinding:
+def parse_account_binding_command(text: str) -> ParsedSteamAccount:
     raw = str(text or "").strip()
     if not raw:
-        raise AccountBindingError("请输入账号，例如：/accountbind steam 76561198000000000")
-
-    provider, account_text = split_provider(raw)
-    if provider != "steam":
-        raise AccountBindingError("目前仅支持绑定 Steam 账号。")
-    return parse_steam_account(account_text)
+        raise AccountBindingError("请输入账号，例如：/accountbind 76561198000000000")
+    return parse_steam_account(raw)
 
 
-def split_provider(text: str) -> tuple[str, str]:
-    first, separator, rest = text.partition(" ")
-    provider = first.strip().lower()
-    if provider in {"steam", "steamid"}:
-        account_text = rest.strip()
-        if not separator or not account_text:
-            raise AccountBindingError("请输入 Steam ID64 或好友码。")
-        return "steam", account_text
-    if re.fullmatch(r"[0-9\s-]+", text):
-        return "steam", text
-    return provider, rest.strip()
-
-
-def parse_steam_account(value: str) -> ParsedAccountBinding:
+def parse_steam_account(value: str) -> ParsedSteamAccount:
     display_value = str(value or "").strip()
     digits = re.sub(r"[\s-]+", "", display_value)
     if not digits or not digits.isdigit():
@@ -53,17 +35,15 @@ def parse_steam_account(value: str) -> ParsedAccountBinding:
 
     number = int(digits)
     if len(digits) == 17 and number >= STEAMID64_BASE:
-        return ParsedAccountBinding(
-            provider="steam",
-            account_id=digits,
+        return ParsedSteamAccount(
+            steam_id64=digits,
             account_kind="steam_id64",
             display_value=display_value,
         )
 
     if len(digits) < 17 and 0 < number <= STEAM_ACCOUNT_ID_MAX:
-        return ParsedAccountBinding(
-            provider="steam",
-            account_id=str(STEAMID64_BASE + number),
+        return ParsedSteamAccount(
+            steam_id64=str(STEAMID64_BASE + number),
             account_kind="steam_friend_code",
             display_value=display_value,
             metadata={"steam_friend_code": digits},

@@ -8,13 +8,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSchemaTest(unittest.TestCase):
-    def test_embedding_rerank_settings_are_opt_in_and_provider_selectable(self) -> None:
+    def test_embedding_rerank_settings_are_removed(self) -> None:
         schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
 
-        self.assertIs(schema["enable_embedding_rerank"]["default"], False)
-        self.assertEqual(schema["embedding_provider_id"]["default"], "")
-        self.assertEqual(schema["embedding_provider_id"]["_special"], "select_provider")
-        self.assertEqual(schema["embedding_provider_id"]["_provider_type"], "embedding")
+        self.assertNotIn("enable_embedding_rerank", schema)
+        self.assertNotIn("embedding_provider_id", schema)
 
     def test_steam_index_settings_are_exposed_in_dashboard_schema(self) -> None:
         schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"

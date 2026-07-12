@@ -69,8 +69,7 @@ class CommandRegistrationTest(unittest.TestCase):
 
         self.assertIn("gamerec", commands)
         self.assertIn("游戏推荐", commands["gamerec"])
-        self.assertIn("gamedesc", commands)
-        self.assertIn("游戏详情", commands["gamedesc"])
+        self.assertNotIn("gamedesc", commands)
         self.assertIn("accountbind", commands)
         self.assertIn("账号绑定", commands["accountbind"])
         self.assertIn("unplayedrec", commands)

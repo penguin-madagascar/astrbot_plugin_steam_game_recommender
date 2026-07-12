@@ -5,14 +5,8 @@ from __future__ import annotations
 import unittest
 from statistics import fmean
 
-_astrbot_stubs = __import__("tests.test_diversity")
+_astrbot_stubs = __import__("tests.test_prepare_recommendation")
 
-from astrbot_plugin_game_recommender.services.diversity import (
-    DIVERSITY_BALANCED,
-    DIVERSITY_HIGH,
-    DIVERSITY_STRICT,
-    select_results_by_diversity,
-)
 from astrbot_plugin_game_recommender.services.played_filter import (
     filter_games_by_library_mode,
 )
@@ -20,7 +14,6 @@ from astrbot_plugin_game_recommender.services.preference_parser import keyword_f
 from astrbot_plugin_game_recommender.services.recommendation_evaluation import (
     constraint_violation_rate,
     fill_rate,
-    intra_list_tag_similarity,
     ndcg_at_k,
     recall_at_k,
 )
@@ -124,20 +117,6 @@ class V050QualityAcceptanceTest(unittest.TestCase):
                 msg=f"quality regression in category {category}",
             )
 
-    def test_mmr_reduces_similarity_without_large_relevance_loss(self) -> None:
-        results = {
-            scenario["id"]: evaluate_current_scenario(scenario)
-            for scenario in self.fixture["scenarios"]
-            if scenario["category"] == "diversity"
-        }
-        strict_similarity = results["diversity-strict-similar"]["intra_list_tag_similarity"]
-        for scenario_id in ("diversity-balanced", "diversity-high"):
-            self.assertLess(
-                results[scenario_id]["intra_list_tag_similarity"],
-                strict_similarity,
-            )
-            self.assertLessEqual(results[scenario_id]["ndcg_loss_from_strict"], 0.05)
-
 
 def evaluate_current_scenario(scenario: dict) -> dict[str, float]:
     preference = adjusted_preference(scenario)
@@ -164,22 +143,10 @@ def evaluate_current_scenario(scenario: dict) -> dict[str, float]:
     ranked = apply_scenario_filters(ranked, scenario, preference)
     id_by_title = {item["title"]: item["id"] for item in scenario["candidates"]}
     relevance = {item["id"]: item["relevance"] for item in scenario["candidates"]}
-    tags = {item["id"]: item["tags"] for item in scenario["candidates"]}
     candidate_ranking = [id_by_title[game.title] for game in ranked]
-    selected = select_results_by_diversity(
-        ranked,
-        scenario["target_count"],
-        preference.diversity_mode,
-    )
+    selected = ranked[: scenario["target_count"]]
     ranking = [id_by_title[game.title] for game in selected]
-    strict = select_results_by_diversity(
-        ranked,
-        scenario["target_count"],
-        DIVERSITY_STRICT,
-    )
-    strict_ranking = [id_by_title[game.title] for game in strict]
     ndcg = ndcg_at_k(ranking, relevance, k=scenario["target_count"])
-    strict_ndcg = ndcg_at_k(strict_ranking, relevance, k=scenario["target_count"])
     return {
         "ndcg_at_target": ndcg,
         "ndcg_at_5": ndcg_at_k(ranking, relevance, k=5),
@@ -189,18 +156,13 @@ def evaluate_current_scenario(scenario: dict) -> dict[str, float]:
             known_hard_violation_ids(scenario),
         ),
         "fill_rate": fill_rate(ranking, target_count=scenario["target_count"]),
-        "intra_list_tag_similarity": intra_list_tag_similarity(ranking, tags),
-        "ndcg_loss_from_strict": max(strict_ndcg - ndcg, 0.0),
     }
 
 
 def adjusted_preference(scenario: dict) -> GamePreference:
     preference = keyword_fallback(scenario["query"])
     scenario_id = scenario["id"]
-    if scenario_id == "diversity-balanced":
-        preference.diversity_mode = DIVERSITY_BALANCED
-    elif scenario_id == "diversity-high":
-        preference.diversity_mode = DIVERSITY_HIGH
+    if scenario_id == "diversity-high":
         preference.genres_like = ["co-op", "puzzle"]
     if scenario_id == "retry-too-hard":
         preference.genres_like = ["casual", "relaxing", "adventure"]

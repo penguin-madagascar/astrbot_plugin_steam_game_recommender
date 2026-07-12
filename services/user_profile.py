@@ -16,14 +16,14 @@ async def load_bound_user_tag_weights(
     steam_client: Any,
     index_entries: list[GameCandidate],
 ) -> dict[str, float]:
-    binding = await cache.get_account_binding(chat_platform, chat_user_id, "steam")
+    binding = await cache.get_steam_account_binding(chat_platform, chat_user_id)
     if binding is None:
         return {}
     has_key = getattr(steam_client, "has_web_api_key", None)
     if not callable(has_key) or not has_key():
         return {}
     try:
-        owned_games = await steam_client.get_owned_games(binding.account_id)
+        owned_games = await steam_client.get_owned_games(binding.steam_id64)
     except Exception:
         return {}
     return build_user_tag_weights(owned_games, index_entries)

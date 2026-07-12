@@ -42,17 +42,13 @@ command_stub.GreedyStr = getattr(command_stub, "GreedyStr", str)
 
 try:
     from astrbot_plugin_game_recommender.main import GameRecommenderPlugin, PreparedRecommendation
-    from astrbot_plugin_game_recommender.services.diversity import (
-        DIVERSITY_HIGH,
-        DIVERSITY_STRICT,
-    )
     from astrbot_plugin_game_recommender.services.played_filter import LibraryFilterModeError
     from astrbot_plugin_game_recommender.services.steam_index import STEAM_ONLY_SCOPE_WARNING
     from astrbot_plugin_game_recommender.storage.models import (
-        AccountBinding,
         GameCandidate,
         GamePreference,
         RankedGame,
+        SteamAccountBinding,
         SteamOwnedGame,
     )
 except ModuleNotFoundError as exc:
@@ -71,37 +67,6 @@ class FakePreferenceParser:
         return self.preference
 
 
-class PrepareRecommendationDiversityTest(unittest.IsolatedAsyncioTestCase):
-    async def test_prepare_uses_llm_diversity_mode_over_query_terms(self) -> None:
-        preference = GamePreference(
-            platforms=["steam"],
-            genres_like=["co-op"],
-            diversity_mode=DIVERSITY_HIGH,
-            result_count=5,
-        )
-        plugin = object.__new__(GameRecommenderPlugin)
-        plugin.max_results = 5
-        plugin.preference_parser = FakePreferenceParser(preference)
-
-        prepared = await plugin._prepare_recommendation(
-            object(),
-            "严格匹配 Steam 合作解谜",
-        )
-
-        self.assertEqual(prepared.diversity_mode, DIVERSITY_HIGH)
-        self.assertEqual(plugin.preference_parser.seen_text, "严格匹配 Steam 合作解谜")
-
-    async def test_prepare_defaults_to_strict_when_llm_field_is_missing(self) -> None:
-        preference = GamePreference(platforms=["steam"], genres_like=["co-op"], result_count=5)
-        plugin = object.__new__(GameRecommenderPlugin)
-        plugin.max_results = 5
-        plugin.preference_parser = FakePreferenceParser(preference)
-
-        prepared = await plugin._prepare_recommendation(object(), "Steam 合作解谜")
-
-        self.assertEqual(prepared.diversity_mode, DIVERSITY_STRICT)
-
-
 class PrepareRecommendationLlmFallbackTest(unittest.IsolatedAsyncioTestCase):
     async def test_prepare_rejects_non_steam_platform_when_llm_fallback_is_disabled(self) -> None:
         preference = GamePreference(
@@ -117,7 +82,7 @@ class PrepareRecommendationLlmFallbackTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(LibraryFilterModeError) as raised:
             await plugin._prepare_recommendation(object(), "Switch 聚会游戏")
 
-        self.assertIn("仅覆盖 Steam/PC", str(raised.exception))
+        self.assertIn("仅支持 Steam", str(raised.exception))
 
     async def test_prepare_allows_non_steam_platform_when_llm_fallback_is_enabled(self) -> None:
         preference = GamePreference(
@@ -160,7 +125,6 @@ class PrepareRecommendationLlmFallbackTest(unittest.IsolatedAsyncioTestCase):
                 parse_warnings=[STEAM_ONLY_SCOPE_WARNING],
                 result_count=2,
             ),
-            diversity_mode=DIVERSITY_STRICT,
             result_limit=2,
         )
 
@@ -172,42 +136,7 @@ class PrepareRecommendationLlmFallbackTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Mario Kart 8 Deluxe", run.messages[0])
 
 
-class EmbeddingPipelineTest(unittest.IsolatedAsyncioTestCase):
-    async def test_run_requests_refill_pool_and_applies_embedding_reranker(self) -> None:
-        plugin = object.__new__(GameRecommenderPlugin)
-        plugin.enable_llm_fallback = False
-        plugin.provider_id = ""
-        plugin.context = FakeLlmContext("")
-        plugin.steam_index = RecordingSteamIndex()
-        plugin.price_bridge = IdentityPriceBridge()
-        plugin.embedding_reranker = RecordingEmbeddingReranker()
-
-        async def empty_owned_games(_event, required):
-            self.assertFalse(required)
-            return []
-
-        async def empty_profile(_event, _owned_games):
-            return {}
-
-        plugin._owned_games_for_recommendation = empty_owned_games
-        plugin._user_profile_tag_weights = empty_profile
-        prepared = PreparedRecommendation(
-            raw_query="Steam 合作解谜",
-            preference=GamePreference(
-                platforms=["steam"],
-                genres_like=["co-op", "puzzle"],
-                result_count=2,
-            ),
-            diversity_mode=DIVERSITY_STRICT,
-            result_limit=2,
-        )
-
-        run = await plugin._run_recommendation(FakeEvent(), prepared)
-
-        self.assertEqual(plugin.steam_index.seen_limit, 30)
-        self.assertEqual(plugin.embedding_reranker.seen_query, "Steam 合作解谜")
-        self.assertEqual([game.title for game in run.ranked_games], ["Second", "First"])
-
+class RecommendationPipelineTest(unittest.IsolatedAsyncioTestCase):
     async def test_library_snapshot_is_loaded_once_for_profile_and_filtering(self) -> None:
         plugin = object.__new__(GameRecommenderPlugin)
         plugin.enable_llm_fallback = False
@@ -217,7 +146,6 @@ class EmbeddingPipelineTest(unittest.IsolatedAsyncioTestCase):
         plugin.steam_client = CountingOwnedGamesClient()
         plugin.steam_index = OwnedAwareSteamIndex()
         plugin.price_bridge = IdentityPriceBridge()
-        plugin.embedding_reranker = None
         prepared = PreparedRecommendation(
             raw_query="排除已有的合作游戏",
             preference=GamePreference(
@@ -226,7 +154,6 @@ class EmbeddingPipelineTest(unittest.IsolatedAsyncioTestCase):
                 library_filter_mode="exclude_owned",
                 result_count=2,
             ),
-            diversity_mode=DIVERSITY_STRICT,
             result_limit=2,
         )
 
@@ -270,27 +197,6 @@ class RaisingPriceBridge:
         raise AssertionError("pure non-Steam fallback must not enrich prices")
 
 
-class RecordingSteamIndex:
-    def __init__(self) -> None:
-        self.seen_limit = 0
-
-    async def recommend(self, _preference, limit: int, **_kwargs):
-        self.seen_limit = limit
-        return [
-            RankedGame(title="First", score=80, tier="strong"),
-            RankedGame(title="Second", score=70, tier="strong"),
-        ]
-
-
-class RecordingEmbeddingReranker:
-    def __init__(self) -> None:
-        self.seen_query = ""
-
-    async def rerank(self, _preference, raw_query: str, games):
-        self.seen_query = raw_query
-        return list(reversed(games))
-
-
 class IdentityPriceBridge:
     def is_available(self) -> bool:
         return False
@@ -300,11 +206,10 @@ class IdentityPriceBridge:
 
 
 class BoundAccountCache:
-    async def get_account_binding(self, _platform, _user_id, _provider):
-        return AccountBinding(
+    async def get_steam_account_binding(self, _platform, _user_id):
+        return SteamAccountBinding(
             chat_user_id="test",
-            provider="steam",
-            account_id="76561198000000000",
+            steam_id64="76561198000000000",
             account_kind="steamid64",
             display_value="76561198000000000",
         )

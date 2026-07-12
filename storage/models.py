@@ -91,7 +91,6 @@ class GamePreference(BaseModel):
     difficulty: str | None = None
     mood: str | None = None
     result_count: int = 5
-    diversity_mode: str = "strict"
     parse_warnings: list[str] = Field(default_factory=list)
 
     @validator("platforms", pre=True)
@@ -128,11 +127,6 @@ class GamePreference(BaseModel):
             return "only_owned"
         return None
 
-    @validator("diversity_mode", pre=True)
-    def _normalize_diversity_mode(cls, value: Any) -> str:
-        text = re.sub(r"\s+", " ", str(value or "")).strip().lower()
-        return text if text in {"strict", "balanced", "high"} else "strict"
-
     @validator("budget", pre=True)
     def _normalize_budget(cls, value: Any) -> float | None:
         if value in (None, ""):
@@ -168,11 +162,10 @@ class GamePreference(BaseModel):
         extra = "ignore"
 
 
-class AccountBinding(BaseModel):
+class SteamAccountBinding(BaseModel):
     chat_platform: str = "default"
     chat_user_id: str
-    provider: str
-    account_id: str
+    steam_id64: str
     account_kind: str
     display_value: str
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -182,8 +175,7 @@ class AccountBinding(BaseModel):
     @validator(
         "chat_platform",
         "chat_user_id",
-        "provider",
-        "account_id",
+        "steam_id64",
         "account_kind",
         "display_value",
         pre=True,

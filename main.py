@@ -18,12 +18,7 @@ from .services.account_binding import (
     chat_identity_from_event,
     parse_account_binding_command,
 )
-from .services.diversity import DIVERSITY_STRICT, select_results_by_diversity
-from .services.embedding_reranker import EmbeddingReranker
-from .services.formatter import (
-    format_game_detail,
-    format_recommendation_messages_with_llm,
-)
+from .services.formatter import format_recommendation_messages_with_llm
 from .services.message_delivery import build_forward_message_chain
 from .services.played_filter import (
     LIBRARY_FILTER_EXCLUDE_OWNED,
@@ -65,7 +60,7 @@ from .services.unplayed_picker import (
     pick_random_unplayed_game,
 )
 from .services.user_profile import build_user_tag_weights
-from .storage.models import AccountBinding, GamePreference, RankedGame, SteamOwnedGame
+from .storage.models import GamePreference, RankedGame, SteamAccountBinding, SteamOwnedGame
 from .storage.repository import SQLiteCacheRepository
 
 PLUGIN_NAME = "astrbot_plugin_game_recommender"
@@ -79,7 +74,6 @@ PLUGIN_DESCRIPTION = (
 class PreparedRecommendation:
     raw_query: str
     preference: GamePreference
-    diversity_mode: str
     result_limit: int
 
 
@@ -88,7 +82,6 @@ class RecommendationRun:
     messages: list[str]
     ranked_games: list[RankedGame]
     preference: GamePreference
-    diversity_mode: str
     result_limit: int
     raw_query: str
 
@@ -108,8 +101,6 @@ class GameRecommenderPlugin(Star):
         self.max_results = min(max(safe_int(self.config.get("max_results"), 5), 1), 10)
         self.provider_id = str(self.config.get("llm_provider_id", "") or "").strip()
         self.enable_llm_fallback = bool(self.config.get("enable_llm_fallback"))
-        self.enable_embedding_rerank = bool(self.config.get("enable_embedding_rerank", False))
-        self.embedding_provider_id = str(self.config.get("embedding_provider_id", "") or "").strip()
 
         self.http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout),
@@ -130,15 +121,6 @@ class GameRecommenderPlugin(Star):
             steam_api_key=str(self.config.get("steam_api_key") or ""),
         )
         self.preference_parser = PreferenceParser(context, self.provider_id)
-        self.embedding_reranker = (
-            EmbeddingReranker(
-                context,
-                self.cache,
-                provider_id=self.embedding_provider_id,
-            )
-            if self.enable_embedding_rerank
-            else None
-        )
         self.steam_index = SteamGameIndexService(
             steam_client=self.steam_client,
             cache=self.cache,
@@ -170,8 +152,7 @@ class GameRecommenderPlugin(Star):
         raw_text = str(query).strip()
         if not raw_text:
             yield event.plain_result(
-                "请输入需求，例如：/gamerec Switch 和 Steam 双人合作，"
-                "不要恐怖，预算 100 以内（当前仅推荐 Steam/PC 候选）"
+                "请输入需求，例如：/gamerec 双人合作解谜，不要恐怖，预算 100 以内"
             )
             return
 
@@ -224,35 +205,6 @@ class GameRecommenderPlugin(Star):
         yield self._recommendation_result(event, messages)
 
     @filter.command(
-        "gamedesc",
-        alias={"游戏详情"},
-        desc="查询游戏基础资料和 Steam 价格。",
-    )
-    async def game_detail(self, event: AstrMessageEvent, query: GreedyStr):
-        title = str(query).strip()
-        if not title:
-            yield event.plain_result("请输入游戏名，例如：/gamedesc It Takes Two")
-            return
-
-        try:
-            candidates = await self.steam_client.search_games(search=title, page_size=1)
-            if not candidates:
-                yield event.plain_result(f"没有查询到游戏：{title}")
-                return
-            game = candidates[0]
-            price_summary = await self.price_bridge.lookup(game.title)
-        except SteamApiError as exc:
-            logger.warning(f"Steam game detail failed: {exc}")
-            yield event.plain_result(f"Steam 查询失败：{exc}")
-            return
-        except Exception as exc:
-            logger.exception("Game detail lookup failed")
-            yield event.plain_result(f"游戏详情查询失败：{exc}")
-            return
-
-        yield event.plain_result(format_game_detail(game, price_summary))
-
-    @filter.command(
         "accountbind",
         alias={"账号绑定"},
         desc="绑定当前聊天用户的游戏平台账号。",
@@ -262,27 +214,23 @@ class GameRecommenderPlugin(Star):
         try:
             chat_platform, chat_user_id = chat_identity_from_event(event)
             if not text:
-                bindings = await self.cache.list_account_bindings(chat_platform, chat_user_id)
-                if not bindings:
+                binding = await self.cache.get_steam_account_binding(chat_platform, chat_user_id)
+                if binding is None:
                     yield event.plain_result(
-                        "还没有绑定账号。请使用 /accountbind steam <SteamID64 或好友码>。"
+                        "还没有绑定账号。请使用 /accountbind <SteamID64 或好友码>。"
                     )
                     return
-                lines = ["当前绑定账号："]
-                for binding in bindings:
-                    lines.append(
-                        f"- {binding.provider}: {binding.account_id}（{binding.account_kind}）"
-                    )
-                yield event.plain_result("\n".join(lines))
+                yield event.plain_result(
+                    f"当前绑定 Steam ID：{binding.steam_id64}（{binding.account_kind}）。"
+                )
                 return
 
             parsed = parse_account_binding_command(text)
-            saved = await self.cache.upsert_account_binding(
-                AccountBinding(
+            saved = await self.cache.upsert_steam_account_binding(
+                SteamAccountBinding(
                     chat_platform=chat_platform,
                     chat_user_id=chat_user_id,
-                    provider=parsed.provider,
-                    account_id=parsed.account_id,
+                    steam_id64=parsed.steam_id64,
                     account_kind=parsed.account_kind,
                     display_value=parsed.display_value,
                     metadata=parsed.metadata,
@@ -297,7 +245,7 @@ class GameRecommenderPlugin(Star):
             return
 
         yield event.plain_result(
-            f"账号绑定成功：Steam ID {saved.account_id}（来源：{saved.account_kind}）。"
+            f"账号绑定成功：Steam ID {saved.steam_id64}（来源：{saved.account_kind}）。"
         )
 
     @filter.command(
@@ -308,17 +256,17 @@ class GameRecommenderPlugin(Star):
     async def recommend_unplayed_game(self, event: AstrMessageEvent):
         try:
             chat_platform, chat_user_id = chat_identity_from_event(event)
-            binding = await self.cache.get_account_binding(chat_platform, chat_user_id, "steam")
+            binding = await self.cache.get_steam_account_binding(chat_platform, chat_user_id)
             if binding is None:
                 yield event.plain_result(
-                    "当前用户未绑定 Steam 账号；请先使用 /accountbind steam <SteamID64 或好友码>。"
+                    "当前用户未绑定 Steam 账号；请先使用 /accountbind <SteamID64 或好友码>。"
                 )
                 return
             if not self.steam_client.has_web_api_key():
                 yield event.plain_result("未配置 steam_api_key，无法读取 Steam 游戏库。")
                 return
 
-            owned_games = await self.steam_client.get_owned_games(binding.account_id)
+            owned_games = await self.steam_client.get_owned_games(binding.steam_id64)
             if not owned_games:
                 yield event.plain_result("Steam 游戏库为空或不可见，无法推荐未玩游戏。")
                 return
@@ -359,7 +307,6 @@ class GameRecommenderPlugin(Star):
         preference,
         limit: int,
         profile_tag_weights: dict[str, float] | None = None,
-        diversity_mode: str = "strict",
         excluded_appids: list[int] | None = None,
         excluded_titles: list[str] | None = None,
     ):
@@ -367,7 +314,6 @@ class GameRecommenderPlugin(Star):
             preference,
             limit=limit,
             profile_tag_weights=profile_tag_weights,
-            diversity_mode=diversity_mode,
             excluded_appids=excluded_appids,
             excluded_titles=excluded_titles,
         )
@@ -407,11 +353,11 @@ class GameRecommenderPlugin(Star):
                     f"无法识别当前用户，不能执行游戏库过滤：{exc}"
                 ) from exc
             return []
-        binding = await self.cache.get_account_binding(chat_platform, chat_user_id, "steam")
+        binding = await self.cache.get_steam_account_binding(chat_platform, chat_user_id)
         if binding is None:
             if required:
                 raise LibraryFilterModeError(
-                    "当前用户未绑定 Steam 账号；请先使用 /accountbind steam <SteamID64 或好友码>。"
+                    "当前用户未绑定 Steam 账号；请先使用 /accountbind <SteamID64 或好友码>。"
                 )
             return []
         if not self.steam_client.has_web_api_key():
@@ -419,7 +365,7 @@ class GameRecommenderPlugin(Star):
                 raise LibraryFilterModeError("未配置 steam_api_key，无法读取 Steam 游戏库。")
             return []
         try:
-            owned_games = await self.steam_client.get_owned_games(binding.account_id)
+            owned_games = await self.steam_client.get_owned_games(binding.steam_id64)
         except SteamApiError as exc:
             if required:
                 logger.warning(f"Steam owned games lookup failed: {exc}")
@@ -444,7 +390,6 @@ class GameRecommenderPlugin(Star):
             )
         text_filter_mode = detect_library_filter_mode(text)
         preference = await self.preference_parser.parse_preference(event, text)
-        diversity_mode = getattr(preference, "diversity_mode", DIVERSITY_STRICT)
         library_filter_mode = resolve_library_filter_mode(
             command_filter.mode,
             text_filter_mode,
@@ -459,7 +404,6 @@ class GameRecommenderPlugin(Star):
         return PreparedRecommendation(
             raw_query=raw_text,
             preference=preference,
-            diversity_mode=diversity_mode,
             result_limit=result_limit,
         )
 
@@ -498,23 +442,11 @@ class GameRecommenderPlugin(Star):
                 preference,
                 limit=candidate_pool_size,
                 profile_tag_weights=profile_tag_weights,
-                diversity_mode=DIVERSITY_STRICT,
                 excluded_appids=excluded_appids,
                 excluded_titles=excluded_titles,
             )
             retrieved_count = len(ranked_games)
             finish_phase("recall_rank")
-            embedding_reranker = getattr(self, "embedding_reranker", None)
-            if embedding_reranker is not None:
-                ranked_games = await embedding_reranker.rerank(
-                    preference,
-                    prepared.raw_query,
-                    ranked_games,
-                )
-                degradation_reason = (
-                    getattr(embedding_reranker, "last_degradation_reason", None) or "none"
-                )
-            finish_phase("embedding")
             if preference.library_filter_mode:
                 ranked_games = await self._filter_library_games(
                     preference,
@@ -524,31 +456,18 @@ class GameRecommenderPlugin(Star):
                 )
             filtered_count = max(retrieved_count - len(ranked_games), 0)
             finish_phase("library_filter")
-            if preference.budget is not None:
-                ranked_games = await self.price_bridge.enrich_ranked_games(
-                    ranked_games,
-                    preference,
-                )
-                ranked_games = select_results_by_diversity(
-                    ranked_games,
-                    result_limit,
-                    prepared.diversity_mode,
-                )
-            else:
-                ranked_games = select_results_by_diversity(
-                    ranked_games,
-                    result_limit,
-                    prepared.diversity_mode,
-                )
-                ranked_games = await self.price_bridge.enrich_ranked_games(
-                    ranked_games,
-                    preference,
-                )
+            if preference.budget is None:
+                ranked_games = ranked_games[:result_limit]
+            ranked_games = await self.price_bridge.enrich_ranked_games(
+                ranked_games,
+                preference,
+            )
+            ranked_games = ranked_games[:result_limit]
             finish_phase("final_selection")
         logger.debug(
             "Game recommendation pipeline: elapsed_ms=%.1f candidates=%d "
             "filtered=%d selected=%d refill_pool=%d degradation=%s "
-            "profile_ms=%.1f recall_rank_ms=%.1f embedding_ms=%.1f "
+            "profile_ms=%.1f recall_rank_ms=%.1f "
             "library_filter_ms=%.1f final_selection_ms=%.1f",
             (time.perf_counter() - started_at) * 1000,
             retrieved_count,
@@ -558,7 +477,6 @@ class GameRecommenderPlugin(Star):
             degradation_reason,
             phase_times.get("profile", 0.0),
             phase_times.get("recall_rank", 0.0),
-            phase_times.get("embedding", 0.0),
             phase_times.get("library_filter", 0.0),
             phase_times.get("final_selection", 0.0),
         )
@@ -576,7 +494,6 @@ class GameRecommenderPlugin(Star):
             messages=messages,
             ranked_games=ranked_games,
             preference=preference,
-            diversity_mode=prepared.diversity_mode,
             result_limit=result_limit,
             raw_query=prepared.raw_query,
         )
@@ -605,7 +522,6 @@ class GameRecommenderPlugin(Star):
             )
             patch = parsed_patch.patch
             preference = memory.preference
-            diversity_mode = memory.diversity_mode
             result_limit = memory.result_limit
             if parsed_patch.residual_text:
                 supplemental = await self._prepare_recommendation(
@@ -616,8 +532,6 @@ class GameRecommenderPlugin(Star):
                     preference,
                     supplemental.preference,
                 )
-                if explicitly_changes_diversity(parsed_patch.residual_text):
-                    diversity_mode = supplemental.diversity_mode
                 if explicitly_changes_result_count(parsed_patch.residual_text):
                     result_limit = supplemental.result_limit
             preference, patch_excluded_appids, patch_excluded_titles = apply_preference_patch(
@@ -629,14 +543,12 @@ class GameRecommenderPlugin(Star):
             prepared = PreparedRecommendation(
                 raw_query=f"{memory.raw_query} {supplement}".strip(),
                 preference=preference,
-                diversity_mode=diversity_mode,
                 result_limit=result_limit,
             )
         else:
             prepared = PreparedRecommendation(
                 raw_query=memory.raw_query,
                 preference=memory.preference,
-                diversity_mode=memory.diversity_mode,
                 result_limit=memory.result_limit,
             )
         run = await self._run_recommendation(
@@ -667,7 +579,6 @@ class GameRecommenderPlugin(Star):
             chat_user_id=chat_user_id,
             raw_query=run.raw_query,
             preference=run.preference,
-            diversity_mode=run.diversity_mode,
             result_limit=run.result_limit,
             games=run.ranked_games[: run.result_limit],
         )
@@ -686,7 +597,6 @@ class GameRecommenderPlugin(Star):
             chat_user_id=chat_user_id,
             raw_query=run.raw_query,
             preference=run.preference,
-            diversity_mode=run.diversity_mode,
             result_limit=run.result_limit,
             shown_appids=list(memory.shown_appids),
             shown_titles=list(memory.shown_titles),
@@ -741,13 +651,6 @@ def safe_float(value: Any, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
-
-
-def explicitly_changes_diversity(text: str) -> bool:
-    lowered = str(text or "").lower()
-    return any(
-        marker in lowered for marker in ("多样", "重复", "strict", "balanced", "high", "严格")
-    )
 
 
 def explicitly_changes_result_count(text: str) -> bool:

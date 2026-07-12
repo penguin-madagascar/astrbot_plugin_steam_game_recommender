@@ -15,7 +15,6 @@ from ..storage.models import (
     ResolvedReferenceGame,
     SteamSearchHit,
 )
-from .diversity import DIVERSITY_STRICT, select_results_by_diversity
 from .similarity_ranker import (
     SteamTagProfile,
     build_profile_from_preference,
@@ -45,7 +44,7 @@ STEAM_INDEX_FALLBACK_WARNING = (
     "如果仍为空，请换更明确的标签或参考游戏。"
 )
 STEAM_ONLY_SCOPE_WARNING = (
-    "当前版本仅覆盖 Steam/PC 推荐，暂不支持 Switch、PlayStation、Xbox 等跨平台候选。"
+    "当前版本仅支持 Steam 商店游戏，无法验证 Switch、PlayStation 或 Xbox 候选。"
 )
 STEAM_INDEX_PLATFORMS = {"steam", "pc"}
 AAA_SEARCH_TERMS = ["popular", "action adventure", "open world", "story rich", "rpg"]
@@ -102,7 +101,6 @@ class SteamGameIndexService:
         preference: GamePreference,
         limit: int,
         profile_tag_weights: dict[str, float] | None = None,
-        diversity_mode: str = DIVERSITY_STRICT,
         excluded_appids: list[int] | None = None,
         excluded_titles: list[str] | None = None,
     ) -> list[RankedGame]:
@@ -123,7 +121,7 @@ class SteamGameIndexService:
         quality_target = max(10, max(int(limit), 0) * 2)
         quality_count = sum(game.tier in {"strong", "recommended"} for game in ranked)
         if quality_count >= quality_target and references_are_resolved(preference):
-            return select_results_by_diversity(ranked, limit, diversity_mode)
+            return ranked[:limit]
 
         target_pool = min(60, max(30, max(int(limit), 0) * 6))
         refreshed = await self.refresh_entries(
@@ -140,7 +138,7 @@ class SteamGameIndexService:
             profile_tag_weights=profile_tag_weights,
         )
         ranked = exclude_previously_shown(ranked, excluded_appids, excluded_titles)
-        return select_results_by_diversity(ranked, limit, diversity_mode)
+        return ranked[:limit]
 
     async def ensure_steam_tag_aliases(self) -> bool:
         if self._tag_aliases_attempted:

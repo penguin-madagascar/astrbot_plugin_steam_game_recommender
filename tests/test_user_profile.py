@@ -8,9 +8,9 @@ from astrbot_plugin_game_recommender.services.similarity_ranker import (
 )
 from astrbot_plugin_game_recommender.services.steam_index import SteamGameIndexService
 from astrbot_plugin_game_recommender.storage.models import (
-    AccountBinding,
     GameCandidate,
     GamePreference,
+    SteamAccountBinding,
     SteamOwnedGame,
 )
 
@@ -119,11 +119,10 @@ class BoundUserProfileLoaderTest(unittest.IsolatedAsyncioTestCase):
             chat_platform="qq",
             chat_user_id="user-1",
             cache=FakeBindingCache(
-                AccountBinding(
+                SteamAccountBinding(
                     chat_platform="qq",
                     chat_user_id="user-1",
-                    provider="steam",
-                    account_id="76561198000000000",
+                    steam_id64="76561198000000000",
                     account_kind="steam_id64",
                     display_value="76561198000000000",
                 )
@@ -153,11 +152,10 @@ class BoundUserProfileLoaderTest(unittest.IsolatedAsyncioTestCase):
             chat_platform="qq",
             chat_user_id="user-1",
             cache=FakeBindingCache(
-                AccountBinding(
+                SteamAccountBinding(
                     chat_platform="qq",
                     chat_user_id="user-1",
-                    provider="steam",
-                    account_id="76561198000000000",
+                    steam_id64="76561198000000000",
                     account_kind="steam_id64",
                     display_value="76561198000000000",
                 )
@@ -205,16 +203,15 @@ class NoLiveSearchSteamClient:
 
 
 class FakeBindingCache:
-    def __init__(self, binding: AccountBinding | None) -> None:
+    def __init__(self, binding: SteamAccountBinding | None) -> None:
         self.binding = binding
 
-    async def get_account_binding(self, chat_platform: str, chat_user_id: str, provider: str):
+    async def get_steam_account_binding(self, chat_platform: str, chat_user_id: str):
         if self.binding is None:
             return None
         if (
             self.binding.chat_platform == chat_platform
             and self.binding.chat_user_id == chat_user_id
-            and self.binding.provider == provider
         ):
             return self.binding
         return None

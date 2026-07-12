@@ -36,8 +36,8 @@ class RetryCommandTest(unittest.TestCase):
 class PreferencePatchTest(unittest.TestCase):
     def setUp(self) -> None:
         self.results = [
-            RecommendationResultSummary(1, "Game A", ["Puzzle"], "strong"),
-            RecommendationResultSummary(2, "Game B", ["Farming"], "recommended"),
+            RecommendationResultSummary(1, "Game A", ["Puzzle"]),
+            RecommendationResultSummary(2, "Game B", ["Farming"]),
         ]
 
     def test_like_ordinal_becomes_positive_reference(self) -> None:

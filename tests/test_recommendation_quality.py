@@ -203,7 +203,7 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
             ["Farm Co-op A", "Farm Co-op B", "Story Co-op", "Lower Match Builder"],
         )
 
-    async def test_cached_index_applies_explicit_balanced_diversity(self) -> None:
+    async def test_cached_index_returns_score_order_without_diversity_reordering(self) -> None:
         cache = MemoryCache(
             {
                 "steam_index:v2": [
@@ -230,12 +230,11 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
         ranked = await service.recommend(
             GamePreference(platforms=["steam"], genres_like=["co-op", "puzzle"]),
             limit=4,
-            diversity_mode="balanced",
         )
 
         self.assertEqual(
             [game.title for game in ranked],
-            ["Farm Co-op A", "Story Co-op", "Farm Co-op B", "Lower Match Builder"],
+            ["Farm Co-op A", "Farm Co-op B", "Story Co-op", "Lower Match Builder"],
         )
 
     def test_exclude_tags_filter_horror_and_singleplayer_only(self) -> None:
