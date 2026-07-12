@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import unittest
 
-from astrbot_plugin_game_recommender.services.played_filter import (
+from astrbot_plugin_steam_game_recommender.services.played_filter import (
     LibraryFilterModeError,
     filter_games_by_library_mode,
     parse_library_filter_command,
     resolve_library_filter_mode,
 )
-from astrbot_plugin_game_recommender.storage.models import RankedGame, SteamOwnedGame
+from astrbot_plugin_steam_game_recommender.storage.models import RankedGame, SteamOwnedGame
 
 
 class LibraryFilterCommandTest(unittest.TestCase):

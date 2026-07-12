@@ -823,9 +823,9 @@
       ]
     },
     {
-      "id": "diversity-strict-similar",
-      "category": "diversity",
-      "query": "严格匹配合作种田",
+      "id": "similar-candidates-equal",
+      "category": "similar_candidates",
+      "query": "合作种田候选",
       "target_count": 3,
       "candidates": [
         {
@@ -861,9 +861,9 @@
       ]
     },
     {
-      "id": "diversity-balanced",
-      "category": "diversity",
-      "query": "适度多样的合作游戏",
+      "id": "similar-candidates-mixed",
+      "category": "similar_candidates",
+      "query": "合作游戏候选",
       "target_count": 3,
       "candidates": [
         {
@@ -899,9 +899,9 @@
       ]
     },
     {
-      "id": "diversity-high",
-      "category": "diversity",
-      "query": "更多样，避免同质化",
+      "id": "similar-candidates-score-order",
+      "category": "similar_candidates",
+      "query": "合作解谜游戏候选",
       "target_count": 3,
       "candidates": [
         {

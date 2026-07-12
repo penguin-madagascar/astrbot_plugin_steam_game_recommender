@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-from astrbot_plugin_game_recommender.services.preference_rules import (
+from astrbot_plugin_steam_game_recommender.services.preference_rules import (
     extract_reference_games,
     infer_preference_from_text,
     merge_text_preference,
 )
-from astrbot_plugin_game_recommender.storage.models import GamePreference
+from astrbot_plugin_steam_game_recommender.storage.models import GamePreference
 
 
 class PreferenceRulesTest(unittest.TestCase):

@@ -50,7 +50,7 @@ PREFERENCE_SCHEMA_HINT = """
 - genres_dislike 放排除标签，例如恐怖、魂类、肉鸽、纯单人、pvp。
 - 同一标签出现冲突时，以用户文本中最后一次明确表达的喜欢/排除极性为准。
 - reference_games_dislike 只放用户明确表示不想要类似体验的参考游戏名。
-- 用户说 3A、AAA、triple-A、大作、单机大作时，按宽泛的 Steam/PC 大作意图处理：
+- 用户说 3A、AAA、triple-A、大作、单机大作时，按宽泛的 Steam 大作意图处理：
   genres_like 可包含 action、adventure、rpg；extra_tags 包含 aaa、story rich、open world。
   不要把 3A 当成推荐数量，不要因此编造具体游戏名。
 - library_filter_mode 只在用户明确要求时填写：排除已有/exclude-owned 为 "exclude_owned"；

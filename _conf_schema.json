@@ -1,34 +1,34 @@
 {
   "llm_provider_id": {
     "type": "string",
-    "description": "用于偏好解析的 LLM 提供商",
-    "hint": "留空时尝试使用当前会话模型；调用失败会降级为关键词解析。推荐理由始终由结构化 Steam 证据生成。",
+    "description": "用于偏好解析和推荐理由的 LLM 提供商",
+    "hint": "留空时尝试使用当前会话模型；偏好解析失败会降级为关键词规则，单款理由失败会降级为可信证据规则理由。",
     "_special": "select_provider",
     "default": ""
   },
   "enable_llm_fallback": {
     "type": "bool",
     "description": "启用 LLM 空结果兜底",
-    "hint": "开启后，如果 Steam 索引和过滤后没有结果，或请求的平台超出 Steam/PC 覆盖范围，会使用 LLM 生成已标注的未验证建议。",
+    "hint": "开启后，如果 Steam 索引和过滤后没有结果，或用户明确要求非 Steam 平台，会使用 LLM 生成已标注的未验证建议。",
     "default": false
   },
   "default_region": {
     "type": "string",
     "description": "默认地区代码",
-    "hint": "用于 Steam 公开数据源和 Steam 价格增强的默认地区，建议使用 CN、US、JP 等两字母代码。",
+    "hint": "未在命令中指定地区时使用；支持 CN、US、JP 等两字母代码，查询可用 -US、国区、美区、日区等覆盖。",
     "default": "CN"
   },
   "steam_api_key": {
     "type": "string",
     "description": "Steam Web API Key",
-    "hint": "用于 /gamerec 的排除已有和仅查看已有参数调用 Steam GetOwnedGames；留空时账号绑定仍可用，但无法执行库过滤。",
+    "hint": "用于 /gamerec 的游戏库过滤和 /unplayedrec 调用 Steam GetOwnedGames；留空时账号绑定仍可用，但无法读取游戏库。",
     "default": ""
   },
   "steam_price_heybox_notice": {
     "type": "text",
     "description": "Steam 价格增强说明",
     "hint": "这是提示信息，无需配置；安装 astrbot_plugin_steam_price_heybox 后会自动启用。",
-    "default": "无需配置。安装 astrbot_plugin_steam_price_heybox 后，本插件会自动启用 Steam 当前价、史低和跨区价格增强；未安装时仍可正常返回游戏推荐和详情。",
+    "default": "无需配置。安装 astrbot_plugin_steam_price_heybox 后，本插件会自动启用指定区域价格查询，返回 Steam 当前价、历史最低和最近促销；未安装时仍可正常推荐游戏。",
     "_readonly": true,
     "obvious_hint": true
   },
@@ -41,7 +41,7 @@
   "steam_index_ttl_hours": {
     "type": "int",
     "description": "Steam 推荐索引缓存有效期（小时）",
-    "hint": "Steam/PC 推荐会优先使用本地索引；超过该时间后会尝试用 Steam 公开数据刷新索引。",
+    "hint": "Steam 推荐会优先使用本地索引；超过该时间后会尝试用 Steam 公开数据刷新索引。",
     "default": 168
   },
   "steam_min_review_count": {

@@ -5,8 +5,10 @@ import unittest
 from types import SimpleNamespace
 from typing import Any
 
-from astrbot_plugin_game_recommender.services.similarity_ranker import build_profile_from_preference
-from astrbot_plugin_game_recommender.services.steam_index import (
+from astrbot_plugin_steam_game_recommender.services.similarity_ranker import (
+    build_profile_from_preference,
+)
+from astrbot_plugin_steam_game_recommender.services.steam_index import (
     STEAM_INDEX_CACHE_KEY,
     SteamGameIndexService,
     SteamIndexEntry,
@@ -15,7 +17,7 @@ from astrbot_plugin_game_recommender.services.steam_index import (
     reference_candidates,
     search_terms_for,
 )
-from astrbot_plugin_game_recommender.storage.models import (
+from astrbot_plugin_steam_game_recommender.storage.models import (
     GameCandidate,
     GamePreference,
     ResolvedReferenceGame,

@@ -8,8 +8,7 @@
     "ndcg_at_target": 0.605947,
     "recall_at_20": 0.989583,
     "constraint_violation_rate": 0.194444,
-    "fill_rate": 0.861111,
-    "intra_list_tag_similarity": 0.337227
+    "fill_rate": 0.861111
   },
   "outputs": [
     {
@@ -295,7 +294,7 @@
       ]
     },
     {
-      "id": "diversity-strict-similar",
+      "id": "similar-candidates-equal",
       "legacy_candidate_ranking": [
         "d1-a",
         "d1-b",
@@ -309,7 +308,7 @@
       "violating_ids": []
     },
     {
-      "id": "diversity-balanced",
+      "id": "similar-candidates-mixed",
       "legacy_candidate_ranking": [
         "d2-a",
         "d2-b",
@@ -323,7 +322,7 @@
       "violating_ids": []
     },
     {
-      "id": "diversity-high",
+      "id": "similar-candidates-score-order",
       "legacy_candidate_ranking": [
         "d3-a",
         "d3-b",

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from astrbot_plugin_game_recommender.services.message_delivery import (
+from astrbot_plugin_steam_game_recommender.services.message_delivery import (
     build_forward_message_chain,
 )
 

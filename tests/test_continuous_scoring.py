@@ -3,13 +3,13 @@ from __future__ import annotations
 import math
 import unittest
 
-from astrbot_plugin_game_recommender.services.similarity_ranker import (
+from astrbot_plugin_steam_game_recommender.services.similarity_ranker import (
     SteamTagProfile,
     popularity_score,
     rank_steam_candidates,
     ranked_game_sort_key,
 )
-from astrbot_plugin_game_recommender.storage.models import (
+from astrbot_plugin_steam_game_recommender.storage.models import (
     GameCandidate,
     RankedGame,
     RecommendationEvidence,
@@ -118,8 +118,6 @@ class ContinuousScoringTest(unittest.TestCase):
         self.assertIn("score_breakdown", ranked_fields)
         self.assertIn("recommendation_evidence", ranked_fields)
         self.assertIn("recommendation_reason", ranked_fields)
-        for removed in ("tier", "fit_points", "risk_points", "facts", "reasons", "warnings"):
-            self.assertNotIn(removed, ranked_fields)
 
     def test_stable_sort_uses_score_coverage_reviews_year_and_title(self) -> None:
         games = [

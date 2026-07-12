@@ -3,7 +3,7 @@ from __future__ import annotations
 import random
 import unittest
 
-from astrbot_plugin_game_recommender.storage.models import (
+from astrbot_plugin_steam_game_recommender.storage.models import (
     GameCandidate,
     SteamOwnedGame,
 )
@@ -11,7 +11,7 @@ from astrbot_plugin_game_recommender.storage.models import (
 
 class UnplayedPickerTest(unittest.IsolatedAsyncioTestCase):
     async def test_randomly_picks_unplayed_game_that_meets_review_floor(self) -> None:
-        from astrbot_plugin_game_recommender.services.unplayed_picker import (
+        from astrbot_plugin_steam_game_recommender.services.unplayed_picker import (
             format_unplayed_recommendation,
             pick_random_unplayed_game,
         )
@@ -52,7 +52,7 @@ class UnplayedPickerTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("http", message)
 
     async def test_skips_played_and_low_review_games(self) -> None:
-        from astrbot_plugin_game_recommender.services.unplayed_picker import (
+        from astrbot_plugin_steam_game_recommender.services.unplayed_picker import (
             pick_random_unplayed_game,
         )
 
@@ -82,7 +82,7 @@ class UnplayedPickerTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(1, client.detail_appids)
 
     async def test_raises_when_no_unplayed_game_passes_review_floor(self) -> None:
-        from astrbot_plugin_game_recommender.services.unplayed_picker import (
+        from astrbot_plugin_steam_game_recommender.services.unplayed_picker import (
             UnplayedRecommendationError,
             pick_random_unplayed_game,
         )

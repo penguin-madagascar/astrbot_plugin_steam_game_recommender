@@ -41,10 +41,13 @@ command_stub = sys.modules.setdefault("astrbot.core.star.filter.command", comman
 command_stub.GreedyStr = getattr(command_stub, "GreedyStr", str)
 
 try:
-    from astrbot_plugin_game_recommender.main import GameRecommenderPlugin, PreparedRecommendation
-    from astrbot_plugin_game_recommender.services.played_filter import LibraryFilterModeError
-    from astrbot_plugin_game_recommender.services.steam_index import STEAM_ONLY_SCOPE_WARNING
-    from astrbot_plugin_game_recommender.storage.models import (
+    from astrbot_plugin_steam_game_recommender.main import (
+        PreparedRecommendation,
+        SteamGameRecommenderPlugin,
+    )
+    from astrbot_plugin_steam_game_recommender.services.played_filter import LibraryFilterModeError
+    from astrbot_plugin_steam_game_recommender.services.steam_index import STEAM_ONLY_SCOPE_WARNING
+    from astrbot_plugin_steam_game_recommender.storage.models import (
         GameCandidate,
         GamePreference,
         RankedGame,
@@ -71,7 +74,7 @@ class PrepareRecommendationLlmFallbackTest(unittest.IsolatedAsyncioTestCase):
     async def test_prepare_applies_query_region_and_region_local_budget_currency(self) -> None:
         preference = GamePreference(platforms=["steam"], budget=50, result_count=3)
         parser = FakePreferenceParser(preference)
-        plugin = object.__new__(GameRecommenderPlugin)
+        plugin = object.__new__(SteamGameRecommenderPlugin)
         plugin.max_results = 5
         plugin.default_region = "CN"
         plugin.enable_llm_fallback = False
@@ -92,7 +95,7 @@ class PrepareRecommendationLlmFallbackTest(unittest.IsolatedAsyncioTestCase):
             genres_like=["party"],
             result_count=3,
         )
-        plugin = object.__new__(GameRecommenderPlugin)
+        plugin = object.__new__(SteamGameRecommenderPlugin)
         plugin.max_results = 5
         plugin.enable_llm_fallback = False
         plugin.preference_parser = FakePreferenceParser(preference)
@@ -108,7 +111,7 @@ class PrepareRecommendationLlmFallbackTest(unittest.IsolatedAsyncioTestCase):
             genres_like=["party"],
             result_count=3,
         )
-        plugin = object.__new__(GameRecommenderPlugin)
+        plugin = object.__new__(SteamGameRecommenderPlugin)
         plugin.max_results = 5
         plugin.enable_llm_fallback = True
         plugin.preference_parser = FakePreferenceParser(preference)
@@ -122,7 +125,7 @@ class PrepareRecommendationLlmFallbackTest(unittest.IsolatedAsyncioTestCase):
     async def test_run_uses_llm_fallback_without_calling_steam_index_for_non_steam_only(
         self,
     ) -> None:
-        plugin = object.__new__(GameRecommenderPlugin)
+        plugin = object.__new__(SteamGameRecommenderPlugin)
         plugin.enable_llm_fallback = True
         plugin.provider_id = "provider-1"
         plugin.context = FakeLlmContext(
@@ -156,7 +159,7 @@ class PrepareRecommendationLlmFallbackTest(unittest.IsolatedAsyncioTestCase):
 
 class RecommendationPipelineTest(unittest.IsolatedAsyncioTestCase):
     async def test_library_snapshot_is_loaded_once_for_profile_and_filtering(self) -> None:
-        plugin = object.__new__(GameRecommenderPlugin)
+        plugin = object.__new__(SteamGameRecommenderPlugin)
         plugin.enable_llm_fallback = False
         plugin.provider_id = ""
         plugin.context = FakeLlmContext("")

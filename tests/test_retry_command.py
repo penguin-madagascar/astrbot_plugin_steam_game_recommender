@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import unittest
 
-from astrbot_plugin_game_recommender.services.recommendation_memory import (
+from astrbot_plugin_steam_game_recommender.services.recommendation_memory import (
     RecommendationResultSummary,
 )
-from astrbot_plugin_game_recommender.services.retry_command import (
+from astrbot_plugin_steam_game_recommender.services.retry_command import (
     apply_preference_patch,
     parse_preference_patch,
     parse_retry_request,
 )
-from astrbot_plugin_game_recommender.storage.models import GamePreference
+from astrbot_plugin_steam_game_recommender.storage.models import GamePreference
 
 
 class RetryCommandTest(unittest.TestCase):

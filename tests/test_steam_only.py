@@ -19,41 +19,43 @@ sys.modules.setdefault("astrbot.api", api_module)
 sys.modules.setdefault("astrbot.api.event", event_module)
 sys.modules.setdefault("astrbot.api.star", star_module)
 
-from astrbot_plugin_game_recommender.services.preference_parser import (  # noqa: E402
+from astrbot_plugin_steam_game_recommender.services.preference_parser import (  # noqa: E402
     parse_preference_json,
 )
-from astrbot_plugin_game_recommender.services.similarity_ranker import (  # noqa: E402
+from astrbot_plugin_steam_game_recommender.services.similarity_ranker import (  # noqa: E402
     build_profile_from_preference,
 )
-from astrbot_plugin_game_recommender.services.steam_index import (  # noqa: E402
+from astrbot_plugin_steam_game_recommender.services.steam_index import (  # noqa: E402
     STEAM_ONLY_SCOPE_WARNING,
     steam_only_scope_warning_for,
 )
-from astrbot_plugin_game_recommender.storage.models import GamePreference  # noqa: E402
+from astrbot_plugin_steam_game_recommender.storage.models import GamePreference  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-class SteamPeekOnlyMetadataTest(unittest.TestCase):
-    def test_version_is_0_5_0_and_legacy_provider_config_is_removed(self) -> None:
+class SteamOnlyMetadataTest(unittest.TestCase):
+    def test_plugin_id_display_name_and_version_are_0_6_0(self) -> None:
         main_text = (ROOT / "main.py").read_text(encoding="utf-8")
         metadata_text = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
-        schema_text = (ROOT / "_conf_schema.json").read_text(encoding="utf-8")
-        legacy_key = "ra" + "wg_api_key"
 
-        self.assertIn('PLUGIN_VERSION = "0.5.0"', main_text)
-        self.assertIn("version: 0.5.0", metadata_text)
-        self.assertNotIn(legacy_key, schema_text)
+        self.assertIn('PLUGIN_NAME = "astrbot_plugin_steam_game_recommender"', main_text)
+        self.assertIn('PLUGIN_VERSION = "0.6.0"', main_text)
+        self.assertIn("class SteamGameRecommenderPlugin", main_text)
+        self.assertIn("name: astrbot_plugin_steam_game_recommender", metadata_text)
+        self.assertIn("display_name: Steam 游戏推荐助手", metadata_text)
+        self.assertIn("version: 0.6.0", metadata_text)
 
-    def test_legacy_provider_files_are_removed(self) -> None:
-        legacy_name = "ra" + "wg.py"
+    def test_readme_documents_only_current_steam_interfaces(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
-        self.assertFalse((ROOT / "clients" / legacy_name).exists())
-        self.assertFalse((ROOT / "services" / "search_plan.py").exists())
-        self.assertFalse((ROOT / "services" / "reference_data.py").exists())
+        for command in ("/gamerec", "/gamerec_retry", "/accountbind", "/unplayedrec"):
+            self.assertIn(command, readme)
+        self.assertIn("-US", readme)
+        self.assertIn("推荐分：86%", readme)
 
 
-class SteamPeekOnlyPreferenceTest(unittest.TestCase):
+class SteamOnlyPreferenceTest(unittest.TestCase):
     def test_llm_json_accepts_extra_tags_and_reference_titles(self) -> None:
         preference = parse_preference_json(
             """

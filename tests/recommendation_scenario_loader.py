@@ -7,7 +7,7 @@ from typing import Any
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "recommendation_quality_scenarios.json"
 LEGACY_OUTPUT_PATH = Path(__file__).parent / "fixtures" / "legacy_recommendation_outputs.json"
-EXPECTED_LEGACY_OUTPUT_SHA256 = "411b01e746fa12d95e357f65d1ae5a0cf06e337fc29fd44f4e66d47df77465cd"
+EXPECTED_LEGACY_OUTPUT_SHA256 = "de68b5e1e2b6812045935336b5027f382221fc69d67aafeee0ece55871d2cc09"
 
 
 def load_recommendation_quality_fixture() -> dict[str, Any]:

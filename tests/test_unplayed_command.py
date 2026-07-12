@@ -8,8 +8,8 @@ try:
 except ModuleNotFoundError:
     __import__("test_prepare_recommendation")
 
-from astrbot_plugin_game_recommender.main import GameRecommenderPlugin
-from astrbot_plugin_game_recommender.storage.models import (
+from astrbot_plugin_steam_game_recommender.main import SteamGameRecommenderPlugin
+from astrbot_plugin_steam_game_recommender.storage.models import (
     GameCandidate,
     SteamAccountBinding,
     SteamOwnedGame,
@@ -20,7 +20,7 @@ class UnplayedCommandTest(unittest.IsolatedAsyncioTestCase):
     async def test_command_sends_one_plain_message_without_forward_record_or_extra_fields(
         self,
     ) -> None:
-        plugin = object.__new__(GameRecommenderPlugin)
+        plugin = object.__new__(SteamGameRecommenderPlugin)
         plugin.cache = BoundCache()
         plugin.steam_client = UnplayedSteamClient()
         plugin.context = ReasonContext()

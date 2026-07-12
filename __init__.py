@@ -1,1 +1,1 @@
-"""AstrBot game recommender plugin."""
+"""AstrBot Steam game recommender plugin."""

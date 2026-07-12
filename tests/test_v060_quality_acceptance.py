@@ -10,29 +10,29 @@ try:
 except ModuleNotFoundError:
     _astrbot_stubs = __import__("test_prepare_recommendation")
 
-from astrbot_plugin_game_recommender.services.played_filter import (
+from astrbot_plugin_steam_game_recommender.services.played_filter import (
     filter_games_by_library_mode,
 )
-from astrbot_plugin_game_recommender.services.preference_parser import keyword_fallback
-from astrbot_plugin_game_recommender.services.recommendation_evaluation import (
+from astrbot_plugin_steam_game_recommender.services.preference_parser import keyword_fallback
+from astrbot_plugin_steam_game_recommender.services.recommendation_evaluation import (
     constraint_violation_rate,
     fill_rate,
     ndcg_at_k,
     recall_at_k,
 )
-from astrbot_plugin_game_recommender.services.similarity_ranker import (
+from astrbot_plugin_steam_game_recommender.services.similarity_ranker import (
     build_profile_from_preference,
     ranked_game_sort_key,
     rank_steam_candidates,
 )
-from astrbot_plugin_game_recommender.services.steam_price_bridge import (
+from astrbot_plugin_steam_game_recommender.services.steam_price_bridge import (
     attach_missing_price_warning,
     attach_price_summary,
 )
-from astrbot_plugin_game_recommender.services.tag_normalizer import (
+from astrbot_plugin_steam_game_recommender.services.tag_normalizer import (
     register_steam_tag_aliases,
 )
-from astrbot_plugin_game_recommender.storage.models import (
+from astrbot_plugin_steam_game_recommender.storage.models import (
     GameCandidate,
     GamePreference,
     GamePriceSummary,
@@ -72,7 +72,7 @@ REFERENCE_TAGS = {
 }
 
 
-class V050QualityAcceptanceTest(unittest.TestCase):
+class V060QualityAcceptanceTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.fixture = load_recommendation_quality_fixture()
@@ -176,7 +176,7 @@ def evaluate_current_scenario(scenario: dict) -> dict[str, float]:
 def adjusted_preference(scenario: dict) -> GamePreference:
     preference = keyword_fallback(scenario["query"])
     scenario_id = scenario["id"]
-    if scenario_id == "diversity-high":
+    if scenario_id == "similar-candidates-score-order":
         preference.genres_like = ["co-op", "puzzle"]
     if scenario_id == "retry-too-hard":
         preference.genres_like = ["casual", "relaxing", "adventure"]

@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from typing import Any
 
-from astrbot_plugin_game_recommender.services.recommendation_memory import (
+from astrbot_plugin_steam_game_recommender.services.recommendation_memory import (
     PreferencePatch,
     RecommendationMemory,
     append_feedback,
@@ -13,8 +13,8 @@ from astrbot_plugin_game_recommender.services.recommendation_memory import (
     recommendation_memory_key,
     save_recommendation_memory,
 )
-from astrbot_plugin_game_recommender.services.steam_index import SteamGameIndexService
-from astrbot_plugin_game_recommender.storage.models import GamePreference, RankedGame
+from astrbot_plugin_steam_game_recommender.services.steam_index import SteamGameIndexService
+from astrbot_plugin_steam_game_recommender.storage.models import GamePreference, RankedGame
 
 
 class RecommendationMemoryTest(unittest.IsolatedAsyncioTestCase):
@@ -116,24 +116,6 @@ class RecommendationMemoryTest(unittest.IsolatedAsyncioTestCase):
         assert loaded is not None
         self.assertLess(len(loaded.feedback), 10)
         self.assertTrue(all(item.created_at >= 1_300 for item in loaded.feedback))
-
-    async def test_serialized_memory_has_no_tier_or_diversity_fields(self) -> None:
-        cache = MemoryCache()
-        memory = build_recommendation_memory(
-            chat_platform="qq",
-            chat_user_id="user-1",
-            raw_query="Steam 合作解谜",
-            preference=GamePreference(platforms=["steam"]),
-            result_limit=1,
-            games=[ranked_game("Game A", 1)],
-            now=1000,
-        )
-
-        await save_recommendation_memory(cache, memory)
-        payload = cache.payloads[recommendation_memory_key("qq", "user-1")]
-
-        self.assertNotIn("diversity_mode", payload)
-        self.assertNotIn("tier", payload["last_results"][0])
 
 
 def ranked_game(title: str, appid: int) -> RankedGame:

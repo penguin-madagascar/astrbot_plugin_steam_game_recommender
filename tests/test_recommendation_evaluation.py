@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import unittest
 
-from astrbot_plugin_game_recommender.services.recommendation_evaluation import (
+from astrbot_plugin_steam_game_recommender.services.recommendation_evaluation import (
     constraint_violation_rate,
     fill_rate,
-    intra_list_tag_similarity,
     ndcg_at_k,
     recall_at_k,
 )
@@ -19,7 +18,6 @@ class RecommendationEvaluationTest(unittest.TestCase):
         self.assertEqual(recall_at_k([], relevance, k=20), 0.0)
         self.assertEqual(constraint_violation_rate([], {"blocked"}), 0.0)
         self.assertEqual(fill_rate([], target_count=5), 0.0)
-        self.assertEqual(intra_list_tag_similarity([], {}), 0.0)
 
     def test_ideal_ranking_has_perfect_ndcg_and_recall(self) -> None:
         relevance = {"best": 3, "good": 2, "fair": 1, "irrelevant": 0}
@@ -71,32 +69,6 @@ class RecommendationEvaluationTest(unittest.TestCase):
 
     def test_fill_rate_ignores_duplicate_ids(self) -> None:
         self.assertAlmostEqual(fill_rate(["a", "a", "b"], target_count=3), 2 / 3)
-
-    def test_identical_tag_sets_have_similarity_one(self) -> None:
-        ranking = ["a", "b", "c"]
-        tags = {
-            "a": {"co-op", "puzzle"},
-            "b": {"co-op", "puzzle"},
-            "c": {"co-op", "puzzle"},
-        }
-
-        self.assertAlmostEqual(intra_list_tag_similarity(ranking, tags), 1.0)
-
-    def test_disjoint_tag_sets_have_similarity_zero(self) -> None:
-        ranking = ["a", "b", "c"]
-        tags = {
-            "a": {"co-op"},
-            "b": {"strategy"},
-            "c": {"racing"},
-        }
-
-        self.assertAlmostEqual(intra_list_tag_similarity(ranking, tags), 0.0)
-
-    def test_intra_list_similarity_ignores_duplicate_ids(self) -> None:
-        ranking = ["a", "a", "b"]
-        tags = {"a": {"co-op"}, "b": {"strategy"}}
-
-        self.assertAlmostEqual(intra_list_tag_similarity(ranking, tags), 0.0)
 
 
 if __name__ == "__main__":

@@ -4,19 +4,19 @@ import unittest
 from datetime import date
 from decimal import Decimal
 
-from astrbot_plugin_game_recommender.services.formatter import (
+from astrbot_plugin_steam_game_recommender.services.formatter import (
     format_game_block,
     format_recommendation_messages,
 )
-from astrbot_plugin_game_recommender.services.region_query import (
+from astrbot_plugin_steam_game_recommender.services.region_query import (
     parse_region_query,
     region_currency,
 )
-from astrbot_plugin_game_recommender.services.steam_price_bridge import (
+from astrbot_plugin_steam_game_recommender.services.steam_price_bridge import (
     SteamPriceBridge,
     attach_price_summary,
 )
-from astrbot_plugin_game_recommender.storage.models import (
+from astrbot_plugin_steam_game_recommender.storage.models import (
     GamePreference,
     GamePriceSummary,
     RankedGame,

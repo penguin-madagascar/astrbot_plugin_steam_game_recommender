@@ -3,12 +3,12 @@ from __future__ import annotations
 import unittest
 from typing import Any
 
-from astrbot_plugin_game_recommender.services.similarity_ranker import (
+from astrbot_plugin_steam_game_recommender.services.similarity_ranker import (
     build_profile_from_preference,
     rank_steam_candidates,
 )
-from astrbot_plugin_game_recommender.services.steam_index import SteamGameIndexService
-from astrbot_plugin_game_recommender.storage.models import GameCandidate, GamePreference
+from astrbot_plugin_steam_game_recommender.services.steam_index import SteamGameIndexService
+from astrbot_plugin_steam_game_recommender.storage.models import GameCandidate, GamePreference
 
 
 class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
@@ -205,7 +205,7 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
             ["Farm Co-op A", "Farm Co-op B", "Story Co-op", "Lower Match Builder"],
         )
 
-    async def test_cached_index_returns_score_order_without_diversity_reordering(self) -> None:
+    async def test_cached_index_returns_continuous_score_order(self) -> None:
         cache = MemoryCache(
             {
                 "steam_index:v2": [

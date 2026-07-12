@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import unittest
 
-from astrbot_plugin_game_recommender.services.recommendation_limits import effective_result_limit
+from astrbot_plugin_steam_game_recommender.services.recommendation_limits import (
+    effective_result_limit,
+)
 
 
 class RecommendationLimitTest(unittest.TestCase):

@@ -68,11 +68,9 @@ from .services.user_profile import build_user_tag_weights
 from .storage.models import GamePreference, RankedGame, SteamAccountBinding, SteamOwnedGame
 from .storage.repository import SQLiteCacheRepository
 
-PLUGIN_NAME = "astrbot_plugin_game_recommender"
-PLUGIN_VERSION = "0.5.0"
-PLUGIN_DESCRIPTION = (
-    "基于 Steam/PC 公开数据、本地索引和标签相似度推荐游戏；当前版本暂不做跨平台候选召回。"
-)
+PLUGIN_NAME = "astrbot_plugin_steam_game_recommender"
+PLUGIN_VERSION = "0.6.0"
+PLUGIN_DESCRIPTION = "基于 Steam 公开数据、连续评分和可信证据生成精简游戏推荐。"
 
 
 @dataclass(frozen=True)
@@ -97,7 +95,7 @@ class RecommendationRun:
     PLUGIN_DESCRIPTION,
     PLUGIN_VERSION,
 )
-class GameRecommenderPlugin(Star):
+class SteamGameRecommenderPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | dict | None = None) -> None:
         super().__init__(context)
         self.context = context

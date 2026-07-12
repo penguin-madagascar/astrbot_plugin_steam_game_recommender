@@ -4,13 +4,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from astrbot_plugin_game_recommender.services.account_binding import (
+from astrbot_plugin_steam_game_recommender.services.account_binding import (
     STEAMID64_BASE,
     AccountBindingError,
     parse_account_binding_command,
 )
-from astrbot_plugin_game_recommender.storage.models import SteamAccountBinding
-from astrbot_plugin_game_recommender.storage.repository import SQLiteCacheRepository
+from astrbot_plugin_steam_game_recommender.storage.models import SteamAccountBinding
+from astrbot_plugin_steam_game_recommender.storage.repository import SQLiteCacheRepository
 
 
 class AccountBindingParserTest(unittest.TestCase):

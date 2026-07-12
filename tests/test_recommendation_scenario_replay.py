@@ -7,16 +7,15 @@ from collections import Counter
 from statistics import fmean
 from typing import Any, Callable
 
-from astrbot_plugin_game_recommender.services.recommendation_evaluation import (
+from astrbot_plugin_steam_game_recommender.services.recommendation_evaluation import (
     constraint_violation_rate,
     fill_rate,
-    intra_list_tag_similarity,
     ndcg_at_k,
     recall_at_k,
 )
 
 try:
-    from astrbot_plugin_game_recommender.tests.recommendation_scenario_loader import (
+    from astrbot_plugin_steam_game_recommender.tests.recommendation_scenario_loader import (
         EXPECTED_LEGACY_OUTPUT_SHA256,
         FIXTURE_PATH,
         LEGACY_OUTPUT_PATH,
@@ -37,7 +36,7 @@ EXPECTED_CATEGORY_COUNTS = {
     "positive_negative_reference": 4,
     "aaa": 3,
     "budget_library": 3,
-    "diversity": 3,
+    "similar_candidates": 3,
     "retry_feedback": 3,
 }
 EXPECTED_SCENARIO_IDS = {
@@ -59,9 +58,9 @@ EXPECTED_SCENARIO_IDS = {
     "budget-soft-ranking",
     "library-exclude-owned",
     "library-only-owned",
-    "diversity-strict-similar",
-    "diversity-balanced",
-    "diversity-high",
+    "similar-candidates-equal",
+    "similar-candidates-mixed",
+    "similar-candidates-score-order",
     "retry-too-hard",
     "retry-like-second",
     "retry-dislike-first",
@@ -71,9 +70,8 @@ METRIC_NAMES = {
     "recall_at_20",
     "constraint_violation_rate",
     "fill_rate",
-    "intra_list_tag_similarity",
 }
-FROZEN_LEGACY_OUTPUT_SHA256 = "411b01e746fa12d95e357f65d1ae5a0cf06e337fc29fd44f4e66d47df77465cd"
+FROZEN_LEGACY_OUTPUT_SHA256 = "de68b5e1e2b6812045935336b5027f382221fc69d67aafeee0ece55871d2cc09"
 
 
 class RecommendationScenarioReplayTest(unittest.TestCase):
@@ -219,7 +217,6 @@ class RecommendationScenarioReplayTest(unittest.TestCase):
         )
         self.assertTrue(any(result["fill_rate"] < 1.0 for result in evaluations))
         self.assertTrue(any(result["constraint_violation_rate"] > 0.0 for result in evaluations))
-        self.assertTrue(any(result["intra_list_tag_similarity"] >= 0.8 for result in evaluations))
         self.assertTrue(any(0.0 < result["ndcg_at_target"] < 1.0 for result in evaluations))
 
     def test_legacy_baseline_replays_from_explicit_fixed_values(self) -> None:
@@ -261,7 +258,6 @@ def _evaluate_scenario(scenario: dict[str, Any]) -> dict[str, float]:
     relevance_by_id = {
         candidate["id"]: candidate["relevance"] for candidate in scenario["candidates"]
     }
-    tags_by_id = {candidate["id"]: candidate["tags"] for candidate in scenario["candidates"]}
     ranking = scenario["legacy_ranking"]
     target_count = scenario["target_count"]
     return {
@@ -269,7 +265,6 @@ def _evaluate_scenario(scenario: dict[str, Any]) -> dict[str, float]:
         "recall_at_20": recall_at_k(scenario["legacy_candidate_ranking"], relevance_by_id, k=20),
         "constraint_violation_rate": constraint_violation_rate(ranking, scenario["violating_ids"]),
         "fill_rate": fill_rate(ranking, target_count=target_count),
-        "intra_list_tag_similarity": intra_list_tag_similarity(ranking, tags_by_id),
     }
 
 

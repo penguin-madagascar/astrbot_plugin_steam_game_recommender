@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-from astrbot_plugin_game_recommender.services.similarity_ranker import (
+from astrbot_plugin_steam_game_recommender.services.similarity_ranker import (
     SteamTagProfile,
     rank_steam_candidates,
 )
-from astrbot_plugin_game_recommender.services.steam_index import SteamGameIndexService
-from astrbot_plugin_game_recommender.storage.models import (
+from astrbot_plugin_steam_game_recommender.services.steam_index import SteamGameIndexService
+from astrbot_plugin_steam_game_recommender.storage.models import (
     GameCandidate,
     GamePreference,
     SteamAccountBinding,
@@ -17,7 +17,9 @@ from astrbot_plugin_game_recommender.storage.models import (
 
 class UserProfileWeightsTest(unittest.TestCase):
     def test_playtime_profile_weights_known_owned_game_tags(self) -> None:
-        from astrbot_plugin_game_recommender.services.user_profile import build_user_tag_weights
+        from astrbot_plugin_steam_game_recommender.services.user_profile import (
+            build_user_tag_weights,
+        )
 
         weights = build_user_tag_weights(
             [
@@ -114,7 +116,7 @@ class UserProfileSteamIndexTest(unittest.IsolatedAsyncioTestCase):
 
 class BoundUserProfileLoaderTest(unittest.IsolatedAsyncioTestCase):
     async def test_loads_weights_for_bound_account_with_api_key(self) -> None:
-        from astrbot_plugin_game_recommender.services.user_profile import (
+        from astrbot_plugin_steam_game_recommender.services.user_profile import (
             load_bound_user_tag_weights,
         )
 
@@ -140,7 +142,7 @@ class BoundUserProfileLoaderTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(weights["farming"], weights["shooter"])
 
     async def test_missing_binding_or_api_key_returns_empty_weights(self) -> None:
-        from astrbot_plugin_game_recommender.services.user_profile import (
+        from astrbot_plugin_steam_game_recommender.services.user_profile import (
             load_bound_user_tag_weights,
         )
 

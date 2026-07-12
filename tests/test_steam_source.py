@@ -3,8 +3,8 @@ from __future__ import annotations
 import unittest
 from typing import Any
 
-from astrbot_plugin_game_recommender.clients.steam import SteamApiError, SteamClient
-from astrbot_plugin_game_recommender.storage.models import SteamSearchHit
+from astrbot_plugin_steam_game_recommender.clients.steam import SteamApiError, SteamClient
+from astrbot_plugin_steam_game_recommender.storage.models import SteamSearchHit
 
 
 class SteamClientTest(unittest.IsolatedAsyncioTestCase):

@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import unittest
 
-from astrbot_plugin_game_recommender.services.constraint_evaluator import (
+from astrbot_plugin_steam_game_recommender.services.constraint_evaluator import (
     evaluate_candidate_constraints,
 )
-from astrbot_plugin_game_recommender.services.similarity_ranker import (
+from astrbot_plugin_steam_game_recommender.services.similarity_ranker import (
     SteamTagProfile,
     rank_steam_candidates,
 )
-from astrbot_plugin_game_recommender.storage.models import GameCandidate, ScoreBreakdown
+from astrbot_plugin_steam_game_recommender.storage.models import GameCandidate, ScoreBreakdown
 
 
 class ConstraintEvaluatorTest(unittest.TestCase):

@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Mapping, Sequence
-from itertools import combinations
-from math import log2, sqrt
+from math import log2
 
 
 def ndcg_at_k(
@@ -60,34 +59,9 @@ def fill_rate(ranking: Sequence[str], target_count: int) -> float:
     return min(len(unique_ranking) / target_count, 1.0)
 
 
-def intra_list_tag_similarity(
-    ranking: Sequence[str],
-    tags_by_id: Mapping[str, Collection[str]],
-) -> float:
-    """Return mean pairwise cosine similarity between binary tag vectors."""
-    unique_ranking = _unique_ids(ranking)
-    if len(unique_ranking) < 2:
-        return 0.0
-
-    similarities = (
-        _tag_cosine(tags_by_id.get(left_id, ()), tags_by_id.get(right_id, ()))
-        for left_id, right_id in combinations(unique_ranking, 2)
-    )
-    pair_count = len(unique_ranking) * (len(unique_ranking) - 1) // 2
-    return sum(similarities) / pair_count
-
-
 def _unique_ids(ranking: Sequence[str]) -> list[str]:
     return list(dict.fromkeys(ranking))
 
 
 def _discounted_cumulative_gain(relevances: Iterable[int]) -> float:
     return sum((2**relevance - 1) / log2(rank + 2) for rank, relevance in enumerate(relevances))
-
-
-def _tag_cosine(left_tags: Collection[str], right_tags: Collection[str]) -> float:
-    left = {tag.strip().casefold() for tag in left_tags if tag.strip()}
-    right = {tag.strip().casefold() for tag in right_tags if tag.strip()}
-    if not left or not right:
-        return 0.0
-    return len(left & right) / sqrt(len(left) * len(right))

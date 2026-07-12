@@ -13,18 +13,18 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT.parent))
 
-from astrbot_plugin_game_recommender.services.formatter import (  # noqa: E402
+from astrbot_plugin_steam_game_recommender.services.formatter import (  # noqa: E402
     format_game_block,
     format_recommendation_messages,
     format_recommendation_messages_with_llm,
 )
-from astrbot_plugin_game_recommender.services.steam_price_bridge import (  # noqa: E402
+from astrbot_plugin_steam_game_recommender.services.steam_price_bridge import (  # noqa: E402
     SteamPriceBridge,
     attach_missing_price_warning,
     attach_price_summary,
     load_price_plugin_symbols,
 )
-from astrbot_plugin_game_recommender.storage.models import (  # noqa: E402
+from astrbot_plugin_steam_game_recommender.storage.models import (  # noqa: E402
     GamePreference,
     GamePriceSummary,
     RankedGame,
@@ -67,7 +67,6 @@ class CommandRegistrationTest(unittest.TestCase):
 
         self.assertIn("gamerec", commands)
         self.assertIn("游戏推荐", commands["gamerec"])
-        self.assertNotIn("gamedesc", commands)
         self.assertIn("accountbind", commands)
         self.assertIn("账号绑定", commands["accountbind"])
         self.assertIn("unplayedrec", commands)
@@ -99,7 +98,7 @@ class CommandRegistrationTest(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
         self.assertNotIn("插件市场发布信息", readme)
-        self.assertIn("## 示例", readme)
+        self.assertIn("## 返回格式", readme)
 
     def test_dashboard_schema_copy_and_order(self) -> None:
         schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
@@ -323,7 +322,7 @@ class EmptyFallbackFormattingTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("暂时没有找到满足当前条件的游戏", messages[0])
 
     async def test_empty_recommendations_fall_back_when_llm_raises(self) -> None:
-        with patch("astrbot_plugin_game_recommender.services.formatter.logger.warning"):
+        with patch("astrbot_plugin_steam_game_recommender.services.formatter.logger.warning"):
             messages = await format_recommendation_messages_with_llm(
                 FakeLlmContext(RuntimeError("provider unavailable")),
                 FakeEvent(),

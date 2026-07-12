@@ -5,14 +5,14 @@ import json
 import re
 import unittest
 
-from astrbot_plugin_game_recommender.services.explanation_builder import (
+from astrbot_plugin_steam_game_recommender.services.explanation_builder import (
     build_unplayed_evidence,
     generate_recommendation_reasons,
     generate_unplayed_reason,
     select_reason_evidence,
     validate_reason_response,
 )
-from astrbot_plugin_game_recommender.storage.models import (
+from astrbot_plugin_steam_game_recommender.storage.models import (
     GameCandidate,
     RankedGame,
     RecommendationEvidence,

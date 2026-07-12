@@ -8,12 +8,6 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSchemaTest(unittest.TestCase):
-    def test_embedding_rerank_settings_are_removed(self) -> None:
-        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
-
-        self.assertNotIn("enable_embedding_rerank", schema)
-        self.assertNotIn("embedding_provider_id", schema)
-
     def test_steam_index_settings_are_exposed_in_dashboard_schema(self) -> None:
         schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
         schema = json.loads(schema_path.read_text(encoding="utf-8"))

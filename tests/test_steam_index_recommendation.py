@@ -5,7 +5,7 @@ import importlib.util
 import unittest
 from typing import Any
 
-from astrbot_plugin_game_recommender.storage.models import GameCandidate, GamePreference
+from astrbot_plugin_steam_game_recommender.storage.models import GameCandidate, GamePreference
 
 
 class SteamIndexModelTest(unittest.TestCase):
@@ -27,7 +27,9 @@ class SteamIndexModelTest(unittest.TestCase):
 
 class TagNormalizerTest(unittest.TestCase):
     def test_maps_chinese_terms_and_steam_categories_to_canonical_tags(self) -> None:
-        normalizer = optional_import("astrbot_plugin_game_recommender.services.tag_normalizer")
+        normalizer = optional_import(
+            "astrbot_plugin_steam_game_recommender.services.tag_normalizer"
+        )
 
         self.assertEqual(normalizer.normalize_tag("本地合作"), "local_coop")
         self.assertEqual(normalizer.normalize_tag("Shared/Split Screen Co-op"), "local_coop")
@@ -47,7 +49,9 @@ class TagNormalizerTest(unittest.TestCase):
         )
 
     def test_registers_english_steam_tags_and_maps_chinese_aliases_to_them(self) -> None:
-        normalizer = optional_import("astrbot_plugin_game_recommender.services.tag_normalizer")
+        normalizer = optional_import(
+            "astrbot_plugin_steam_game_recommender.services.tag_normalizer"
+        )
 
         normalizer.register_steam_tag_aliases(
             [
@@ -63,7 +67,9 @@ class TagNormalizerTest(unittest.TestCase):
         self.assertEqual(normalizer.normalize_tag("像素图形"), "pixel_graphics")
 
     def test_maps_specific_mechanic_tags_without_broad_false_positive(self) -> None:
-        normalizer = optional_import("astrbot_plugin_game_recommender.services.tag_normalizer")
+        normalizer = optional_import(
+            "astrbot_plugin_steam_game_recommender.services.tag_normalizer"
+        )
 
         self.assertEqual(normalizer.normalize_tag("Deckbuilding"), "deckbuilding")
         self.assertEqual(
@@ -82,7 +88,7 @@ class TagNormalizerTest(unittest.TestCase):
 
 class SimilarityRankerTest(unittest.TestCase):
     def test_high_tag_overlap_beats_high_review_low_overlap(self) -> None:
-        ranker = optional_import("astrbot_plugin_game_recommender.services.similarity_ranker")
+        ranker = optional_import("astrbot_plugin_steam_game_recommender.services.similarity_ranker")
         profile = ranker.SteamTagProfile(
             include_tags=["co_op", "local_coop", "puzzle", "casual", "relaxing"],
             exclude_tags=[],
@@ -123,7 +129,7 @@ class SimilarityRankerTest(unittest.TestCase):
         )
 
     def test_excludes_disliked_tags_and_singleplayer_only_candidates(self) -> None:
-        ranker = optional_import("astrbot_plugin_game_recommender.services.similarity_ranker")
+        ranker = optional_import("astrbot_plugin_steam_game_recommender.services.similarity_ranker")
         profile = ranker.SteamTagProfile(
             include_tags=["co_op", "puzzle"],
             required_tags=["co_op"],
@@ -146,7 +152,7 @@ class SimilarityRankerTest(unittest.TestCase):
         self.assertEqual([game.title for game in ranked], ["Safe Co-op Puzzle"])
 
     def test_reference_game_tags_expand_profile_without_seed_titles(self) -> None:
-        ranker = optional_import("astrbot_plugin_game_recommender.services.similarity_ranker")
+        ranker = optional_import("astrbot_plugin_steam_game_recommender.services.similarity_ranker")
         profile = ranker.build_profile_from_preference(
             GamePreference(
                 platforms=["steam"],
@@ -166,7 +172,7 @@ class SimilarityRankerTest(unittest.TestCase):
         self.assertIn("relaxing", profile.include_tags)
 
     def test_aaa_profile_prioritizes_broad_blockbuster_matches(self) -> None:
-        ranker = optional_import("astrbot_plugin_game_recommender.services.similarity_ranker")
+        ranker = optional_import("astrbot_plugin_steam_game_recommender.services.similarity_ranker")
         profile = ranker.build_profile_from_preference(
             GamePreference(
                 extra_tags=["aaa", "open world", "story rich"],
@@ -205,8 +211,8 @@ class SimilarityRankerTest(unittest.TestCase):
 
 class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
     def test_aaa_request_uses_blockbuster_search_terms(self) -> None:
-        index_module = optional_import("astrbot_plugin_game_recommender.services.steam_index")
-        ranker = optional_import("astrbot_plugin_game_recommender.services.similarity_ranker")
+        index_module = optional_import("astrbot_plugin_steam_game_recommender.services.steam_index")
+        ranker = optional_import("astrbot_plugin_steam_game_recommender.services.similarity_ranker")
         preference = GamePreference(extra_tags=["aaa"])
 
         terms = index_module.search_terms_for(
@@ -221,7 +227,7 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("popular co-op", terms)
 
     async def test_enrich_candidate_persists_description_mechanic_tags(self) -> None:
-        index_module = optional_import("astrbot_plugin_game_recommender.services.steam_index")
+        index_module = optional_import("astrbot_plugin_steam_game_recommender.services.steam_index")
         service = index_module.SteamGameIndexService(
             steam_client=NoLiveSearchSteamClient(),
             cache=MemoryCache({}),
@@ -249,9 +255,9 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("relaxing", enriched.inferred_tags)
 
     async def test_description_inference_never_becomes_hard_constraint_evidence(self) -> None:
-        index_module = optional_import("astrbot_plugin_game_recommender.services.steam_index")
+        index_module = optional_import("astrbot_plugin_steam_game_recommender.services.steam_index")
         constraints = optional_import(
-            "astrbot_plugin_game_recommender.services.constraint_evaluator"
+            "astrbot_plugin_steam_game_recommender.services.constraint_evaluator"
         )
         service = index_module.SteamGameIndexService(
             steam_client=NoLiveSearchSteamClient(),
@@ -282,7 +288,7 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(assessment.violations, [])
 
     async def test_enrich_candidate_loads_english_steam_tags_and_store_page_tags(self) -> None:
-        index_module = optional_import("astrbot_plugin_game_recommender.services.steam_index")
+        index_module = optional_import("astrbot_plugin_steam_game_recommender.services.steam_index")
         service = index_module.SteamGameIndexService(
             steam_client=TagAwareSteamClient(),
             cache=MemoryCache({}),
@@ -306,7 +312,7 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("tag_enrichment:steam_store_page_tags", enriched.internal_source_markers)
 
     async def test_steam_store_tags_improve_recommendation_ranking(self) -> None:
-        index_module = optional_import("astrbot_plugin_game_recommender.services.steam_index")
+        index_module = optional_import("astrbot_plugin_steam_game_recommender.services.steam_index")
         cache = MemoryCache(
             {
                 "steam_index:v2": [
@@ -347,7 +353,7 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_recommend_keeps_cached_results_when_supplemental_search_is_empty(self) -> None:
-        index_module = optional_import("astrbot_plugin_game_recommender.services.steam_index")
+        index_module = optional_import("astrbot_plugin_steam_game_recommender.services.steam_index")
         cache = MemoryCache(
             {
                 "steam_index:v2": [
