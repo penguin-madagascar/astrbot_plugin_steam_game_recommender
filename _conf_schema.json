@@ -12,6 +12,20 @@
     "hint": "开启后，如果 Steam 索引和过滤后没有结果，或请求的平台超出 Steam/PC 覆盖范围，会使用 LLM 生成已标注的未验证建议。",
     "default": false
   },
+  "enable_embedding_rerank": {
+    "type": "bool",
+    "description": "启用 Embedding 语义重排",
+    "hint": "默认关闭；开启后仅对约束合格的全局前 20 个候选在原层级内重排。Provider 不可用、超时或向量非法时会保留原排序。",
+    "default": false
+  },
+  "embedding_provider_id": {
+    "type": "string",
+    "description": "Embedding 提供商",
+    "hint": "留空时在开关开启后使用 AstrBot 首个可用的 Embedding Provider。",
+    "_special": "select_provider",
+    "_provider_type": "embedding",
+    "default": ""
+  },
   "default_region": {
     "type": "string",
     "description": "默认地区代码",

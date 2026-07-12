@@ -366,6 +366,8 @@ class GameFacts(BaseModel):
     library_profile_score: float = 0.0
     review_confidence_score: float = 0.0
     base_relevance_score: float = 0.0
+    embedding_similarity_score: float = 0.0
+    reranked_relevance_score: float = 0.0
 
     @validator(
         "platform_families",
@@ -401,6 +403,8 @@ class GameFacts(BaseModel):
         "library_profile_score",
         "review_confidence_score",
         "base_relevance_score",
+        "embedding_similarity_score",
+        "reranked_relevance_score",
         pre=True,
     )
     def _normalize_float(cls, value: Any) -> float:

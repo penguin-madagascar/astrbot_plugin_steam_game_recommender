@@ -17,11 +17,12 @@ from .services.account_binding import (
     chat_identity_from_event,
     parse_account_binding_command,
 )
+from .services.diversity import DIVERSITY_STRICT
+from .services.embedding_reranker import EmbeddingReranker
 from .services.formatter import (
     format_game_detail,
     format_recommendation_messages_with_llm,
 )
-from .services.diversity import DIVERSITY_STRICT
 from .services.message_delivery import build_forward_message_chain
 from .services.played_filter import (
     LIBRARY_FILTER_EXCLUDE_OWNED,
@@ -61,8 +62,7 @@ from .storage.repository import SQLiteCacheRepository
 PLUGIN_NAME = "astrbot_plugin_game_recommender"
 PLUGIN_VERSION = "0.4.0"
 PLUGIN_DESCRIPTION = (
-    "基于 Steam/PC 公开数据、本地索引和标签相似度推荐游戏；"
-    "当前版本暂不做跨平台候选召回。"
+    "基于 Steam/PC 公开数据、本地索引和标签相似度推荐游戏；当前版本暂不做跨平台候选召回。"
 )
 
 
@@ -99,6 +99,8 @@ class GameRecommenderPlugin(Star):
         self.max_results = min(max(safe_int(self.config.get("max_results"), 5), 1), 10)
         self.provider_id = str(self.config.get("llm_provider_id", "") or "").strip()
         self.enable_llm_fallback = bool(self.config.get("enable_llm_fallback"))
+        self.enable_embedding_rerank = bool(self.config.get("enable_embedding_rerank", False))
+        self.embedding_provider_id = str(self.config.get("embedding_provider_id", "") or "").strip()
 
         self.http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout),
@@ -119,6 +121,15 @@ class GameRecommenderPlugin(Star):
             steam_api_key=str(self.config.get("steam_api_key") or ""),
         )
         self.preference_parser = PreferenceParser(context, self.provider_id)
+        self.embedding_reranker = (
+            EmbeddingReranker(
+                context,
+                self.cache,
+                provider_id=self.embedding_provider_id,
+            )
+            if self.enable_embedding_rerank
+            else None
+        )
         self.steam_index = SteamGameIndexService(
             steam_client=self.steam_client,
             cache=self.cache,
@@ -418,6 +429,8 @@ class GameRecommenderPlugin(Star):
         ranked_games: list[RankedGame] = []
         if has_supported_steam_platform(preference):
             candidate_pool_size = None
+            if getattr(self, "embedding_reranker", None) is not None:
+                candidate_pool_size = 20
             if preference.budget is not None or self.price_bridge.is_available():
                 candidate_pool_size = max(result_limit * 3, result_limit)
             if preference.library_filter_mode:
@@ -441,6 +454,13 @@ class GameRecommenderPlugin(Star):
                 excluded_appids=excluded_appids,
                 excluded_titles=excluded_titles,
             )
+            embedding_reranker = getattr(self, "embedding_reranker", None)
+            if embedding_reranker is not None:
+                ranked_games = await embedding_reranker.rerank(
+                    preference,
+                    prepared.raw_query,
+                    ranked_games,
+                )
             if preference.library_filter_mode:
                 ranked_games = await self._filter_library_games(
                     event,
@@ -480,9 +500,7 @@ class GameRecommenderPlugin(Star):
             self.cache,
         )
         if memory is None:
-            return [
-                "没有可用于重新推荐的近期记录。请先使用 /gamerec 提出一次游戏推荐需求。"
-            ]
+            return ["没有可用于重新推荐的近期记录。请先使用 /gamerec 提出一次游戏推荐需求。"]
 
         if supplement:
             prepared = await self._prepare_recommendation(
@@ -572,9 +590,7 @@ class GameRecommenderPlugin(Star):
             )
 
         if not self.steam_client.has_web_api_key():
-            raise LibraryFilterModeError(
-                "未配置 steam_api_key，无法读取 Steam 游戏库。"
-            )
+            raise LibraryFilterModeError("未配置 steam_api_key，无法读取 Steam 游戏库。")
 
         try:
             owned_games = await self.steam_client.get_owned_games(binding.account_id)

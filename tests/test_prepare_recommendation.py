@@ -48,10 +48,10 @@ try:
     )
     from astrbot_plugin_game_recommender.services.played_filter import LibraryFilterModeError
     from astrbot_plugin_game_recommender.services.steam_index import STEAM_ONLY_SCOPE_WARNING
-    from astrbot_plugin_game_recommender.storage.models import GamePreference
+    from astrbot_plugin_game_recommender.storage.models import GamePreference, RankedGame
 except ModuleNotFoundError as exc:
     if exc.name in {"astrbot", "pydantic"}:
-        raise unittest.SkipTest(f"{exc.name} is not installed in this environment")
+        raise unittest.SkipTest(f"{exc.name} is not installed in this environment") from exc
     raise
 
 
@@ -130,13 +130,14 @@ class PrepareRecommendationLlmFallbackTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prepared.result_limit, 3)
         self.assertIn(STEAM_ONLY_SCOPE_WARNING, prepared.preference.parse_warnings)
 
-    async def test_run_uses_llm_fallback_without_calling_steam_index_for_non_steam_only(self) -> None:
+    async def test_run_uses_llm_fallback_without_calling_steam_index_for_non_steam_only(
+        self,
+    ) -> None:
         plugin = object.__new__(GameRecommenderPlugin)
         plugin.enable_llm_fallback = True
         plugin.provider_id = "provider-1"
         plugin.context = FakeLlmContext(
-            "LLM 兜底建议（未经过 Steam 索引验证）\n"
-            "1. 《Mario Kart 8 Deluxe》：适合轻松多人竞速。"
+            "LLM 兜底建议（未经过 Steam 索引验证）\n1. 《Mario Kart 8 Deluxe》：适合轻松多人竞速。"
         )
         plugin.steam_index = RaisingSteamIndex()
         plugin.price_bridge = RaisingPriceBridge()
@@ -163,6 +164,38 @@ class PrepareRecommendationLlmFallbackTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(plugin.context.calls), 1)
         self.assertIn("LLM 兜底建议（未经过 Steam 索引验证）", run.messages[0])
         self.assertIn("Mario Kart 8 Deluxe", run.messages[0])
+
+
+class EmbeddingPipelineTest(unittest.IsolatedAsyncioTestCase):
+    async def test_run_requests_top_twenty_and_applies_embedding_reranker(self) -> None:
+        plugin = object.__new__(GameRecommenderPlugin)
+        plugin.enable_llm_fallback = False
+        plugin.provider_id = ""
+        plugin.context = FakeLlmContext("")
+        plugin.steam_index = RecordingSteamIndex()
+        plugin.price_bridge = IdentityPriceBridge()
+        plugin.embedding_reranker = RecordingEmbeddingReranker()
+
+        async def empty_profile(_event):
+            return {}
+
+        plugin._user_profile_tag_weights = empty_profile
+        prepared = PreparedRecommendation(
+            raw_query="Steam 合作解谜",
+            preference=GamePreference(
+                platforms=["steam"],
+                genres_like=["co-op", "puzzle"],
+                result_count=2,
+            ),
+            diversity_mode=DIVERSITY_STRICT,
+            result_limit=2,
+        )
+
+        run = await plugin._run_recommendation(FakeEvent(), prepared)
+
+        self.assertEqual(plugin.steam_index.seen_limit, 20)
+        self.assertEqual(plugin.embedding_reranker.seen_query, "Steam 合作解谜")
+        self.assertEqual([game.title for game in run.ranked_games], ["Second", "First"])
 
 
 class FakeEvent:
@@ -195,6 +228,35 @@ class RaisingPriceBridge:
 
     async def enrich_ranked_games(self, *_args, **_kwargs):
         raise AssertionError("pure non-Steam fallback must not enrich prices")
+
+
+class RecordingSteamIndex:
+    def __init__(self) -> None:
+        self.seen_limit = 0
+
+    async def recommend(self, _preference, limit: int, **_kwargs):
+        self.seen_limit = limit
+        return [
+            RankedGame(title="First", score=80, tier="strong"),
+            RankedGame(title="Second", score=70, tier="strong"),
+        ]
+
+
+class RecordingEmbeddingReranker:
+    def __init__(self) -> None:
+        self.seen_query = ""
+
+    async def rerank(self, _preference, raw_query: str, games):
+        self.seen_query = raw_query
+        return list(reversed(games))
+
+
+class IdentityPriceBridge:
+    def is_available(self) -> bool:
+        return False
+
+    async def enrich_ranked_games(self, games, _preference):
+        return games
 
 
 if __name__ == "__main__":
