@@ -14,7 +14,6 @@ if TYPE_CHECKING:
     from astrbot.api.star import Context
 
 from ..storage.models import GameCandidate, GamePreference, GamePriceSummary, RankedGame
-from .explanation_builder import validate_polished_points
 
 TIER_LABELS = {
     "strong": "强烈推荐",
@@ -22,9 +21,7 @@ TIER_LABELS = {
     "backup": "备选",
 }
 
-DISCLAIMER = (
-    "以下推荐基于当前可查询到的 Steam 公开数据，价格和商店信息可能因地区变化。"
-)
+DISCLAIMER = "以下推荐基于当前可查询到的 Steam 公开数据，价格和商店信息可能因地区变化。"
 EMPTY_LLM_FALLBACK_TITLE = "LLM 兜底建议（未经过 Steam 索引验证）"
 
 
@@ -43,17 +40,16 @@ def format_recommendation_messages(
 ) -> list[str]:
     count = min(limit or preference.result_count or 5, len(ranked_games))
     if not ranked_games:
-        return [(
-            "暂时没有找到满足当前条件的游戏。\n"
-            f"{DISCLAIMER}\n"
-            "可以尝试改用 Steam/PC 请求，或放宽排除标签、人数和类型条件后再查一次。"
-        )]
+        return [
+            (
+                "暂时没有找到满足当前条件的游戏。\n"
+                f"{DISCLAIMER}\n"
+                "可以尝试改用 Steam/PC 请求，或放宽排除标签、人数和类型条件后再查一次。"
+            )
+        ]
 
     lines = [
-        (
-            f"优先看前 {count} 款，"
-            "它们和你的 Steam 标签、游玩人数与参考游戏偏好最接近。"
-        ),
+        (f"优先看前 {count} 款，它们和你的 Steam 标签、游玩人数与参考游戏偏好最接近。"),
         tier_summary(ranked_games[:count]),
         DISCLAIMER,
     ]
@@ -116,55 +112,7 @@ async def format_recommendation_messages_with_llm(
                 return [empty_fallback]
         return fallback
 
-    resolved_provider = await resolve_provider_id(context, event, provider_id)
-    if not resolved_provider:
-        return fallback
-
-    messages = [fallback[0]]
-    games = ranked_games[: limit or preference.result_count or 5]
-    for index, game in enumerate(games, start=1):
-        fallback_block = fallback[index]
-        fit_points = display_points(game.fit_points, game.reasons)
-        risk_points = display_points(game.risk_points, game.warnings)
-        payload = {
-            "fit_points": fit_points,
-            "risk_points": risk_points,
-            "rules": [
-                "只返回 JSON 对象，字段为 fit_points 和 risk_points。",
-                "只能改写给定点位，不得新增平台、价格、中文、玩法等事实。",
-                "不得删除任何 risk_points。",
-            ],
-        }
-        prompt = (
-            "请在不新增事实的前提下润色推荐点位。"
-            "只返回 JSON，不要返回 Markdown。\n"
-            f"数据 JSON：{json.dumps(payload, ensure_ascii=False)}"
-        )
-        try:
-            response = await context.llm_generate(
-                chat_provider_id=resolved_provider,
-                prompt=prompt,
-                system_prompt=(
-                    "你只能改写给定 JSON 中的点位，不得补充外部知识或猜测。"
-                ),
-            )
-            text = str(getattr(response, "completion_text", "") or "").strip()
-        except Exception as exc:
-            logger.warning(f"游戏推荐条目 LLM 格式化失败，使用规则 formatter：{exc}")
-            text = ""
-        polished = validate_polished_points(text, fit_points, risk_points)
-        if polished.fit_points == fit_points and polished.risk_points == risk_points:
-            messages.append(fallback_block)
-        else:
-            messages.append(
-                "\n".join(
-                    format_game_block(
-                        index,
-                        copy_game_with_points(game, polished.fit_points, polished.risk_points),
-                    )
-                )
-            )
-    return messages
+    return fallback
 
 
 async def format_empty_recommendations_with_llm(
@@ -242,10 +190,7 @@ def format_game_block(index: int, game: RankedGame) -> list[str]:
         if links:
             lines.append(f"   购买链接：{links}")
     else:
-        lines.append(
-            f"   购买 / 平台建议：Steam 商店记录为 {stores}；"
-            "实时价格请以商店页面为准。"
-        )
+        lines.append(f"   购买 / 平台建议：Steam 商店记录为 {stores}；实时价格请以商店页面为准。")
     if game.raw_url:
         lines.append(f"   数据来源：{game.raw_url}")
     if uncertain:
@@ -283,9 +228,7 @@ def format_game_detail(game: GameCandidate, price_summary: GamePriceSummary | No
             lines.append(f"购买链接：{links}")
         lines.append("中文支持：Steam 数据可能缺失，请以商店页面为准。")
     else:
-        lines.append(
-            "价格 / 中文支持：实时地区价格和语言信息请以 Steam 商店页面为准。"
-        )
+        lines.append("价格 / 中文支持：实时地区价格和语言信息请以 Steam 商店页面为准。")
     if game.raw_url:
         lines.append(f"数据来源：{game.raw_url}")
     return "\n".join(lines)
@@ -347,11 +290,7 @@ def tier_summary(games: list[RankedGame]) -> str:
     for game in games:
         if game.tier in counts:
             counts[game.tier] += 1
-    parts = [
-        f"{label} {counts[key]} 款"
-        for key, label in TIER_LABELS.items()
-        if counts[key]
-    ]
+    parts = [f"{label} {counts[key]} 款" for key, label in TIER_LABELS.items() if counts[key]]
     return "分层统计：" + ("；".join(parts) if parts else "未分层")
 
 
@@ -364,20 +303,6 @@ def display_points(primary: list[str], secondary: list[str]) -> list[str]:
             result.append(value)
             seen.add(key)
     return result
-
-
-def copy_game_with_points(
-    game: RankedGame,
-    fit_points: list[str],
-    risk_points: list[str],
-) -> RankedGame:
-    data = dump_model(game)
-    data["fit_points"] = fit_points
-    data["risk_points"] = risk_points
-    data["reasons"] = fit_points
-    data["warnings"] = risk_points
-    validator = getattr(game.__class__, "model_validate", None)
-    return validator(data) if validator else game.__class__.parse_obj(data)
 
 
 async def resolve_provider_id(

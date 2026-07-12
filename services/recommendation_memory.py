@@ -2,12 +2,38 @@ from __future__ import annotations
 
 import re
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..storage.models import GamePreference, RankedGame
 
 MEMORY_TTL_MINUTES = 30
+MAX_FEEDBACK_ENTRIES = 10
+
+
+@dataclass(frozen=True)
+class RecommendationResultSummary:
+    appid: int | None
+    title: str
+    tags: list[str]
+    tier: str
+
+
+@dataclass(frozen=True)
+class PreferencePatch:
+    add_tags: list[str] = field(default_factory=list)
+    remove_tags: list[str] = field(default_factory=list)
+    condition_overrides: dict[str, Any] = field(default_factory=dict)
+    clear_conditions: list[str] = field(default_factory=list)
+    positive_reference_ordinals: list[int] = field(default_factory=list)
+    negative_reference_ordinals: list[int] = field(default_factory=list)
+    exclude_ordinals: list[int] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class RecommendationFeedback:
+    patch: PreferencePatch
+    created_at: float
 
 
 @dataclass(frozen=True)
@@ -21,6 +47,8 @@ class RecommendationMemory:
     shown_appids: list[int]
     shown_titles: list[str]
     created_at: float
+    last_results: list[RecommendationResultSummary] = field(default_factory=list)
+    feedback: list[RecommendationFeedback] = field(default_factory=list)
 
 
 def build_recommendation_memory(
@@ -43,6 +71,7 @@ def build_recommendation_memory(
         shown_appids=[],
         shown_titles=[],
         created_at=now if now is not None else time.time(),
+        last_results=summarize_games(games),
     )
     return append_shown_games(memory, games)
 
@@ -71,7 +100,11 @@ async def load_recommendation_memory(
     current = now if now is not None else time.time()
     if current - memory.created_at > max(ttl_minutes, 0) * 60:
         return None
-    return memory
+    cutoff = current - max(ttl_minutes, 0) * 60
+    return replace(
+        memory,
+        feedback=[item for item in memory.feedback if item.created_at >= cutoff],
+    )
 
 
 def append_shown_games(
@@ -89,6 +122,33 @@ def append_shown_games(
     return replace(memory, shown_appids=appids, shown_titles=titles)
 
 
+def summarize_games(games: list[RankedGame]) -> list[RecommendationResultSummary]:
+    return [
+        RecommendationResultSummary(
+            appid=int(game.appid) if game.appid is not None else None,
+            title=game.title,
+            tags=list(dict.fromkeys([*game.ordered_tags, *game.tags, *game.genres]))[:12],
+            tier=game.tier,
+        )
+        for game in games
+    ]
+
+
+def append_feedback(
+    memory: RecommendationMemory,
+    patch: PreferencePatch,
+    now: float | None = None,
+) -> RecommendationMemory:
+    feedback = [
+        *memory.feedback,
+        RecommendationFeedback(
+            patch=patch,
+            created_at=now if now is not None else time.time(),
+        ),
+    ][-MAX_FEEDBACK_ENTRIES:]
+    return replace(memory, feedback=feedback)
+
+
 def recommendation_memory_key(chat_platform: str, chat_user_id: str) -> str:
     return f"recommendation_memory:{chat_platform or 'default'}:{chat_user_id}"
 
@@ -104,6 +164,30 @@ def dump_memory(memory: RecommendationMemory) -> dict[str, Any]:
         "shown_appids": memory.shown_appids,
         "shown_titles": memory.shown_titles,
         "created_at": memory.created_at,
+        "last_results": [
+            {
+                "appid": item.appid,
+                "title": item.title,
+                "tags": item.tags,
+                "tier": item.tier,
+            }
+            for item in memory.last_results
+        ],
+        "feedback": [
+            {
+                "patch": {
+                    "add_tags": item.patch.add_tags,
+                    "remove_tags": item.patch.remove_tags,
+                    "condition_overrides": item.patch.condition_overrides,
+                    "clear_conditions": item.patch.clear_conditions,
+                    "positive_reference_ordinals": item.patch.positive_reference_ordinals,
+                    "negative_reference_ordinals": item.patch.negative_reference_ordinals,
+                    "exclude_ordinals": item.patch.exclude_ordinals,
+                },
+                "created_at": item.created_at,
+            }
+            for item in memory.feedback[-MAX_FEEDBACK_ENTRIES:]
+        ],
     }
 
 
@@ -114,7 +198,9 @@ def parse_memory(payload: Any) -> RecommendationMemory | None:
     if not isinstance(preference_data, dict):
         return None
     validator = getattr(GamePreference, "model_validate", None)
-    preference = validator(preference_data) if validator else GamePreference.parse_obj(preference_data)
+    preference = (
+        validator(preference_data) if validator else GamePreference.parse_obj(preference_data)
+    )
     return RecommendationMemory(
         chat_platform=str(payload.get("chat_platform") or "default"),
         chat_user_id=str(payload.get("chat_user_id") or ""),
@@ -123,9 +209,7 @@ def parse_memory(payload: Any) -> RecommendationMemory | None:
         diversity_mode=str(payload.get("diversity_mode") or "strict"),
         result_limit=max(int(payload.get("result_limit") or 1), 1),
         shown_appids=[
-            int(appid)
-            for appid in payload.get("shown_appids") or []
-            if safe_int(appid) is not None
+            int(appid) for appid in payload.get("shown_appids") or [] if safe_int(appid) is not None
         ],
         shown_titles=[
             title
@@ -133,7 +217,56 @@ def parse_memory(payload: Any) -> RecommendationMemory | None:
             if title
         ],
         created_at=float(payload.get("created_at") or 0),
+        last_results=parse_result_summaries(payload.get("last_results")),
+        feedback=parse_feedback(payload.get("feedback")),
     )
+
+
+def parse_result_summaries(value: Any) -> list[RecommendationResultSummary]:
+    if not isinstance(value, list):
+        return []
+    results: list[RecommendationResultSummary] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        appid = safe_int(item.get("appid"))
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        results.append(
+            RecommendationResultSummary(
+                appid=appid,
+                title=title,
+                tags=[str(tag) for tag in item.get("tags") or [] if str(tag).strip()][:12],
+                tier=str(item.get("tier") or ""),
+            )
+        )
+    return results
+
+
+def parse_feedback(value: Any) -> list[RecommendationFeedback]:
+    if not isinstance(value, list):
+        return []
+    results: list[RecommendationFeedback] = []
+    for item in value[-MAX_FEEDBACK_ENTRIES:]:
+        if not isinstance(item, dict) or not isinstance(item.get("patch"), dict):
+            continue
+        patch = item["patch"]
+        results.append(
+            RecommendationFeedback(
+                patch=PreferencePatch(
+                    add_tags=text_list(patch.get("add_tags")),
+                    remove_tags=text_list(patch.get("remove_tags")),
+                    condition_overrides=dict(patch.get("condition_overrides") or {}),
+                    clear_conditions=text_list(patch.get("clear_conditions")),
+                    positive_reference_ordinals=int_list(patch.get("positive_reference_ordinals")),
+                    negative_reference_ordinals=int_list(patch.get("negative_reference_ordinals")),
+                    exclude_ordinals=int_list(patch.get("exclude_ordinals")),
+                ),
+                created_at=float(item.get("created_at") or 0),
+            )
+        )
+    return results
 
 
 def normalize_title(value: str) -> str:
@@ -145,6 +278,14 @@ def safe_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def text_list(value: Any) -> list[str]:
+    return [str(item).strip() for item in value or [] if str(item).strip()]
+
+
+def int_list(value: Any) -> list[int]:
+    return [number for item in value or [] if (number := safe_int(item)) is not None]
 
 
 def dump_model(model: Any) -> dict[str, Any]:

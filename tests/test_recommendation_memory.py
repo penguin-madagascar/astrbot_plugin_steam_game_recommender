@@ -4,7 +4,9 @@ import unittest
 from typing import Any
 
 from astrbot_plugin_game_recommender.services.recommendation_memory import (
+    PreferencePatch,
     RecommendationMemory,
+    append_feedback,
     append_shown_games,
     build_recommendation_memory,
     load_recommendation_memory,
@@ -40,6 +42,7 @@ class RecommendationMemoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(loaded.diversity_mode, "strict")
         self.assertEqual(loaded.shown_appids, [1, 2])
         self.assertEqual(loaded.preference.platforms, ["steam"])
+        self.assertEqual([item.title for item in loaded.last_results], ["Game A", "Game B"])
 
     async def test_expired_memory_is_not_loaded(self) -> None:
         cache = MemoryCache()
@@ -91,6 +94,33 @@ class RecommendationMemoryTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(updated.shown_appids, [1, 2])
         self.assertEqual(updated.shown_titles, ["game a", "game b", "no appid game"])
+
+    async def test_feedback_is_capped_and_individually_expires_after_thirty_minutes(self) -> None:
+        cache = MemoryCache()
+        memory = build_recommendation_memory(
+            chat_platform="qq",
+            chat_user_id="user-1",
+            raw_query="query",
+            preference=GamePreference(),
+            diversity_mode="strict",
+            result_limit=1,
+            games=[ranked_game("Game A", 1)],
+            now=2_000,
+        )
+        for index in range(12):
+            memory = append_feedback(
+                memory,
+                PreferencePatch(add_tags=[f"tag-{index}"]),
+                now=1_000 + index * 100,
+            )
+        await save_recommendation_memory(cache, memory)
+
+        loaded = await load_recommendation_memory("qq", "user-1", cache, now=3_100)
+
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        self.assertLess(len(loaded.feedback), 10)
+        self.assertTrue(all(item.created_at >= 1_300 for item in loaded.feedback))
 
 
 def ranked_game(title: str, appid: int) -> RankedGame:

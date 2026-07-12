@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,13 +37,21 @@ from .services.played_filter import (
 from .services.preference_parser import PreferenceParser
 from .services.recommendation_limits import effective_result_limit
 from .services.recommendation_memory import (
+    PreferencePatch,
     RecommendationMemory,
+    append_feedback,
     append_shown_games,
     build_recommendation_memory,
     load_recommendation_memory,
     save_recommendation_memory,
+    summarize_games,
 )
-from .services.retry_command import parse_retry_request
+from .services.retry_command import (
+    apply_preference_patch,
+    merge_retry_preferences,
+    parse_preference_patch,
+    parse_retry_request,
+)
 from .services.steam_index import (
     STEAM_INDEX_FALLBACK_WARNING,
     SteamGameIndexService,
@@ -546,10 +555,42 @@ class GameRecommenderPlugin(Star):
         if memory is None:
             return ["没有可用于重新推荐的近期记录。请先使用 /gamerec 提出一次游戏推荐需求。"]
 
+        patch = PreferencePatch()
+        patch_excluded_appids: list[int] = []
+        patch_excluded_titles: list[str] = []
         if supplement:
-            prepared = await self._prepare_recommendation(
-                event,
-                f"{memory.raw_query} {supplement}".strip(),
+            parsed_patch = parse_preference_patch(
+                supplement,
+                len(memory.last_results),
+            )
+            patch = parsed_patch.patch
+            preference = memory.preference
+            diversity_mode = memory.diversity_mode
+            result_limit = memory.result_limit
+            if parsed_patch.residual_text:
+                supplemental = await self._prepare_recommendation(
+                    event,
+                    parsed_patch.residual_text,
+                )
+                preference = merge_retry_preferences(
+                    preference,
+                    supplemental.preference,
+                )
+                if explicitly_changes_diversity(parsed_patch.residual_text):
+                    diversity_mode = supplemental.diversity_mode
+                if explicitly_changes_result_count(parsed_patch.residual_text):
+                    result_limit = supplemental.result_limit
+            preference, patch_excluded_appids, patch_excluded_titles = apply_preference_patch(
+                preference,
+                patch,
+                memory.last_results,
+                parsed_patch.warnings,
+            )
+            prepared = PreparedRecommendation(
+                raw_query=f"{memory.raw_query} {supplement}".strip(),
+                preference=preference,
+                diversity_mode=diversity_mode,
+                result_limit=result_limit,
             )
         else:
             prepared = PreparedRecommendation(
@@ -561,10 +602,16 @@ class GameRecommenderPlugin(Star):
         run = await self._run_recommendation(
             event,
             prepared,
-            excluded_appids=memory.shown_appids,
-            excluded_titles=memory.shown_titles,
+            excluded_appids=list(dict.fromkeys([*memory.shown_appids, *patch_excluded_appids])),
+            excluded_titles=list(dict.fromkeys([*memory.shown_titles, *patch_excluded_titles])),
         )
-        await self._save_retry_memory(chat_platform, chat_user_id, memory, run)
+        await self._save_retry_memory(
+            chat_platform,
+            chat_user_id,
+            memory,
+            run,
+            patch if supplement else None,
+        )
         return run.messages
 
     async def _save_recent_recommendation(
@@ -592,9 +639,8 @@ class GameRecommenderPlugin(Star):
         chat_user_id: str,
         memory: RecommendationMemory,
         run: RecommendationRun,
+        patch: PreferencePatch | None = None,
     ) -> None:
-        if not run.ranked_games:
-            return
         updated = RecommendationMemory(
             chat_platform=chat_platform,
             chat_user_id=chat_user_id,
@@ -605,8 +651,17 @@ class GameRecommenderPlugin(Star):
             shown_appids=list(memory.shown_appids),
             shown_titles=list(memory.shown_titles),
             created_at=time.time(),
+            last_results=(
+                summarize_games(run.ranked_games[: run.result_limit])
+                if run.ranked_games
+                else list(memory.last_results)
+            ),
+            feedback=list(memory.feedback),
         )
-        updated = append_shown_games(updated, run.ranked_games[: run.result_limit])
+        if patch is not None:
+            updated = append_feedback(updated, patch)
+        if run.ranked_games:
+            updated = append_shown_games(updated, run.ranked_games[: run.result_limit])
         await save_recommendation_memory(self.cache, updated)
 
     def _recommendation_result(self, event: AstrMessageEvent, messages: list[str]):
@@ -646,3 +701,14 @@ def safe_float(value: Any, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def explicitly_changes_diversity(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return any(
+        marker in lowered for marker in ("多样", "重复", "strict", "balanced", "high", "严格")
+    )
+
+
+def explicitly_changes_result_count(text: str) -> bool:
+    return bool(re.search(r"\d+\s*(?:款|个|部)", str(text or "")))

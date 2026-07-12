@@ -211,8 +211,8 @@ def positive_query_text(preference: GamePreference, raw_query: str) -> str:
 def candidate_embedding_text(game: RankedGame) -> str:
     parts = [
         f"标题：{game.title}",
-        f"有序标签：{'，'.join(game.tags)}",
-        f"类型：{'，'.join(game.genres)}",
+        f"有序标签：{'，'.join(game.ordered_tags)}",
+        f"类型：{'，'.join([*game.tags, *game.genres])}",
     ]
     if game.description:
         parts.append(f"描述：{game.description[:500]}")
