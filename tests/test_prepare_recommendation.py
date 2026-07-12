@@ -167,7 +167,7 @@ class PrepareRecommendationLlmFallbackTest(unittest.IsolatedAsyncioTestCase):
 
 
 class EmbeddingPipelineTest(unittest.IsolatedAsyncioTestCase):
-    async def test_run_requests_top_twenty_and_applies_embedding_reranker(self) -> None:
+    async def test_run_requests_refill_pool_and_applies_embedding_reranker(self) -> None:
         plugin = object.__new__(GameRecommenderPlugin)
         plugin.enable_llm_fallback = False
         plugin.provider_id = ""
@@ -176,9 +176,14 @@ class EmbeddingPipelineTest(unittest.IsolatedAsyncioTestCase):
         plugin.price_bridge = IdentityPriceBridge()
         plugin.embedding_reranker = RecordingEmbeddingReranker()
 
-        async def empty_profile(_event):
+        async def empty_owned_games(_event, required):
+            self.assertFalse(required)
+            return []
+
+        async def empty_profile(_event, _owned_games):
             return {}
 
+        plugin._owned_games_for_recommendation = empty_owned_games
         plugin._user_profile_tag_weights = empty_profile
         prepared = PreparedRecommendation(
             raw_query="Steam 合作解谜",
@@ -193,7 +198,7 @@ class EmbeddingPipelineTest(unittest.IsolatedAsyncioTestCase):
 
         run = await plugin._run_recommendation(FakeEvent(), prepared)
 
-        self.assertEqual(plugin.steam_index.seen_limit, 20)
+        self.assertEqual(plugin.steam_index.seen_limit, 30)
         self.assertEqual(plugin.embedding_reranker.seen_query, "Steam 合作解谜")
         self.assertEqual([game.title for game in run.ranked_games], ["Second", "First"])
 

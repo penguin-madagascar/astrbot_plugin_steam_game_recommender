@@ -17,7 +17,7 @@ from .services.account_binding import (
     chat_identity_from_event,
     parse_account_binding_command,
 )
-from .services.diversity import DIVERSITY_STRICT
+from .services.diversity import DIVERSITY_STRICT, select_results_by_diversity
 from .services.embedding_reranker import EmbeddingReranker
 from .services.formatter import (
     format_game_detail,
@@ -55,8 +55,8 @@ from .services.unplayed_picker import (
     format_unplayed_recommendation,
     pick_random_unplayed_game,
 )
-from .services.user_profile import load_bound_user_tag_weights
-from .storage.models import AccountBinding, GamePreference, RankedGame
+from .services.user_profile import build_user_tag_weights
+from .storage.models import AccountBinding, GamePreference, RankedGame, SteamOwnedGame
 from .storage.repository import SQLiteCacheRepository
 
 PLUGIN_NAME = "astrbot_plugin_game_recommender"
@@ -368,22 +368,59 @@ class GameRecommenderPlugin(Star):
             preference.parse_warnings.append(STEAM_INDEX_FALLBACK_WARNING)
         return []
 
-    async def _user_profile_tag_weights(self, event: AstrMessageEvent) -> dict[str, float]:
+    async def _user_profile_tag_weights(
+        self,
+        event: AstrMessageEvent,
+        owned_games: list[SteamOwnedGame] | None = None,
+    ) -> dict[str, float]:
         try:
-            chat_platform, chat_user_id = chat_identity_from_event(event)
             entries = await self.steam_index.load_entries()
             if not entries:
                 return {}
-            return await load_bound_user_tag_weights(
-                chat_platform,
-                chat_user_id,
-                self.cache,
-                self.steam_client,
-                entries,
-            )
+            games = owned_games
+            if games is None:
+                games = await self._owned_games_for_recommendation(event, required=False)
+            return build_user_tag_weights(games, entries)
         except Exception as exc:
             logger.debug(f"Steam user profile weights skipped: {exc}")
             return {}
+
+    async def _owned_games_for_recommendation(
+        self,
+        event: AstrMessageEvent,
+        required: bool,
+    ) -> list[SteamOwnedGame]:
+        try:
+            chat_platform, chat_user_id = chat_identity_from_event(event)
+        except AccountBindingError as exc:
+            if required:
+                raise LibraryFilterModeError(
+                    f"无法识别当前用户，不能执行游戏库过滤：{exc}"
+                ) from exc
+            return []
+        binding = await self.cache.get_account_binding(chat_platform, chat_user_id, "steam")
+        if binding is None:
+            if required:
+                raise LibraryFilterModeError(
+                    "当前用户未绑定 Steam 账号；请先使用 /accountbind steam <SteamID64 或好友码>。"
+                )
+            return []
+        if not self.steam_client.has_web_api_key():
+            if required:
+                raise LibraryFilterModeError("未配置 steam_api_key，无法读取 Steam 游戏库。")
+            return []
+        try:
+            owned_games = await self.steam_client.get_owned_games(binding.account_id)
+        except SteamApiError as exc:
+            if required:
+                logger.warning(f"Steam owned games lookup failed: {exc}")
+                raise LibraryFilterModeError(
+                    f"Steam 游戏库不可读，无法执行游戏库过滤：{exc}"
+                ) from exc
+            return []
+        if required and not owned_games:
+            raise LibraryFilterModeError("Steam 游戏库为空或不可见，无法执行游戏库过滤。")
+        return owned_games
 
     async def _prepare_recommendation(
         self,
@@ -428,29 +465,17 @@ class GameRecommenderPlugin(Star):
         result_limit = prepared.result_limit
         ranked_games: list[RankedGame] = []
         if has_supported_steam_platform(preference):
-            candidate_pool_size = None
-            if getattr(self, "embedding_reranker", None) is not None:
-                candidate_pool_size = 20
-            if preference.budget is not None or self.price_bridge.is_available():
-                candidate_pool_size = max(result_limit * 3, result_limit)
-            if preference.library_filter_mode:
-                candidate_pool_size = max(
-                    candidate_pool_size or result_limit,
-                    result_limit * 6,
-                    result_limit + 20,
-                )
-            if excluded_appids or excluded_titles:
-                candidate_pool_size = max(
-                    candidate_pool_size or result_limit,
-                    result_limit * 6,
-                    result_limit + 20,
-                )
-            profile_tag_weights = await self._user_profile_tag_weights(event)
+            candidate_pool_size = min(60, max(30, result_limit * 6))
+            owned_games = await self._owned_games_for_recommendation(
+                event,
+                required=bool(preference.library_filter_mode),
+            )
+            profile_tag_weights = await self._user_profile_tag_weights(event, owned_games)
             ranked_games = await self._recommend_with_steam_index(
                 preference,
-                limit=candidate_pool_size or result_limit,
+                limit=candidate_pool_size,
                 profile_tag_weights=profile_tag_weights,
-                diversity_mode=prepared.diversity_mode,
+                diversity_mode=DIVERSITY_STRICT,
                 excluded_appids=excluded_appids,
                 excluded_titles=excluded_titles,
             )
@@ -463,12 +488,31 @@ class GameRecommenderPlugin(Star):
                 )
             if preference.library_filter_mode:
                 ranked_games = await self._filter_library_games(
-                    event,
                     preference,
                     ranked_games,
                     preference.library_filter_mode,
+                    owned_games,
                 )
-            ranked_games = await self.price_bridge.enrich_ranked_games(ranked_games, preference)
+            if preference.budget is not None:
+                ranked_games = await self.price_bridge.enrich_ranked_games(
+                    ranked_games,
+                    preference,
+                )
+                ranked_games = select_results_by_diversity(
+                    ranked_games,
+                    result_limit,
+                    prepared.diversity_mode,
+                )
+            else:
+                ranked_games = select_results_by_diversity(
+                    ranked_games,
+                    result_limit,
+                    prepared.diversity_mode,
+                )
+                ranked_games = await self.price_bridge.enrich_ranked_games(
+                    ranked_games,
+                    preference,
+                )
         messages = await format_recommendation_messages_with_llm(
             self.context,
             event,
@@ -573,34 +617,11 @@ class GameRecommenderPlugin(Star):
 
     async def _filter_library_games(
         self,
-        event: AstrMessageEvent,
         preference,
         ranked_games,
         mode: str,
+        owned_games: list[SteamOwnedGame],
     ):
-        try:
-            chat_platform, chat_user_id = chat_identity_from_event(event)
-        except AccountBindingError as exc:
-            raise LibraryFilterModeError(f"无法识别当前用户，不能执行游戏库过滤：{exc}") from exc
-
-        binding = await self.cache.get_account_binding(chat_platform, chat_user_id, "steam")
-        if binding is None:
-            raise LibraryFilterModeError(
-                "当前用户未绑定 Steam 账号；请先使用 /accountbind steam <SteamID64 或好友码>。"
-            )
-
-        if not self.steam_client.has_web_api_key():
-            raise LibraryFilterModeError("未配置 steam_api_key，无法读取 Steam 游戏库。")
-
-        try:
-            owned_games = await self.steam_client.get_owned_games(binding.account_id)
-        except SteamApiError as exc:
-            logger.warning(f"Steam owned games lookup failed: {exc}")
-            raise LibraryFilterModeError(f"Steam 游戏库不可读，无法执行游戏库过滤：{exc}") from exc
-
-        if not owned_games:
-            raise LibraryFilterModeError("Steam 游戏库为空或不可见，无法执行游戏库过滤。")
-
         filtered, removed_count = filter_games_by_library_mode(ranked_games, owned_games, mode)
         if mode == LIBRARY_FILTER_EXCLUDE_OWNED:
             preference.parse_warnings.append(

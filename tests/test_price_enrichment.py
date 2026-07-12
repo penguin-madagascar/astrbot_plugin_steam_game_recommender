@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import sys
 import tempfile
@@ -12,6 +13,12 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT.parent))
 
+from astrbot_plugin_game_recommender.services.formatter import (  # noqa: E402
+    format_game_block,
+    format_game_detail,
+    format_recommendation_messages,
+    format_recommendation_messages_with_llm,
+)
 from astrbot_plugin_game_recommender.services.steam_price_bridge import (  # noqa: E402
     SteamPriceBridge,
     attach_missing_price_warning,
@@ -23,13 +30,6 @@ from astrbot_plugin_game_recommender.storage.models import (  # noqa: E402
     GamePreference,
     GamePriceSummary,
     RankedGame,
-)
-
-from astrbot_plugin_game_recommender.services.formatter import (  # noqa: E402
-    format_game_block,
-    format_game_detail,
-    format_recommendation_messages,
-    format_recommendation_messages_with_llm,
 )
 from astrbot_plugin_steam_price_heybox.models import (  # noqa: E402
     GameIdentity,
@@ -272,8 +272,7 @@ class EmptyFallbackFormattingTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_empty_recommendations_use_llm_when_fallback_is_enabled(self) -> None:
         context = FakeLlmContext(
-            "LLM 兜底建议（未经过 Steam 索引验证）\n"
-            "1. 《Mario Kart 8 Deluxe》：适合轻松多人竞速。"
+            "LLM 兜底建议（未经过 Steam 索引验证）\n1. 《Mario Kart 8 Deluxe》：适合轻松多人竞速。"
         )
 
         messages = await format_recommendation_messages_with_llm(
@@ -379,7 +378,7 @@ class PriceBridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("当前促销", summary.sale_status or "")
         self.assertIn("乌克兰 / UA", summary.region_summary or "")
 
-    async def test_budget_enrichment_filters_games_that_never_fit_budget(self) -> None:
+    async def test_budget_enrichment_softly_penalizes_games_over_budget(self) -> None:
         bridge = FixedPriceBridge(
             {
                 "Expensive Game": price_summary(current_cny=120, lowest_cny=110),
@@ -393,10 +392,14 @@ class PriceBridgeTest(unittest.IsolatedAsyncioTestCase):
 
         enriched = await bridge.enrich_ranked_games(games, GamePreference(budget=50))
 
-        self.assertEqual([game.title for game in enriched], ["Budget Game"])
-        self.assertLessEqual(enriched[0].price_summary.current_cny, 50)
+        self.assertEqual(
+            [game.title for game in enriched],
+            ["Expensive Game", "Budget Game"],
+        )
+        self.assertEqual(enriched[0].score, 95)
+        self.assertEqual(enriched[1].score, 95)
 
-    async def test_budget_enrichment_drops_unknown_prices_when_confirmed_budget_games_exist(self) -> None:
+    async def test_budget_enrichment_keeps_unknown_prices_with_small_penalty(self) -> None:
         bridge = FixedPriceBridge({"Budget Game": price_summary(current_cny=40, lowest_cny=30)})
         games = [
             RankedGame(title="Unknown Price Game", score=100, platforms=["PC"], stores=["Steam"]),
@@ -405,7 +408,45 @@ class PriceBridgeTest(unittest.IsolatedAsyncioTestCase):
 
         enriched = await bridge.enrich_ranked_games(games, GamePreference(budget=50))
 
-        self.assertEqual([game.title for game in enriched], ["Budget Game"])
+        self.assertEqual(
+            [game.title for game in enriched],
+            ["Unknown Price Game", "Budget Game"],
+        )
+        self.assertEqual(enriched[0].score, 98)
+        self.assertEqual(enriched[1].score, 95)
+
+    async def test_no_budget_price_lookup_preserves_final_order(self) -> None:
+        bridge = FixedPriceBridge(
+            {
+                "First": price_summary(current_cny=100, lowest_cny=80),
+                "Second": price_summary(current_cny=10, lowest_cny=5),
+            }
+        )
+        games = [
+            RankedGame(title="First", score=90, platforms=["PC"], stores=["Steam"]),
+            RankedGame(title="Second", score=80, platforms=["PC"], stores=["Steam"]),
+        ]
+
+        enriched = await bridge.enrich_ranked_games(games, GamePreference())
+
+        self.assertEqual([game.title for game in enriched], ["First", "Second"])
+
+    async def test_price_lookup_concurrency_is_capped_at_four(self) -> None:
+        bridge = ConcurrentPriceBridge()
+        games = [
+            RankedGame(
+                title=f"Game {index}",
+                score=100 - index,
+                platforms=["PC"],
+                stores=["Steam"],
+            )
+            for index in range(8)
+        ]
+
+        await bridge.enrich_ranked_games(games, GamePreference())
+
+        self.assertGreater(bridge.max_active, 1)
+        self.assertLessEqual(bridge.max_active, 4)
 
     async def test_price_plugin_can_load_from_sibling_plugin_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -542,6 +583,21 @@ class FixedPriceBridge(SteamPriceBridge):
     async def lookup(self, title: str, country: str | None = None) -> GamePriceSummary | None:
         del country
         return self.summaries.get(title)
+
+
+class ConcurrentPriceBridge(FixedPriceBridge):
+    def __init__(self) -> None:
+        super().__init__({})
+        self.active = 0
+        self.max_active = 0
+
+    async def lookup(self, title: str, country: str | None = None) -> GamePriceSummary | None:
+        del title, country
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        await asyncio.sleep(0)
+        self.active -= 1
+        return None
 
 
 class FakeEvent:

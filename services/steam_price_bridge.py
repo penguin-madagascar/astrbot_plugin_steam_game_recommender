@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 ServiceFactory = Callable[[dict[str, Any], Any], Any]
 DEFAULT_PRICE_LOOKUP_LIMIT = 10
+PRICE_LOOKUP_CONCURRENCY = 4
 DEFAULT_HISTORY_DAYS = 720
 DEFAULT_GLOBAL_PRICE_LIMIT = 10
 DEFAULT_LANGUAGE = "schinese"
@@ -82,11 +83,7 @@ def import_price_plugin_symbols(search_root: Path | None) -> PricePluginSymbols:
 def sibling_plugin_search_roots() -> list[Path]:
     current_plugin = Path(__file__).resolve().parents[1]
     roots = [current_plugin.parent]
-    return [
-        root
-        for root in roots
-        if (root / PRICE_PLUGIN_PACKAGE).is_dir()
-    ]
+    return [root for root in roots if (root / PRICE_PLUGIN_PACKAGE).is_dir()]
 
 
 def get_price_plugin_symbols() -> PricePluginSymbols | None:
@@ -144,19 +141,29 @@ class SteamPriceBridge:
         if not self.is_available() or self.lookup_limit <= 0:
             return games
 
-        enriched: list[RankedGame] = []
-        for index, game in enumerate(games):
-            if index >= self.lookup_limit or not has_steam_purchase_signal(game):
-                enriched.append(game)
-                continue
-            summary = await self.lookup(game.title)
-            if outside_budget(summary, preference):
-                continue
-            enriched.append(attach_price_summary(game, summary, preference))
+        semaphore = asyncio.Semaphore(PRICE_LOOKUP_CONCURRENCY)
 
-        enriched = drop_uncertain_budget_matches(enriched, preference)
-        enriched.sort(key=lambda item: price_aware_sort_key(item, preference))
-        return enriched
+        async def enrich_one(index: int, game: RankedGame) -> RankedGame:
+            if index >= self.lookup_limit or not has_steam_purchase_signal(game):
+                return game
+            async with semaphore:
+                summary = await self.lookup(game.title)
+            return attach_price_summary(game, summary, preference)
+
+        enriched = list(
+            await asyncio.gather(*(enrich_one(index, game) for index, game in enumerate(games)))
+        )
+        if preference.budget is None:
+            return enriched
+        original_order = {id(game): index for index, game in enumerate(enriched)}
+        return sorted(
+            enriched,
+            key=lambda game: (
+                tier_order(game.tier),
+                -float(game.score),
+                original_order[id(game)],
+            ),
+        )
 
     async def lookup(self, title: str, country: str | None = None) -> GamePriceSummary | None:
         if not self.is_available() or not title.strip():
@@ -256,8 +263,7 @@ def current_price_fields(
         current = history.current
         text = money_text_value(current.price, current.currency)
         return text, (
-            decimal_to_float(current.rmb_price)
-            or cny_value(current.price, current.currency)
+            decimal_to_float(current.rmb_price) or cny_value(current.price, current.currency)
         )
     return None, region_cny(regions, country)
 
@@ -295,7 +301,7 @@ def attach_price_summary(
     if budget is not None:
         if summary.current_cny is not None:
             if summary.current_cny <= budget:
-                score += 8
+                score += 5
                 append_unique(
                     reasons,
                     (
@@ -314,7 +320,7 @@ def attach_price_summary(
                     ),
                 )
             else:
-                score -= 8
+                score -= 5
                 append_unique(
                     warnings,
                     (
@@ -379,58 +385,13 @@ def attach_missing_price_warning(game: RankedGame) -> RankedGame:
     data = dump_model(game)
     warnings = list(game.warnings)
     append_unique(warnings, "Steam 价格未获取到，预算匹配无法确认")
-    data["score"] = round(float(game.score) - 12, 2)
+    data["score"] = round(float(game.score) - 2, 2)
     data["warnings"] = warnings
     return validate_ranked_game(data)
 
 
-def outside_budget(
-    summary: GamePriceSummary | None,
-    preference: GamePreference,
-) -> bool:
-    if preference.budget is None or summary is None or summary.current_cny is None:
-        return False
-    return summary.current_cny > preference.budget and (
-        summary.lowest_cny is None or summary.lowest_cny > preference.budget
-    )
-
-
-def drop_uncertain_budget_matches(
-    games: list[RankedGame],
-    preference: GamePreference,
-) -> list[RankedGame]:
-    if preference.budget is None:
-        return games
-    if not any(current_price_within_budget(game.price_summary, preference.budget) for game in games):
-        return games
-    return [
-        game
-        for game in games
-        if current_price_within_budget(game.price_summary, preference.budget)
-    ]
-
-
-def current_price_within_budget(
-    summary: GamePriceSummary | None,
-    budget: float,
-) -> bool:
-    return summary is not None and summary.current_cny is not None and summary.current_cny <= budget
-
-
-def price_aware_sort_key(game: RankedGame, preference: GamePreference) -> tuple[int, float, str]:
-    if preference.budget is None:
-        return (0, -float(game.score), game.title)
-    summary = game.price_summary
-    budget = preference.budget
-    if summary and summary.current_cny is not None and summary.current_cny <= budget:
-        priority = 0
-    elif summary and summary.lowest_cny is not None and summary.lowest_cny <= budget:
-        priority = 1
-    elif summary is None:
-        priority = 2
-    else:
-        priority = 3
-    return (priority, -float(game.score), game.title)
+def tier_order(tier: str) -> int:
+    return {"strong": 0, "recommended": 1, "backup": 2}.get(tier, 9)
 
 
 def cny_value(value: Decimal, currency: str) -> float | None:
@@ -458,7 +419,7 @@ def decimal_to_float(value: Decimal | None) -> float | None:
 def service_today(history: Any) -> Any:
     active = getattr(history, "active_sale", None)
     if active and getattr(active, "ended_on", None) is None:
-        return getattr(active, "started_on")
+        return active.started_on
     current = getattr(history, "current", None)
     return (
         getattr(current, "recorded_on", None)
