@@ -15,7 +15,6 @@ sys.path.insert(0, str(ROOT.parent))
 
 from astrbot_plugin_game_recommender.services.formatter import (  # noqa: E402
     format_game_block,
-    format_game_detail,
     format_recommendation_messages,
     format_recommendation_messages_with_llm,
 )
@@ -26,7 +25,6 @@ from astrbot_plugin_game_recommender.services.steam_price_bridge import (  # noq
     load_price_plugin_symbols,
 )
 from astrbot_plugin_game_recommender.storage.models import (  # noqa: E402
-    GameCandidate,
     GamePreference,
     GamePriceSummary,
     RankedGame,
@@ -34,7 +32,6 @@ from astrbot_plugin_game_recommender.storage.models import (  # noqa: E402
 )
 from astrbot_plugin_steam_price_heybox.models import (  # noqa: E402
     GameIdentity,
-    RegionPrice,
     SteamGameDetails,
     SteamPrice,
 )
@@ -154,11 +151,12 @@ class PriceFormattingTest(unittest.TestCase):
 
         self.assertIn("current_price", payload)
         self.assertIn("¥60", payload)
-        self.assertIn("lowest_cny", payload)
+        self.assertIn("historic_low_amount", payload)
 
     def test_recommendation_block_includes_price_and_links(self) -> None:
         game = RankedGame(
             title="Test Game",
+            appid=123,
             platforms=["PC"],
             stores=["Steam"],
             score=10,
@@ -167,10 +165,10 @@ class PriceFormattingTest(unittest.TestCase):
 
         text = "\n".join(format_game_block(1, game))
 
-        self.assertIn("价格：Steam 当前价 ¥60", text)
-        self.assertIn("史低 ¥50", text)
-        self.assertIn("Steam：https://store.steampowered.com/app/123/", text)
-        self.assertIn("小黑盒：https://www.xiaoheihe.cn/app/topic/game/pc/123", text)
+        self.assertIn("价格（CN）：当前价 ¥60", text)
+        self.assertIn("历史最低 ¥50", text)
+        self.assertIn("购买链接：https://store.steampowered.com/app/123/", text)
+        self.assertNotIn("小黑盒", text)
 
     def test_recommendation_reasons_keep_review_ratio_text(self) -> None:
         game = RankedGame(
@@ -243,15 +241,6 @@ class PriceFormattingTest(unittest.TestCase):
 
         self.assertNotIn("暂未发现明显不适合点", text)
         self.assertIn("建议结合个人偏好选择", text)
-
-    def test_game_detail_appends_price_summary_when_available(self) -> None:
-        game = GameCandidate(title="Test Game", platforms=["PC"], stores=["Steam"])
-
-        text = format_game_detail(game, price_summary(current_cny=60, lowest_cny=50))
-
-        self.assertIn("《Test Game》", text)
-        self.assertIn("Steam 价格：Steam 当前价 ¥60", text)
-        self.assertIn("史低 ¥50", text)
 
 
 class EmptyFallbackFormattingTest(unittest.IsolatedAsyncioTestCase):
@@ -380,8 +369,8 @@ class PriceBridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured_config["default_history_country"], "US")
         self.assertEqual(captured_config["default_language"], "schinese")
         self.assertEqual(captured_config["history_days"], 720)
-        self.assertEqual(captured_config["global_price_limit"], 10)
-        self.assertFalse(captured_config["show_api_links"])
+        self.assertNotIn("global_price_limit", captured_config)
+        self.assertNotIn("show_api_links", captured_config)
         self.assertEqual(captured_config["llm_name_retry_count"], 0)
 
     async def test_lookup_builds_summary_from_price_service(self) -> None:
@@ -395,14 +384,14 @@ class PriceBridgeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(summary)
         assert summary is not None
-        self.assertEqual(summary.appid, 123)
+        self.assertEqual(summary.region, "CN")
+        self.assertEqual(summary.currency, "CNY")
         self.assertEqual(summary.current_price, "¥60")
-        self.assertEqual(summary.lowest_price, "¥50")
-        self.assertEqual(summary.lowest_date, "2026-01-10")
-        self.assertEqual(summary.current_cny, 60)
-        self.assertEqual(summary.lowest_cny, 50)
-        self.assertIn("当前促销", summary.sale_status or "")
-        self.assertIn("乌克兰 / UA", summary.region_summary or "")
+        self.assertEqual(summary.historic_low, "¥50")
+        self.assertEqual(summary.current_amount, 60)
+        self.assertEqual(summary.historic_low_amount, 50)
+        self.assertEqual(summary.recent_sale_price, "¥50")
+        self.assertIn("已开始", summary.sale_time_status or "")
 
     async def test_budget_enrichment_softly_penalizes_games_over_budget(self) -> None:
         bridge = FixedPriceBridge(
@@ -587,19 +576,15 @@ class BudgetScoringTest(unittest.TestCase):
 
 def price_summary(current_cny: float, lowest_cny: float) -> GamePriceSummary:
     return GamePriceSummary(
-        source="steam_price_heybox",
-        appid=123,
-        country="CN",
+        region="CN",
+        currency="CNY",
         current_price=f"¥{current_cny:g}",
-        lowest_price=f"¥{lowest_cny:g}",
-        lowest_date="2026-01-10",
-        lowest_discount=50,
-        sale_status="当前促销：2026-01-10 开始，最低 ¥50",
-        region_summary="最低价区服：乌克兰 / UA，约 ¥40",
-        store_url="https://store.steampowered.com/app/123/",
-        heybox_url="https://www.xiaoheihe.cn/app/topic/game/pc/123",
-        current_cny=current_cny,
-        lowest_cny=lowest_cny,
+        current_amount=current_cny,
+        historic_low=f"¥{lowest_cny:g}",
+        historic_low_amount=lowest_cny,
+        recent_sale_price=f"¥{lowest_cny:g}",
+        recent_sale_amount=lowest_cny,
+        sale_time_status="结束于 10 天前",
     )
 
 
@@ -681,11 +666,8 @@ class FakeSteamClient:
 
 
 class FakeHeyboxClient:
-    async def global_prices(self, _appid: int) -> list[RegionPrice]:
-        return [
-            RegionPrice("CN", "中国", Decimal("60"), Decimal("100"), 40),
-            RegionPrice("UA", "乌克兰", Decimal("40"), Decimal("80"), 50),
-        ]
+    async def global_prices(self, _appid: int):
+        raise AssertionError("global_prices must not be called")
 
 
 class FakePriceService:

@@ -249,6 +249,15 @@ class PreferenceRulesTest(unittest.TestCase):
         self.assertEqual(preference.required_languages, ["tchinese"])
         self.assertNotIn("chinese", preference.required_tags)
 
+    def test_extracts_explicit_budget_currency_without_guessing_implicit_currency(self) -> None:
+        usd = infer_preference_from_text("美区合作游戏，预算 $30")
+        jpy = infer_preference_from_text("日区解谜，3000 日元以内")
+        implicit = infer_preference_from_text("预算 100 以内")
+
+        self.assertEqual((usd.budget, usd.budget_currency), (30, "USD"))
+        self.assertEqual((jpy.budget, jpy.budget_currency), (3000, "JPY"))
+        self.assertEqual((implicit.budget, implicit.budget_currency), (100, None))
+
     def test_explicit_text_count_overrides_llm_default_count(self) -> None:
         llm_preference = GamePreference(result_count=5)
 

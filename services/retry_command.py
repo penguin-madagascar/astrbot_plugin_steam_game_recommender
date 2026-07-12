@@ -139,7 +139,10 @@ def apply_preference_patch(
         if field_name == "language":
             data["preferred_languages"] = []
             data["required_languages"] = []
-        elif field_name in {"budget", "players", "difficulty", "mood"}:
+        elif field_name == "budget":
+            data["budget"] = None
+            data["budget_currency"] = None
+        elif field_name in {"players", "difficulty", "mood"}:
             data[field_name] = None
     for field_name, value in patch.condition_overrides.items():
         if field_name in {"budget", "players", "difficulty", "mood"}:

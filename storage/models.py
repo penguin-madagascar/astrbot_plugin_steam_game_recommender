@@ -465,19 +465,20 @@ class RecommendationEvidence(BaseModel):
 
 
 class GamePriceSummary(BaseModel):
-    source: str = "steam_price_heybox"
-    appid: int | None = None
-    country: str = "CN"
+    region: str = "CN"
+    currency: str | None = None
     current_price: str | None = None
-    lowest_price: str | None = None
-    lowest_date: str | None = None
-    lowest_discount: int | None = None
-    sale_status: str | None = None
-    region_summary: str | None = None
-    store_url: str | None = None
-    heybox_url: str | None = None
-    current_cny: float | None = None
-    lowest_cny: float | None = None
+    current_amount: float | None = None
+    historic_low: str | None = None
+    historic_low_amount: float | None = None
+    recent_sale_price: str | None = None
+    recent_sale_amount: float | None = None
+    sale_time_status: str | None = None
+
+    @validator("region", "currency", pre=True)
+    def _normalize_price_codes(cls, value: Any) -> str | None:
+        text = re.sub(r"\s+", "", str(value or "")).strip().upper()
+        return text or None
 
     class Config:
         extra = "ignore"

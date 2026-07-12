@@ -227,9 +227,12 @@ def apply_scenario_filters(
                     attach_price_summary(
                         game,
                         GamePriceSummary(
-                            source="fake",
-                            current_cny=float(price),
+                            region=preference.region or "CN",
+                            currency=preference.budget_currency or "CNY",
                             current_price=f"¥{price:g}",
+                            current_amount=float(price),
+                            historic_low=f"¥{price:g}",
+                            historic_low_amount=float(price),
                         ),
                         preference,
                     )

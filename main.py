@@ -41,6 +41,7 @@ from .services.recommendation_memory import (
     save_recommendation_memory,
     summarize_games,
 )
+from .services.region_query import normalize_region, parse_region_query, region_currency
 from .services.retry_command import (
     apply_preference_patch,
     merge_retry_preferences,
@@ -101,6 +102,7 @@ class GameRecommenderPlugin(Star):
         self.max_results = min(max(safe_int(self.config.get("max_results"), 5), 1), 10)
         self.provider_id = str(self.config.get("llm_provider_id", "") or "").strip()
         self.enable_llm_fallback = bool(self.config.get("enable_llm_fallback"))
+        self.default_region = normalize_region(str(self.config.get("default_region") or "CN"))
 
         self.http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout),
@@ -116,7 +118,7 @@ class GameRecommenderPlugin(Star):
             client=self.http_client,
             cache=self.cache,
             cache_ttl_hours=safe_int(self.config.get("cache_ttl_hours"), 24),
-            default_country=str(self.config.get("default_region") or "CN"),
+            default_country=self.default_region,
             language="schinese",
             steam_api_key=str(self.config.get("steam_api_key") or ""),
         )
@@ -381,15 +383,23 @@ class GameRecommenderPlugin(Star):
         self,
         event: AstrMessageEvent,
         raw_text: str,
+        default_region: str | None = None,
     ) -> PreparedRecommendation:
         command_filter = parse_library_filter_command(raw_text)
-        text = command_filter.query
+        region_query = parse_region_query(
+            command_filter.query,
+            default_region=default_region or getattr(self, "default_region", "CN"),
+        )
+        text = region_query.query
         if not text:
             raise LibraryFilterModeError(
                 "请输入游戏需求，例如：/gamerec 排除已有 Steam 双人合作解谜"
             )
         text_filter_mode = detect_library_filter_mode(text)
         preference = await self.preference_parser.parse_preference(event, text)
+        preference.region = region_query.region
+        if preference.budget is not None and not preference.budget_currency:
+            preference.budget_currency = region_currency(region_query.region)
         library_filter_mode = resolve_library_filter_mode(
             command_filter.mode,
             text_filter_mode,
@@ -527,6 +537,7 @@ class GameRecommenderPlugin(Star):
                 supplemental = await self._prepare_recommendation(
                     event,
                     parsed_patch.residual_text,
+                    default_region=preference.region,
                 )
                 preference = merge_retry_preferences(
                     preference,

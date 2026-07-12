@@ -68,6 +68,24 @@ class FakePreferenceParser:
 
 
 class PrepareRecommendationLlmFallbackTest(unittest.IsolatedAsyncioTestCase):
+    async def test_prepare_applies_query_region_and_region_local_budget_currency(self) -> None:
+        preference = GamePreference(platforms=["steam"], budget=50, result_count=3)
+        parser = FakePreferenceParser(preference)
+        plugin = object.__new__(GameRecommenderPlugin)
+        plugin.max_results = 5
+        plugin.default_region = "CN"
+        plugin.enable_llm_fallback = False
+        plugin.preference_parser = parser
+
+        prepared = await plugin._prepare_recommendation(
+            object(),
+            "-US Steam 双人合作，预算 50",
+        )
+
+        self.assertEqual(parser.seen_text, "Steam 双人合作，预算 50")
+        self.assertEqual(prepared.preference.region, "US")
+        self.assertEqual(prepared.preference.budget_currency, "USD")
+
     async def test_prepare_rejects_non_steam_platform_when_llm_fallback_is_disabled(self) -> None:
         preference = GamePreference(
             platforms=["nintendo switch"],

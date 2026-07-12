@@ -94,7 +94,7 @@ class PreferencePatchTest(unittest.TestCase):
     def test_latest_condition_patch_can_override_and_clear(self) -> None:
         overridden = parse_preference_patch("预算改为 80，改成 3 人", len(self.results))
         preference, _appids, _titles = apply_preference_patch(
-            GamePreference(budget=100, players=2),
+            GamePreference(budget=100, budget_currency="CNY", players=2),
             overridden.patch,
             self.results,
         )
@@ -106,6 +106,7 @@ class PreferencePatchTest(unittest.TestCase):
         )
 
         self.assertIsNone(preference.budget)
+        self.assertIsNone(preference.budget_currency)
         self.assertEqual(preference.players, 3)
 
 

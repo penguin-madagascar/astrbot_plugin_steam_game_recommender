@@ -13,9 +13,8 @@ if TYPE_CHECKING:
     from astrbot.api.event import AstrMessageEvent
     from astrbot.api.star import Context
 
-from ..storage.models import GameCandidate, GamePreference, GamePriceSummary, RankedGame
+from ..storage.models import GamePreference, GamePriceSummary, RankedGame
 
-DISCLAIMER = "以下推荐基于当前可查询到的 Steam 公开数据，价格和商店信息可能因地区变化。"
 EMPTY_LLM_FALLBACK_TITLE = "LLM 兜底建议（未经过 Steam 索引验证）"
 
 
@@ -37,8 +36,7 @@ def format_recommendation_messages(
         return [
             (
                 "暂时没有找到满足当前条件的游戏。\n"
-                f"{DISCLAIMER}\n"
-                "可以尝试改用 Steam/PC 请求，或放宽排除标签、人数和类型条件后再查一次。"
+                "可以尝试放宽排除标签、人数、语言或类型条件后再查一次。"
             )
         ]
 
@@ -48,7 +46,7 @@ def format_recommendation_messages(
 
     messages = ["\n".join(lines)]
     for index, game in enumerate(ranked_games[:count], start=1):
-        messages.append("\n".join(format_game_block(index, game)))
+        messages.append("\n".join(format_game_block(index, game, region=preference.region or "CN")))
     return messages
 
 
@@ -154,20 +152,20 @@ async def format_empty_recommendations_with_llm(
     return text
 
 
-def format_game_block(index: int, game: RankedGame) -> list[str]:
+def format_game_block(index: int, game: RankedGame, region: str | None = None) -> list[str]:
     reason = game.recommendation_reason or fallback_recommendation_reason(game)
+    price_summary = game.price_summary
+    selected_region = price_summary.region if price_summary else (region or "CN")
     lines = [
         f"{index}. 《{game.title}》｜推荐分：{game.score}%",
         f"推荐理由：{reason}",
+        (
+            f"价格（{selected_region}）："
+            f"{format_price_summary(price_summary) if price_summary else unavailable_price_text()}"
+        ),
     ]
-    price_summary = getattr(game, "price_summary", None)
-    if price_summary:
-        lines.append(f"   价格：{format_price_summary(price_summary)}")
-        links = format_price_links(price_summary)
-        if links:
-            lines.append(f"购买链接：{links}")
-    elif game.appid is not None:
-        lines.append(f"购买链接：https://store.steampowered.com/app/{game.appid}/")
+    if link := steam_store_url(game):
+        lines.append(f"购买链接：{link}")
     return lines
 
 
@@ -195,94 +193,33 @@ def valid_game_message(text: str, index: int, title: str) -> bool:
     return first_line.startswith(f"{index}.") and title.lower() in text.lower()
 
 
-def format_game_detail(game: GameCandidate, price_summary: GamePriceSummary | None = None) -> str:
-    lines = [
-        f"《{game.title}》",
-        f"平台：{'、'.join(game.platforms) if game.platforms else '不确定'}",
-        f"类型：{'、'.join(game.genres) if game.genres else '不确定'}",
-        f"标签：{'、'.join(game.tags[:10]) if game.tags else '不确定'}",
-        f"Steam 好评率：{format_review_ratio(game.review_positive_ratio)}",
-        f"Steam 评测数：{game.review_total if game.review_total is not None else '不确定'}",
-        f"Metacritic：{game.metacritic if game.metacritic is not None else '不确定'}",
-        f"发售日：{game.released or '不确定'}",
-        (
-            "平均游玩时长："
-            f"{str(game.playtime) + ' 小时' if game.playtime is not None else '不确定'}"
-        ),
-        f"商店：{'、'.join(game.stores) if game.stores else '不确定'}",
-    ]
-    if price_summary:
-        lines.append(f"Steam 价格：{format_price_summary(price_summary)}")
-        links = format_price_links(price_summary)
-        if links:
-            lines.append(f"购买链接：{links}")
-        lines.append("中文支持：Steam 数据可能缺失，请以商店页面为准。")
-    else:
-        lines.append("价格 / 中文支持：实时地区价格和语言信息请以 Steam 商店页面为准。")
-    if game.raw_url:
-        lines.append(f"数据来源：{game.raw_url}")
-    return "\n".join(lines)
-
-
-def uncertain_fields(game: RankedGame | GameCandidate) -> str:
-    fields = []
-    if not game.stores:
-        fields.append("购买渠道")
-    if not getattr(game, "price_summary", None):
-        fields.append("实时价格")
-    if not game.language_data_available:
-        fields.append("语言支持")
-    return "、".join(fields)
-
-
 def format_price_summary(summary: GamePriceSummary) -> str:
-    parts: list[str] = []
-    if summary.current_price:
-        parts.append(f"Steam 当前价 {summary.current_price}")
-    if summary.lowest_price:
-        lowest = f"史低 {summary.lowest_price}"
-        annotations = []
-        if summary.lowest_date:
-            annotations.append(summary.lowest_date)
-        if summary.lowest_discount:
-            annotations.append(f"-{summary.lowest_discount}%")
-        if annotations:
-            lowest += f"（{'，'.join(annotations)}）"
-        parts.append(lowest)
-    if summary.sale_status:
-        parts.append(summary.sale_status)
-    if summary.region_summary:
-        parts.append(summary.region_summary)
-    return "；".join(parts) if parts else "暂时不可用"
+    recent = summary.recent_sale_price or "暂无数据"
+    if summary.sale_time_status:
+        recent += f"（{summary.sale_time_status}）"
+    return "；".join(
+        [
+            f"当前价 {summary.current_price or '暂无数据'}",
+            f"历史最低 {summary.historic_low or '暂无数据'}",
+            f"最近促销 {recent}",
+        ]
+    )
 
 
-def format_price_links(summary: GamePriceSummary) -> str:
-    links = []
-    if summary.store_url:
-        links.append(f"Steam：{summary.store_url}")
-    if summary.heybox_url:
-        links.append(f"小黑盒：{summary.heybox_url}")
-    return "；".join(links)
+def unavailable_price_text() -> str:
+    return "当前价 暂无数据；历史最低 暂无数据；最近促销 暂无数据"
 
 
-def format_review_ratio(value: float | None) -> str:
-    return f"{value:.0%}" if value is not None else "不确定"
+def steam_store_url(game: RankedGame) -> str:
+    if game.appid is not None:
+        return f"https://store.steampowered.com/app/{int(game.appid)}/"
+    raw_url = str(game.raw_url or "").strip()
+    return raw_url if raw_url.startswith("https://store.steampowered.com/app/") else ""
 
 
 def dump_model(model: Any) -> dict[str, Any]:
     dumper = getattr(model, "model_dump", None)
     return dumper() if dumper else model.dict()
-
-
-def display_points(primary: list[str], secondary: list[str]) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for value in [*primary, *secondary]:
-        key = value.lower()
-        if value and key not in seen:
-            result.append(value)
-            seen.add(key)
-    return result
 
 
 async def resolve_provider_id(

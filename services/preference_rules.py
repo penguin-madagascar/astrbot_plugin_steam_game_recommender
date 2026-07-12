@@ -150,13 +150,7 @@ def infer_preference_from_text(text: str) -> GamePreference:
     )
     players = 2 if wants_multiple_players else None
 
-    budget = None
-    budget_match = re.search(
-        r"(?:预算|价格|价位)?\s*(\d+(?:\.\d+)?)\s*(?:以内|以下|元|块|rmb)",
-        lower,
-    )
-    if budget_match:
-        budget = float(budget_match.group(1))
+    budget, budget_currency = extract_budget(lower)
 
     result_count = extract_result_count(lower) or 5
 
@@ -217,6 +211,7 @@ def infer_preference_from_text(text: str) -> GamePreference:
         reference_games_dislike=reference_dislike,
         players=players,
         budget=budget,
+        budget_currency=budget_currency,
         preferred_languages=preferred_languages,
         required_languages=required_languages,
         difficulty=difficulty,
@@ -518,6 +513,50 @@ def extract_result_count(text: str) -> int | None:
     if not count_match:
         return None
     return min(max(int(count_match.group(1)), 1), 10)
+
+
+def extract_budget(text: str) -> tuple[float | None, str | None]:
+    currency_pattern = (
+        r"美元|美金|usd|日元|日币|jpy|円|欧元|eur|英镑|gbp|港币|hkd|"
+        r"台币|新台币|twd|韩元|krw|人民币|rmb|cny|元|块"
+    )
+    patterns = (
+        rf"(?:预算|价格|价位)\s*(?:为|是|约|最多|不超过)?\s*"
+        rf"(?P<symbol>[$€£¥￥]?)\s*(?P<amount>\d+(?:\.\d+)?)\s*"
+        rf"(?P<currency>{currency_pattern})?",
+        r"(?P<symbol>[$€£])\s*(?P<amount>\d+(?:\.\d+)?)",
+        rf"(?P<amount>\d+(?:\.\d+)?)\s*(?P<currency>{currency_pattern})"
+        rf"\s*(?:以内|以下|左右|上下)?",
+    )
+    match = next((result for pattern in patterns if (result := re.search(pattern, text))), None)
+    if match is None:
+        return None, None
+    amount = float(match.group("amount"))
+    symbol = str(match.groupdict().get("symbol") or "")
+    currency_text = str(match.groupdict().get("currency") or "").lower()
+    currency = currency_from_budget_token(symbol or currency_text)
+    return amount, currency
+
+
+def currency_from_budget_token(value: str) -> str | None:
+    token = str(value or "").strip().lower()
+    if token == "$" or token in {"美元", "美金", "usd"}:
+        return "USD"
+    if token == "€" or token in {"欧元", "eur"}:
+        return "EUR"
+    if token == "£" or token in {"英镑", "gbp"}:
+        return "GBP"
+    if token in {"日元", "日币", "jpy", "円"}:
+        return "JPY"
+    if token in {"港币", "hkd"}:
+        return "HKD"
+    if token in {"台币", "新台币", "twd"}:
+        return "TWD"
+    if token in {"韩元", "krw"}:
+        return "KRW"
+    if token in {"人民币", "rmb", "cny", "元", "块"}:
+        return "CNY"
+    return None
 
 
 def keyword_hits(text: str, mapping: dict[str, tuple[str, ...]]) -> list[str]:
