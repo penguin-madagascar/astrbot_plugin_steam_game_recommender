@@ -55,8 +55,11 @@ class UserProfileRankerTest(unittest.TestCase):
                 "Generic Co-op Puzzle",
             ],
         )
-        self.assertGreater(ranked[0].facts.profile_weight_bonus, 0)
-        self.assertEqual(ranked[0].facts.base_tag_score, ranked[0].facts.match_score)
+        self.assertGreater(ranked[0].score_breakdown.library_profile or 0, 0)
+        self.assertEqual(
+            ranked[0].score_breakdown.tag_coverage,
+            ranked[1].score_breakdown.tag_coverage,
+        )
 
     def test_profile_bonus_does_not_outrank_better_primary_match_or_exclusions(self) -> None:
         profile = SteamTagProfile(

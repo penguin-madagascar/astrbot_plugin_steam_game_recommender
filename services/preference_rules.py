@@ -51,7 +51,6 @@ TAG_INTENT_TERMS: dict[str, tuple[str, ...]] = {
     "violent": ("血腥", "violent", "gore"),
     "singleplayer": ("纯单人", "singleplayer", "single-player"),
     "pvp": ("pvp",),
-    "chinese": ("简体中文", "繁体中文", "中文", "汉化", "chinese"),
 }
 
 REQUIRED_TAG_TERMS: dict[str, tuple[str, ...]] = dict(TAG_INTENT_TERMS)
@@ -206,6 +205,7 @@ def infer_preference_from_text(text: str) -> GamePreference:
     extra_tags = remove_terms_matching_tags(extra_tags, set(negative_tags))
     library_filter_mode = detect_library_filter_mode(text)
 
+    preferred_languages, required_languages = extract_language_preferences(text)
     return GamePreference(
         platforms=platforms,
         required_tags=extract_required_tags(text, tag_polarities),
@@ -217,7 +217,8 @@ def infer_preference_from_text(text: str) -> GamePreference:
         reference_games_dislike=reference_dislike,
         players=players,
         budget=budget,
-        language="中文" if tag_polarities.get("chinese") == "positive" else None,
+        preferred_languages=preferred_languages,
+        required_languages=required_languages,
         difficulty=difficulty,
         mood="轻松" if tag_polarities.get("relaxing") == "positive" else None,
         result_count=result_count,
@@ -270,7 +271,15 @@ def merge_text_preference(preference: GamePreference, text: str) -> GamePreferen
         inferred.parse_warnings,
     )
     data["platforms"] = merge_platforms(preference.platforms, inferred.platforms)
-    for field in ("players", "budget", "language", "difficulty", "mood"):
+    data["preferred_languages"] = merge_lists(
+        preference.preferred_languages,
+        inferred.preferred_languages,
+    )
+    data["required_languages"] = merge_lists(
+        preference.required_languages,
+        inferred.required_languages,
+    )
+    for field in ("players", "budget", "difficulty", "mood"):
         if getattr(preference, field) in (None, "", []):
             data[field] = getattr(inferred, field)
     if not preference.library_filter_mode:
@@ -416,6 +425,44 @@ def extract_required_tags(text: str, polarities: dict[str, str] | None = None) -
         if any(marker in requirement_left[-24:] for marker in HARD_REQUIREMENT_MARKERS):
             required = merge_lists(required, [tag])
     return required
+
+
+def extract_language_preferences(text: str) -> tuple[list[str], list[str]]:
+    lower = text.lower()
+    matches: list[tuple[int, int, str]] = []
+    language_terms = {
+        "schinese": ("simplified chinese", "schinese", "简体中文", "简中"),
+        "tchinese": ("traditional chinese", "tchinese", "繁体中文", "繁中"),
+        "english": ("english", "英语", "英文"),
+        "japanese": ("japanese", "日语", "日文"),
+        "koreana": ("korean", "韩语", "韩文"),
+    }
+    explicit_spans: list[tuple[int, int]] = []
+    for language, terms in language_terms.items():
+        for term in terms:
+            for match in re.finditer(re.escape(term), lower):
+                matches.append((match.start(), match.end(), language))
+                explicit_spans.append((match.start(), match.end()))
+    for term in ("中文", "chinese", "汉化"):
+        for match in re.finditer(re.escape(term), lower):
+            if any(match.start() >= start and match.end() <= end for start, end in explicit_spans):
+                continue
+            matches.append((match.start(), match.end(), "schinese"))
+
+    preferred: list[str] = []
+    required: list[str] = []
+    for start, end, language in sorted(matches, key=lambda item: (item[0], item[1])):
+        if is_negative_context(lower, start, end):
+            preferred = [item for item in preferred if item != language]
+            required = [item for item in required if item != language]
+            continue
+        requirement_left = re.split(r"的", clause_left(lower, start))[-1]
+        if any(marker in requirement_left[-24:] for marker in HARD_REQUIREMENT_MARKERS):
+            required = merge_lists(required, [language])
+            preferred = [item for item in preferred if item != language]
+        elif language not in required:
+            preferred = merge_lists(preferred, [language])
+    return preferred, required
 
 
 def is_negative_context(text: str, start: int, end: int) -> bool:

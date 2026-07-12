@@ -133,14 +133,17 @@ class SteamIndexSnapshotTest(unittest.IsolatedAsyncioTestCase):
         self.assertLess(resolved["Slay the Spire"].confidence, 0.75)
         self.assertTrue(any("Slay the Spire" in warning for warning in preference.parse_warnings))
 
-        markers = [reason for entry in entries for reason in entry.source_reasons]
+        markers = [marker for entry in entries for marker in entry.internal_source_markers]
         self.assertTrue(any(marker.startswith("reference_query:like:") for marker in markers))
         self.assertTrue(any(marker.startswith("reference_query:dislike:") for marker in markers))
         self.assertFalse(any("Slay the Spire" in marker for marker in markers))
         self.assertTrue(reference_candidates(preference, entries))
         self.assertTrue(
             all(
-                any(reason.startswith("reference_query:like:") for reason in item.source_reasons)
+                any(
+                    marker.startswith("reference_query:like:")
+                    for marker in item.internal_source_markers
+                )
                 for item in reference_candidates(preference, entries)
             )
         )
@@ -158,7 +161,7 @@ class SteamIndexSnapshotTest(unittest.IsolatedAsyncioTestCase):
             )
         ]
         historical = game(1, "Old Seed", ["Horror"])
-        historical.source_reasons = ["reference_query:like:Old Seed"]
+        historical.internal_source_markers = ["reference_query:like:Old Seed"]
         current = game(2, "Current Seed", ["Farming"])
 
         matches = reference_candidates(preference, [historical, current])

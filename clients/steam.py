@@ -312,7 +312,6 @@ def parse_steam_game(appid: int, data: dict[str, Any]) -> GameCandidate:
     genres = description_list(data.get("genres"))
     categories = description_list(data.get("categories"))
     languages = parse_languages(data.get("supported_languages"))
-    tags = unique_texts([*categories, *languages])
     metacritic = data.get("metacritic") if isinstance(data.get("metacritic"), dict) else {}
     release = data.get("release_date") if isinstance(data.get("release_date"), dict) else {}
     release_date = optional_text(release.get("date"))
@@ -321,12 +320,15 @@ def parse_steam_game(appid: int, data: dict[str, Any]) -> GameCandidate:
         title=str(data.get("name") or f"appid={appid}").strip(),
         platforms=parse_platforms(data.get("platforms")),
         genres=genres,
-        tags=tags,
+        tags=categories,
         metacritic=optional_int(metacritic.get("score")),
         released=release_date,
         release_date=release_date,
         stores=["Steam"],
         raw_url=f"{STEAM_STORE_BASE_URL}/{appid}/",
+        supported_languages=languages,
+        language_data_available=bool(languages),
+        internal_source_markers=["steam_appdetails"],
         description=clean_html_text(data.get("short_description") or data.get("about_the_game")),
     )
 
@@ -338,6 +340,7 @@ def steam_search_item_to_candidate(appid: int, title: str) -> GameCandidate:
         platforms=["PC"],
         stores=["Steam"],
         raw_url=f"{STEAM_STORE_BASE_URL}/{appid}/",
+        internal_source_markers=["steam_store_search"],
     )
 
 

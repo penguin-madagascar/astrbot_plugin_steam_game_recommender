@@ -65,7 +65,10 @@ class SteamClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.platforms, ["pc", "macos", "linux"])
         self.assertIn("action", first.genres)
         self.assertIn("co-op", first.tags)
-        self.assertIn("simplified chinese", first.tags)
+        self.assertNotIn("simplified chinese", first.tags)
+        self.assertEqual(first.supported_languages, ["english", "schinese", "japanese"])
+        self.assertTrue(first.language_data_available)
+        self.assertIn("steam_appdetails", first.internal_source_markers)
         self.assertEqual(first.metacritic, 88)
         self.assertEqual(first.released, "2026 年 1 月 1 日")
         self.assertEqual(first.release_date, "2026 年 1 月 1 日")
@@ -77,6 +80,23 @@ class SteamClientTest(unittest.IsolatedAsyncioTestCase):
         await client.search_games(search="co-op", page_size=2)
 
         self.assertEqual(http_client.call_count, 3)
+
+    async def test_missing_supported_languages_is_explicitly_unknown(self) -> None:
+        payload = steam_detail_payload()
+        payload.pop("supported_languages")
+        http_client = FakeHttpClient(
+            {
+                "https://store.steampowered.com/api/appdetails": {
+                    "123": {"success": True, "data": payload}
+                }
+            }
+        )
+        client = SteamClient(http_client, MemoryCache(), cache_ttl_hours=24)
+
+        game = await client.get_game_detail(123)
+
+        self.assertEqual(game.supported_languages, [])
+        self.assertFalse(game.language_data_available)
 
     async def test_review_summary_parses_total_and_recent_positive_ratio(self) -> None:
         cache = MemoryCache()

@@ -79,8 +79,9 @@ class PreferenceRulesTest(unittest.TestCase):
 
         self.assertEqual(
             preference.required_tags,
-            ["chinese", "local_coop", "multiplayer"],
+            ["local_coop", "multiplayer"],
         )
+        self.assertEqual(preference.required_languages, ["schinese"])
         self.assertNotIn("relaxing", preference.required_tags)
         self.assertIn("relaxing", preference.extra_tags)
 
@@ -95,13 +96,15 @@ class PreferenceRulesTest(unittest.TestCase):
     def test_hard_requirement_scope_stops_before_soft_gameplay_description(self) -> None:
         preference = infer_preference_from_text("必须支持中文的合作解谜游戏")
 
-        self.assertEqual(preference.required_tags, ["chinese"])
+        self.assertEqual(preference.required_tags, [])
+        self.assertEqual(preference.required_languages, ["schinese"])
         self.assertIn("co-op", preference.genres_like)
         self.assertIn("puzzle", preference.genres_like)
 
         contrasted = infer_preference_from_text("必须中文但合作解谜只要轻松就好")
 
-        self.assertEqual(contrasted.required_tags, ["chinese", "relaxing"])
+        self.assertEqual(contrasted.required_tags, ["relaxing"])
+        self.assertEqual(contrasted.required_languages, ["schinese"])
 
     def test_local_coop_requires_explicit_local_semantics(self) -> None:
         required = infer_preference_from_text("必须本地双人合作")
@@ -174,7 +177,7 @@ class PreferenceRulesTest(unittest.TestCase):
         self.assertIn("steam", preference.platforms)
         self.assertEqual(preference.players, 2)
         self.assertEqual(preference.budget, 100)
-        self.assertEqual(preference.language, "中文")
+        self.assertEqual(preference.preferred_languages, ["schinese"])
         self.assertEqual(preference.difficulty, "easy")
         self.assertIn("horror", preference.genres_dislike)
         self.assertIn("双人成行", preference.reference_games_like)
@@ -191,7 +194,7 @@ class PreferenceRulesTest(unittest.TestCase):
             reference_games_like=[],
             players=None,
             budget=None,
-            language=None,
+            preferred_languages=[],
             difficulty=None,
             result_count=5,
         )
@@ -205,7 +208,7 @@ class PreferenceRulesTest(unittest.TestCase):
         self.assertEqual(merged.platforms, ["steam"])
         self.assertEqual(merged.players, 2)
         self.assertEqual(merged.budget, 100)
-        self.assertEqual(merged.language, "中文")
+        self.assertEqual(merged.preferred_languages, ["schinese"])
         self.assertEqual(merged.difficulty, "easy")
         self.assertIn("horror", merged.genres_dislike)
         self.assertIn("双人成行", merged.reference_games_like)
@@ -232,6 +235,19 @@ class PreferenceRulesTest(unittest.TestCase):
         self.assertIn("pc", pc_preference.platforms)
         self.assertNotIn("steam", pc_preference.platforms)
         self.assertIn("steam", steam_preference.platforms)
+
+    def test_simplified_and_traditional_chinese_preferences_are_distinct(self) -> None:
+        simplified = infer_preference_from_text("最好支持简体中文")
+        traditional = infer_preference_from_text("最好支持繁体中文")
+
+        self.assertEqual(simplified.preferred_languages, ["schinese"])
+        self.assertEqual(traditional.preferred_languages, ["tchinese"])
+
+    def test_explicit_language_requirement_is_not_a_tag_requirement(self) -> None:
+        preference = infer_preference_from_text("必须支持繁体中文，想玩解谜")
+
+        self.assertEqual(preference.required_languages, ["tchinese"])
+        self.assertNotIn("chinese", preference.required_tags)
 
     def test_explicit_text_count_overrides_llm_default_count(self) -> None:
         llm_preference = GamePreference(result_count=5)

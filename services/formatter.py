@@ -15,12 +15,6 @@ if TYPE_CHECKING:
 
 from ..storage.models import GameCandidate, GamePreference, GamePriceSummary, RankedGame
 
-TIER_LABELS = {
-    "strong": "强烈推荐",
-    "recommended": "推荐",
-    "backup": "备选",
-}
-
 DISCLAIMER = "以下推荐基于当前可查询到的 Steam 公开数据，价格和商店信息可能因地区变化。"
 EMPTY_LLM_FALLBACK_TITLE = "LLM 兜底建议（未经过 Steam 索引验证）"
 
@@ -48,15 +42,10 @@ def format_recommendation_messages(
             )
         ]
 
-    lines = [
-        (f"优先看前 {count} 款，它们和你的 Steam 标签、游玩人数与参考游戏偏好最接近。"),
-        tier_summary(ranked_games[:count]),
-        DISCLAIMER,
-    ]
+    lines = [f"找到 {count} 款 Steam 游戏，按推荐分从高到低排列。"]
     if preference.parse_warnings:
         lines.append("偏好解析提示：" + "；".join(preference.parse_warnings))
 
-    lines.append("推荐列表将分条发送。")
     messages = ["\n".join(lines)]
     for index, game in enumerate(ranked_games[:count], start=1):
         messages.append("\n".join(format_game_block(index, game)))
@@ -166,36 +155,37 @@ async def format_empty_recommendations_with_llm(
 
 
 def format_game_block(index: int, game: RankedGame) -> list[str]:
-    platforms = "、".join(game.platforms) if game.platforms else "不确定"
-    tier = TIER_LABELS.get(getattr(game, "tier", ""), "")
-    reasons = "；".join(display_points(game.fit_points, game.reasons)[:5]) or (
-        "当前数据与偏好有一定匹配，但具体玩法仍需以商店页面确认"
-    )
-    warnings = "；".join(display_points(game.risk_points, game.warnings)[:5]) or (
-        "仍需以商店页面确认平台版本、中文支持和实时价格"
-    )
-    stores = "、".join(game.stores[:4]) if game.stores else "不确定"
-    uncertain = uncertain_fields(game)
+    reason = game.recommendation_reason or fallback_recommendation_reason(game)
     lines = [
-        f"{index}. 《{game.title}》",
-        *([f"   层级：{tier}"] if tier else []),
-        f"   平台：{platforms}",
-        f"   推荐理由：{reasons}",
-        f"   可能不适合的点：{warnings}",
+        f"{index}. 《{game.title}》｜推荐分：{game.score}%",
+        f"推荐理由：{reason}",
     ]
     price_summary = getattr(game, "price_summary", None)
     if price_summary:
         lines.append(f"   价格：{format_price_summary(price_summary)}")
         links = format_price_links(price_summary)
         if links:
-            lines.append(f"   购买链接：{links}")
-    else:
-        lines.append(f"   购买 / 平台建议：Steam 商店记录为 {stores}；实时价格请以商店页面为准。")
-    if game.raw_url:
-        lines.append(f"   数据来源：{game.raw_url}")
-    if uncertain:
-        lines.append(f"   数据不确定：{uncertain}")
+            lines.append(f"购买链接：{links}")
+    elif game.appid is not None:
+        lines.append(f"购买链接：https://store.steampowered.com/app/{game.appid}/")
     return lines
+
+
+def fallback_recommendation_reason(game: RankedGame) -> str:
+    positives = [item.text for item in game.recommendation_evidence if item.sentiment == "positive"]
+    risks = [
+        item.text
+        for item in game.recommendation_evidence
+        if item.sentiment != "positive" and item.important
+    ]
+    first = "；".join(positives[:2]) or "现有 Steam 数据显示它与主要偏好有一定匹配。"
+    second = risks[0] if risks else "建议结合具体玩法偏好再做最终选择。"
+    return f"{ensure_sentence(first)}{ensure_sentence(second)}"
+
+
+def ensure_sentence(text: str) -> str:
+    value = text.strip()
+    return value if value.endswith(("。", "！", "？", ".", "!", "?")) else f"{value}。"
 
 
 def valid_game_message(text: str, index: int, title: str) -> bool:
@@ -240,9 +230,8 @@ def uncertain_fields(game: RankedGame | GameCandidate) -> str:
         fields.append("购买渠道")
     if not getattr(game, "price_summary", None):
         fields.append("实时价格")
-    points = display_points(getattr(game, "fit_points", []), game.reasons)
-    if not any("中文" in reason or "chinese" in reason.lower() for reason in points):
-        fields.append("中文支持")
+    if not game.language_data_available:
+        fields.append("语言支持")
     return "、".join(fields)
 
 
@@ -283,15 +272,6 @@ def format_review_ratio(value: float | None) -> str:
 def dump_model(model: Any) -> dict[str, Any]:
     dumper = getattr(model, "model_dump", None)
     return dumper() if dumper else model.dict()
-
-
-def tier_summary(games: list[RankedGame]) -> str:
-    counts = {key: 0 for key in TIER_LABELS}
-    for game in games:
-        if game.tier in counts:
-            counts[game.tier] += 1
-    parts = [f"{label} {counts[key]} 款" for key, label in TIER_LABELS.items() if counts[key]]
-    return "分层统计：" + ("；".join(parts) if parts else "未分层")
 
 
 def display_points(primary: list[str], secondary: list[str]) -> list[str]:

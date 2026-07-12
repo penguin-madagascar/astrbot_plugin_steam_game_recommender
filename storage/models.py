@@ -5,6 +5,55 @@ from typing import Any
 
 from pydantic import BaseModel, Field, validator
 
+LANGUAGE_ALIASES = {
+    "chinese": "schinese",
+    "simplified chinese": "schinese",
+    "schinese": "schinese",
+    "简体中文": "schinese",
+    "简中": "schinese",
+    "中文": "schinese",
+    "traditional chinese": "tchinese",
+    "tchinese": "tchinese",
+    "繁体中文": "tchinese",
+    "繁中": "tchinese",
+    "english": "english",
+    "英语": "english",
+    "英文": "english",
+    "japanese": "japanese",
+    "日语": "japanese",
+    "日文": "japanese",
+    "korean": "koreana",
+    "koreana": "koreana",
+    "韩语": "koreana",
+    "韩文": "koreana",
+    "french": "french",
+    "法语": "french",
+    "german": "german",
+    "德语": "german",
+    "spanish": "spanish",
+    "西班牙语": "spanish",
+    "russian": "russian",
+    "俄语": "russian",
+    "portuguese": "portuguese",
+    "葡萄牙语": "portuguese",
+}
+
+
+def normalize_language(value: Any) -> str:
+    text = re.sub(r"\([^)]*\)|（[^）]*）|\*", "", str(value or ""))
+    text = re.sub(r"\s+", " ", text).strip().lower()
+    return LANGUAGE_ALIASES.get(text, text)
+
+
+def split_language_list(value: Any) -> list[str]:
+    values = split_text_list(value)
+    normalized: list[str] = []
+    for item in values:
+        language = normalize_language(item)
+        if language and language not in normalized:
+            normalized.append(language)
+    return normalized
+
 
 def split_text_list(value: Any) -> list[str]:
     if value is None:
@@ -87,7 +136,10 @@ class GamePreference(BaseModel):
     resolved_reference_games: list["ResolvedReferenceGame"] = Field(default_factory=list)
     players: int | None = None
     budget: float | None = None
-    language: str | None = None
+    region: str | None = None
+    budget_currency: str | None = None
+    preferred_languages: list[str] = Field(default_factory=list)
+    required_languages: list[str] = Field(default_factory=list)
     difficulty: str | None = None
     mood: str | None = None
     result_count: int = 5
@@ -136,6 +188,15 @@ class GamePreference(BaseModel):
         match = re.search(r"\d+(?:\.\d+)?", str(value))
         return float(match.group(0)) if match else None
 
+    @validator("region", "budget_currency", pre=True)
+    def _normalize_region_currency(cls, value: Any) -> str | None:
+        text = re.sub(r"\s+", "", str(value or "")).strip().upper()
+        return text or None
+
+    @validator("preferred_languages", "required_languages", pre=True)
+    def _normalize_languages(cls, value: Any) -> list[str]:
+        return split_language_list(value)
+
     @validator("players", pre=True)
     def _normalize_players(cls, value: Any) -> int | None:
         if value in (None, ""):
@@ -145,7 +206,7 @@ class GamePreference(BaseModel):
         match = re.search(r"\d+", str(value))
         return int(match.group(0)) if match else None
 
-    @validator("language", "difficulty", "mood", pre=True)
+    @validator("difficulty", "mood", pre=True)
     def _normalize_optional_text(cls, value: Any) -> str | None:
         text = re.sub(r"\s+", " ", str(value or "")).strip().lower()
         return text or None
@@ -263,16 +324,9 @@ class GameCandidate(BaseModel):
     review_total: int | None = None
     review_positive_ratio: float | None = None
     review_recent_ratio: float | None = None
-    index_source: str | None = None
-    score: float = 0.0
-    reasons: list[str] = Field(default_factory=list)
-    warnings: list[str] = Field(default_factory=list)
-    source_reasons: list[str] = Field(default_factory=list)
-    source_warnings: list[str] = Field(default_factory=list)
-    tier: str = ""
-    fit_points: list[str] = Field(default_factory=list)
-    risk_points: list[str] = Field(default_factory=list)
-    facts: "GameFacts" = Field(default_factory=lambda: GameFacts())
+    supported_languages: list[str] = Field(default_factory=list)
+    language_data_available: bool = False
+    internal_source_markers: list[str] = Field(default_factory=list)
     description: str | None = None
 
     @validator(
@@ -287,17 +341,13 @@ class GameCandidate(BaseModel):
     def _normalize_lists(cls, value: Any) -> list[str]:
         return split_text_list(value)
 
-    @validator(
-        "reasons",
-        "warnings",
-        "source_reasons",
-        "source_warnings",
-        "fit_points",
-        "risk_points",
-        pre=True,
-    )
-    def _normalize_display_lists(cls, value: Any) -> list[str]:
+    @validator("internal_source_markers", pre=True)
+    def _normalize_internal_markers(cls, value: Any) -> list[str]:
         return split_display_list(value)
+
+    @validator("supported_languages", pre=True)
+    def _normalize_supported_languages(cls, value: Any) -> list[str]:
+        return split_language_list(value)
 
     @validator("title", pre=True)
     def _normalize_title(cls, value: Any) -> str:
@@ -328,97 +378,87 @@ class SteamOwnedGame(BaseModel):
         extra = "ignore"
 
 
-class GameFacts(BaseModel):
-    constraint_status: str = "satisfied"
-    constraint_hits: list[str] = Field(default_factory=list)
-    constraint_violations: list[str] = Field(default_factory=list)
-    constraint_unknowns: list[str] = Field(default_factory=list)
-    platform_families: list[str] = Field(default_factory=list)
-    matched_platforms: list[str] = Field(default_factory=list)
-    missing_platforms: list[str] = Field(default_factory=list)
-    coop_modes: list[str] = Field(default_factory=list)
-    data_sources: list[str] = Field(default_factory=list)
-    hard_blocks: list[str] = Field(default_factory=list)
-    matched_like_terms: list[str] = Field(default_factory=list)
-    missing_like_terms: list[str] = Field(default_factory=list)
-    required_hits: list[str] = Field(default_factory=list)
-    required_misses: list[str] = Field(default_factory=list)
-    required_unknowns: list[str] = Field(default_factory=list)
-    has_coop: bool = False
-    has_local_coop: bool = False
-    has_online_coop: bool = False
-    has_split_screen: bool = False
-    has_remote_play: bool = False
-    ordinary_multiplayer: bool = False
-    singleplayer_only: bool = False
-    horror: bool = False
-    chinese: bool = False
-    switch2_only: bool = False
-    reference_similarity: float = 0.0
-    match_coverage: float = 0.0
-    match_score: float = 0.0
-    base_tag_score: float = 0.0
-    profile_weight_bonus: float = 0.0
-    diversity_penalty: float = 0.0
-    confidence: float = 0.0
-    tag_coverage_score: float = 0.0
-    positive_reference_score: float = 0.0
-    negative_reference_score: float = 0.0
-    library_profile_score: float = 0.0
-    review_confidence_score: float = 0.0
-    base_relevance_score: float = 0.0
-    embedding_similarity_score: float = 0.0
-    reranked_relevance_score: float = 0.0
+class ScoreBreakdown(BaseModel):
+    tag_coverage: float = 0.0
+    positive_reference: float | None = None
+    library_profile: float | None = None
+    review_reputation: float = 0.0
+    popularity: float = 0.0
+    data_completeness: float = 0.0
+    positive_score: float = 0.0
+    negative_reference_penalty: float = 0.0
+    unknown_constraints_penalty: float = 0.0
+    budget_adjustment: float = 0.0
 
     @validator(
-        "platform_families",
-        "constraint_hits",
-        "constraint_violations",
-        "constraint_unknowns",
-        "matched_platforms",
-        "missing_platforms",
-        "coop_modes",
-        "data_sources",
-        "hard_blocks",
-        "matched_like_terms",
-        "missing_like_terms",
-        "required_hits",
-        "required_misses",
-        "required_unknowns",
+        "tag_coverage",
+        "positive_reference",
+        "library_profile",
+        "review_reputation",
+        "popularity",
+        "data_completeness",
         pre=True,
     )
-    def _normalize_lists(cls, value: Any) -> list[str]:
-        return split_display_list(value)
-
-    @validator(
-        "reference_similarity",
-        "match_coverage",
-        "match_score",
-        "base_tag_score",
-        "profile_weight_bonus",
-        "diversity_penalty",
-        "confidence",
-        "tag_coverage_score",
-        "positive_reference_score",
-        "negative_reference_score",
-        "library_profile_score",
-        "review_confidence_score",
-        "base_relevance_score",
-        "embedding_similarity_score",
-        "reranked_relevance_score",
-        pre=True,
-    )
-    def _normalize_float(cls, value: Any) -> float:
+    def _normalize_ratio(cls, value: Any) -> float | None:
+        if value is None:
+            return None
         try:
             number = float(value)
         except (TypeError, ValueError):
             number = 0.0
         return min(max(number, 0.0), 1.0)
 
-    @validator("constraint_status", pre=True)
-    def _normalize_constraint_status(cls, value: Any) -> str:
-        status = str(value or "").strip().lower()
-        return status if status in {"satisfied", "violated", "unknown"} else "satisfied"
+    @validator("positive_score", pre=True)
+    def _normalize_positive_score(cls, value: Any) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = 0.0
+        return min(max(number, 0.0), 100.0)
+
+    @validator("negative_reference_penalty", pre=True)
+    def _normalize_negative_penalty(cls, value: Any) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = 0.0
+        return min(max(number, 0.0), 20.0)
+
+    @validator("unknown_constraints_penalty", pre=True)
+    def _normalize_unknown_penalty(cls, value: Any) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = 0.0
+        return min(max(number, 0.0), 15.0)
+
+    @validator("budget_adjustment", pre=True)
+    def _normalize_budget_adjustment(cls, value: Any) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = 0.0
+        return min(max(number, -5.0), 5.0)
+
+    class Config:
+        extra = "ignore"
+
+
+class RecommendationEvidence(BaseModel):
+    evidence_id: str
+    category: str
+    sentiment: str
+    text: str
+    important: bool = False
+
+    @validator("evidence_id", "category", "text", pre=True)
+    def _normalize_text(cls, value: Any) -> str:
+        return re.sub(r"\s+", " ", str(value or "")).strip()
+
+    @validator("sentiment", pre=True)
+    def _normalize_sentiment(cls, value: Any) -> str:
+        sentiment = str(value or "").strip().lower()
+        return sentiment if sentiment in {"positive", "negative", "uncertain"} else "positive"
 
     class Config:
         extra = "ignore"
@@ -444,21 +484,37 @@ class GamePriceSummary(BaseModel):
 
 
 class RankedGame(GameCandidate):
+    score: int = 0
+    score_breakdown: ScoreBreakdown = Field(default_factory=ScoreBreakdown)
+    recommendation_evidence: list[RecommendationEvidence] = Field(default_factory=list)
+    recommendation_reason: str = ""
     price_summary: GamePriceSummary | None = None
+
+    @validator("score", pre=True)
+    def _normalize_score(cls, value: Any) -> int:
+        try:
+            number = round(float(value))
+        except (TypeError, ValueError):
+            number = 0
+        return min(max(number, 0), 100)
+
+    @validator("recommendation_reason", pre=True)
+    def _normalize_reason(cls, value: Any) -> str:
+        return re.sub(r"\s+", " ", str(value or "")).strip()
 
     @classmethod
     def from_candidate(
         cls,
         candidate: GameCandidate,
-        score: float,
-        reasons: list[str],
-        warnings: list[str],
+        score: int,
+        score_breakdown: ScoreBreakdown,
+        recommendation_evidence: list[RecommendationEvidence],
     ) -> "RankedGame":
         dumper = getattr(candidate, "model_dump", None)
         data = dumper() if dumper else candidate.dict()
-        data["score"] = round(score, 2)
-        data["reasons"] = reasons
-        data["warnings"] = warnings
+        data["score"] = score
+        data["score_breakdown"] = score_breakdown
+        data["recommendation_evidence"] = recommendation_evidence
         validator = getattr(cls, "model_validate", None)
         return validator(data) if validator else cls.parse_obj(data)
 
@@ -469,5 +525,3 @@ try:
     RankedGame.model_rebuild()
 except AttributeError:  # pydantic v1
     GamePreference.update_forward_refs(ResolvedReferenceGame=ResolvedReferenceGame)
-    GameCandidate.update_forward_refs(GameFacts=GameFacts)
-    RankedGame.update_forward_refs(GameFacts=GameFacts)

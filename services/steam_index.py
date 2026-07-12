@@ -36,6 +36,7 @@ STEAM_INDEX_MAX_SEARCHES_PER_ROUND = 8
 STEAM_INDEX_SEARCH_RESULTS_PER_TERM = 10
 STEAM_INDEX_MAX_NEW_APPIDS_PER_ROUND = 60
 STEAM_HTTP_CONCURRENCY = 6
+USABLE_SCORE_THRESHOLD = 38
 SNAPSHOT_STORAGE_TTL_HOURS = 24 * 3650
 REFERENCE_MATCH_THRESHOLD = 0.75
 
@@ -119,7 +120,7 @@ class SteamGameIndexService:
         )
         ranked = exclude_previously_shown(ranked, excluded_appids, excluded_titles)
         quality_target = max(10, max(int(limit), 0) * 2)
-        quality_count = sum(game.tier in {"strong", "recommended"} for game in ranked)
+        quality_count = sum(game.score >= USABLE_SCORE_THRESHOLD for game in ranked)
         if quality_count >= quality_target and references_are_resolved(preference):
             return ranked[:limit]
 
@@ -395,10 +396,11 @@ class SteamGameIndexService:
     async def enrich_candidate(self, candidate: GameCandidate) -> GameCandidate:
         has_steam_tags = await self.ensure_steam_tag_aliases()
         data = dump_model(candidate)
-        data["index_source"] = "steam_index"
-        reasons = list(data.get("source_reasons") or [])
-        if has_steam_tags and "tag_enrichment:steam_popular_tags" not in reasons:
-            reasons.append("tag_enrichment:steam_popular_tags")
+        markers = list(data.get("internal_source_markers") or [])
+        if "steam_index" not in markers:
+            markers.append("steam_index")
+        if has_steam_tags and "tag_enrichment:steam_popular_tags" not in markers:
+            markers.append("tag_enrichment:steam_popular_tags")
         appid = data.get("appid")
         if appid is not None and hasattr(self.steam_client, "get_store_page_tags"):
             try:
@@ -407,9 +409,9 @@ class SteamGameIndexService:
                 store_tags = []
             if store_tags:
                 data["ordered_tags"] = dedupe_texts(store_tags)
-                if "tag_enrichment:steam_store_page_tags" not in reasons:
-                    reasons.append("tag_enrichment:steam_store_page_tags")
-        data["source_reasons"] = reasons
+                if "tag_enrichment:steam_store_page_tags" not in markers:
+                    markers.append("tag_enrichment:steam_store_page_tags")
+        data["internal_source_markers"] = markers
 
         enriched_candidate = validate_candidate(data)
         direct_tags = canonical_tags_from_terms(
@@ -417,9 +419,9 @@ class SteamGameIndexService:
         )
         if direct_tags:
             data["tags"] = dedupe_texts([*(data.get("tags") or []), *direct_tags])
-            if "tag_enrichment:steam_detail" not in reasons:
-                reasons.append("tag_enrichment:steam_detail")
-            data["source_reasons"] = reasons
+            if "tag_enrichment:steam_detail" not in markers:
+                markers.append("tag_enrichment:steam_detail")
+            data["internal_source_markers"] = markers
         if enriched_candidate.description:
             inferred_tags = canonical_tags_from_terms(
                 extract_description_terms(enriched_candidate.description)
@@ -796,11 +798,11 @@ def mark_reference_query(
     polarity: str = "like",
 ) -> GameCandidate:
     data = dump_model(candidate)
-    reasons = list(data.get("source_reasons") or [])
+    markers = list(data.get("internal_source_markers") or [])
     marker = f"reference_query:{polarity}:{query}"
-    if marker not in reasons:
-        reasons.append(marker)
-    data["source_reasons"] = reasons
+    if marker not in markers:
+        markers.append(marker)
+    data["internal_source_markers"] = markers
     return validate_candidate(data)
 
 

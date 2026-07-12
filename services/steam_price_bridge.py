@@ -10,7 +10,14 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
 
-from ..storage.models import GamePreference, GamePriceSummary, RankedGame
+from ..storage.models import (
+    GamePreference,
+    GamePriceSummary,
+    RankedGame,
+    RecommendationEvidence,
+    ScoreBreakdown,
+)
+from .similarity_ranker import clamp_score, ranked_game_sort_key
 
 logger = logging.getLogger(__name__)
 
@@ -155,15 +162,7 @@ class SteamPriceBridge:
         )
         if preference.budget is None:
             return enriched
-        original_order = {id(game): index for index, game in enumerate(enriched)}
-        return sorted(
-            enriched,
-            key=lambda game: (
-                tier_order(game.tier),
-                -float(game.score),
-                original_order[id(game)],
-            ),
-        )
+        return sorted(enriched, key=ranked_game_sort_key)
 
     async def lookup(self, title: str, country: str | None = None) -> GamePriceSummary | None:
         if not self.is_available() or not title.strip():
@@ -293,54 +292,64 @@ def attach_price_summary(
 
     data = dump_model(game)
     data["price_summary"] = summary
-    score = float(game.score)
-    reasons = list(game.reasons)
-    warnings = list(game.warnings)
+    adjustment = 0.0
+    evidence = [item for item in game.recommendation_evidence if item.category != "budget"]
     budget = preference.budget
 
     if budget is not None:
-        if summary.current_cny is not None:
-            if summary.current_cny <= budget:
-                score += 5
-                append_unique(
-                    reasons,
+        if summary.current_cny is None:
+            adjustment = -2.0
+            evidence.append(
+                budget_evidence(
+                    "budget_price_unknown",
+                    "uncertain",
+                    "当前价格未获取，预算匹配无法确认",
+                )
+            )
+        elif summary.current_cny <= budget:
+            adjustment = 5.0
+            evidence.append(
+                budget_evidence(
+                    "budget_current_within",
+                    "positive",
                     (
                         f"当前价 {summary.current_price or format_cny(summary.current_cny)} "
                         f"在预算 {format_budget(budget)} 以内"
                     ),
                 )
-            elif summary.lowest_cny is not None and summary.lowest_cny <= budget:
-                append_unique(
-                    warnings,
+            )
+        elif summary.lowest_cny is not None and summary.lowest_cny <= budget:
+            evidence.append(
+                budget_evidence(
+                    "budget_historic_within",
+                    "negative",
                     (
                         f"当前价 {summary.current_price or format_cny(summary.current_cny)} "
                         f"高于预算 {format_budget(budget)}，但史低 "
-                        f"{summary.lowest_price or format_cny(summary.lowest_cny)} "
-                        "进过预算"
+                        f"{summary.lowest_price or format_cny(summary.lowest_cny)} 进过预算"
                     ),
                 )
-            else:
-                score -= 5
-                append_unique(
-                    warnings,
+            )
+        else:
+            adjustment = -5.0
+            evidence.append(
+                budget_evidence(
+                    "budget_over",
+                    "negative",
                     (
                         f"当前价 {summary.current_price or format_cny(summary.current_cny)} "
                         f"高于预算 {format_budget(budget)}"
                     ),
+                    important=True,
                 )
-        elif summary.lowest_cny is not None and summary.lowest_cny <= budget:
-            score += 1
-            append_unique(
-                reasons,
-                (
-                    f"史低 {summary.lowest_price or format_cny(summary.lowest_cny)} "
-                    f"进过预算 {format_budget(budget)}"
-                ),
             )
 
-    data["score"] = round(score, 2)
-    data["reasons"] = reasons
-    data["warnings"] = warnings
+    data["score"] = clamp_score(game.score + adjustment)
+    data["score_breakdown"] = copy_score_breakdown(
+        game.score_breakdown,
+        budget_adjustment=adjustment,
+    )
+    data["recommendation_evidence"] = evidence
     return validate_ranked_game(data)
 
 
@@ -383,15 +392,46 @@ def has_steam_purchase_signal(game: RankedGame) -> bool:
 
 def attach_missing_price_warning(game: RankedGame) -> RankedGame:
     data = dump_model(game)
-    warnings = list(game.warnings)
-    append_unique(warnings, "Steam 价格未获取到，预算匹配无法确认")
-    data["score"] = round(float(game.score) - 2, 2)
-    data["warnings"] = warnings
+    evidence = [item for item in game.recommendation_evidence if item.category != "budget"]
+    evidence.append(
+        budget_evidence(
+            "budget_price_unknown",
+            "uncertain",
+            "Steam 价格未获取到，预算匹配无法确认",
+        )
+    )
+    data["score"] = clamp_score(game.score - 2)
+    data["score_breakdown"] = copy_score_breakdown(
+        game.score_breakdown,
+        budget_adjustment=-2.0,
+    )
+    data["recommendation_evidence"] = evidence
     return validate_ranked_game(data)
 
 
-def tier_order(tier: str) -> int:
-    return {"strong": 0, "recommended": 1, "backup": 2}.get(tier, 9)
+def budget_evidence(
+    evidence_id: str,
+    sentiment: str,
+    text: str,
+    important: bool = False,
+) -> RecommendationEvidence:
+    return RecommendationEvidence(
+        evidence_id=evidence_id,
+        category="budget",
+        sentiment=sentiment,
+        text=text,
+        important=important,
+    )
+
+
+def copy_score_breakdown(
+    breakdown: ScoreBreakdown,
+    budget_adjustment: float,
+) -> ScoreBreakdown:
+    copier = getattr(breakdown, "model_copy", None)
+    if copier:
+        return copier(update={"budget_adjustment": budget_adjustment})
+    return breakdown.copy(update={"budget_adjustment": budget_adjustment})
 
 
 def cny_value(value: Decimal, currency: str) -> float | None:
@@ -426,11 +466,6 @@ def service_today(history: Any) -> Any:
         or getattr(history, "lowest_date", None)
         or date.today()
     )
-
-
-def append_unique(values: list[str], text: str) -> None:
-    if text and text not in values:
-        values.append(text)
 
 
 def dump_model(model: Any) -> dict[str, Any]:

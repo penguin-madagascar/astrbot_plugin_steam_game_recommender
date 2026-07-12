@@ -30,14 +30,19 @@ PREFERENCE_SCHEMA_HINT = """
   "library_filter_mode": null,
   "players": null,
   "budget": null,
-  "language": null,
+  "region": null,
+  "budget_currency": null,
+  "preferred_languages": [],
+  "required_languages": [],
   "difficulty": null,
   "mood": null,
   "result_count": 5
 }
 说明：
 - required_tags 只放用户用“必须”“一定要”“只接受”等措辞明确要求的硬条件，
-  使用规范标签，例如 chinese、local_coop、online_coop、multiplayer。
+  使用规范标签，例如 local_coop、online_coop、multiplayer；语言不要放在这里。
+- preferred_languages 放用户偏好的语言，required_languages 只放明确的语言硬条件；
+  简体中文使用 schinese，繁体中文使用 tchinese，不要混为同一种语言。
 - genres_like 放用户明确说出的类型/玩法标签。
 - extra_tags 放你从自然语言总结出的补充标签，例如“轻松”“本地合作”“剧情合作”“短流程”。
 - reference_games_like 只放用户提到的相似游戏名，不要把相似游戏扩写成推荐结果。

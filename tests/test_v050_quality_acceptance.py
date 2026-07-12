@@ -5,7 +5,10 @@ from __future__ import annotations
 import unittest
 from statistics import fmean
 
-_astrbot_stubs = __import__("tests.test_prepare_recommendation")
+try:
+    _astrbot_stubs = __import__("tests.test_prepare_recommendation")
+except ModuleNotFoundError:
+    _astrbot_stubs = __import__("test_prepare_recommendation")
 
 from astrbot_plugin_game_recommender.services.played_filter import (
     filter_games_by_library_mode,
@@ -19,12 +22,12 @@ from astrbot_plugin_game_recommender.services.recommendation_evaluation import (
 )
 from astrbot_plugin_game_recommender.services.similarity_ranker import (
     build_profile_from_preference,
+    ranked_game_sort_key,
     rank_steam_candidates,
 )
 from astrbot_plugin_game_recommender.services.steam_price_bridge import (
     attach_missing_price_warning,
     attach_price_summary,
-    tier_order,
 )
 from astrbot_plugin_game_recommender.services.tag_normalizer import (
     register_steam_tag_aliases,
@@ -36,7 +39,10 @@ from astrbot_plugin_game_recommender.storage.models import (
     SteamOwnedGame,
 )
 
-from tests.recommendation_scenario_loader import load_recommendation_quality_fixture
+try:
+    from tests.recommendation_scenario_loader import load_recommendation_quality_fixture
+except ModuleNotFoundError:
+    from recommendation_scenario_loader import load_recommendation_quality_fixture
 
 REFERENCE_TAGS = {
     "reference-stardew-positive": (
@@ -129,7 +135,15 @@ def evaluate_current_scenario(scenario: dict) -> dict[str, float]:
             stores=["Steam"],
             review_total=500,
             review_positive_ratio=0.8,
-            index_source="steam_index",
+            supported_languages=(
+                ["schinese"]
+                if "chinese" in item["tags"]
+                else ["english"]
+                if "english_only" in item["tags"]
+                else []
+            ),
+            language_data_available=bool({"chinese", "english_only"}.intersection(item["tags"])),
+            internal_source_markers=["steam_index"],
         )
         for index, item in enumerate(scenario["candidates"], 1)
     ]
@@ -220,7 +234,7 @@ def apply_scenario_filters(
                         preference,
                     )
                 )
-        ranked = sorted(priced, key=lambda game: (tier_order(game.tier), -game.score))
+        ranked = sorted(priced, key=ranked_game_sort_key)
     return ranked
 
 

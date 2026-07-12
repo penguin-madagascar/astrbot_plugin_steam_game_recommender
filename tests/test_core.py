@@ -25,7 +25,7 @@ class PreferenceFallbackTest(unittest.TestCase):
         self.assertEqual(preference.players, 2)
         self.assertEqual(preference.budget, 100)
         self.assertIn("horror", preference.genres_dislike)
-        self.assertEqual(preference.language, "中文")
+        self.assertEqual(preference.preferred_languages, ["schinese"])
 
 
 class SimilarityRankerCoreTest(unittest.TestCase):
@@ -48,7 +48,10 @@ class SimilarityRankerCoreTest(unittest.TestCase):
             [game.title for game in ranked],
             ["Focused Match", "Generic Co-op"],
         )
-        self.assertGreater(ranked[0].facts.match_score, ranked[1].facts.match_score)
+        self.assertGreater(
+            ranked[0].score_breakdown.tag_coverage,
+            ranked[1].score_breakdown.tag_coverage,
+        )
 
 
 def steam_game(title: str, tags: list[str], reviews: int = 500) -> GameCandidate:

@@ -30,6 +30,7 @@ from astrbot_plugin_game_recommender.storage.models import (  # noqa: E402
     GamePreference,
     GamePriceSummary,
     RankedGame,
+    RecommendationEvidence,
 )
 from astrbot_plugin_steam_price_heybox.models import (  # noqa: E402
     GameIdentity,
@@ -177,7 +178,14 @@ class PriceFormattingTest(unittest.TestCase):
             platforms=["PC"],
             stores=["Steam"],
             score=10,
-            reasons=["Steam 好评率 95%", "Metacritic 92"],
+            recommendation_evidence=[
+                RecommendationEvidence(
+                    evidence_id="review_reputation",
+                    category="reviews",
+                    sentiment="positive",
+                    text="Steam 好评率 95%",
+                )
+            ],
         )
 
         text = "\n".join(format_game_block(1, game))
@@ -192,16 +200,14 @@ class PriceFormattingTest(unittest.TestCase):
                 platforms=["PC", "Nintendo Switch 2"],
                 stores=["Steam"],
                 score=20,
-                reasons=["双人合作核心玩法"],
-                warnings=["Nintendo 侧为 Switch 2，不是原版 Switch"],
+                recommendation_reason="双人合作是核心玩法。口碑表现稳定。",
             ),
             RankedGame(
                 title="Unravel Two",
                 platforms=["PC", "Nintendo Switch"],
                 stores=["Steam", "Nintendo Store"],
                 score=19,
-                reasons=["同屏合作解谜平台玩法"],
-                warnings=["Steam 价格未获取到"],
+                recommendation_reason="主打同屏合作解谜。适合双人游玩。",
             ),
         ]
 
@@ -230,13 +236,13 @@ class PriceFormattingTest(unittest.TestCase):
             platforms=["PC"],
             stores=["Steam"],
             score=10,
-            reasons=["双人合作核心玩法"],
+            recommendation_reason="双人合作是核心玩法。建议结合个人偏好选择。",
         )
 
         text = "\n".join(format_game_block(1, game))
 
         self.assertNotIn("暂未发现明显不适合点", text)
-        self.assertIn("仍需以商店页面确认", text)
+        self.assertIn("建议结合个人偏好选择", text)
 
     def test_game_detail_appends_price_summary_when_available(self) -> None:
         game = GameCandidate(title="Test Game", platforms=["PC"], stores=["Steam"])
@@ -257,7 +263,13 @@ class EmptyFallbackFormattingTest(unittest.IsolatedAsyncioTestCase):
             FakeEvent(),
             "provider-1",
             GamePreference(result_count=1),
-            [RankedGame(title="Verified Game", score=80, fit_points=["Steam 标签匹配"])],
+            [
+                RankedGame(
+                    title="Verified Game",
+                    score=80,
+                    recommendation_reason="Steam 标签匹配。口碑表现稳定。",
+                )
+            ],
             limit=1,
         )
 
@@ -408,7 +420,7 @@ class PriceBridgeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [game.title for game in enriched],
-            ["Expensive Game", "Budget Game"],
+            ["Budget Game", "Expensive Game"],
         )
         self.assertEqual(enriched[0].score, 95)
         self.assertEqual(enriched[1].score, 95)
@@ -531,7 +543,8 @@ class BudgetScoringTest(unittest.TestCase):
         )
 
         self.assertGreater(enriched.score, game.score)
-        self.assertTrue(any("预算" in reason for reason in enriched.reasons))
+        self.assertEqual(enriched.score_breakdown.budget_adjustment, 5)
+        self.assertTrue(any("预算" in item.text for item in enriched.recommendation_evidence))
 
     def test_lowest_price_inside_budget_warns_but_keeps_game(self) -> None:
         game = RankedGame(title="Sale Game", score=10)
@@ -541,9 +554,12 @@ class BudgetScoringTest(unittest.TestCase):
             GamePreference(budget=100),
         )
 
-        self.assertGreaterEqual(enriched.score, game.score)
+        self.assertEqual(enriched.score, game.score)
         self.assertTrue(
-            any("史低" in warning and "预算" in warning for warning in enriched.warnings)
+            any(
+                "史低" in item.text and "预算" in item.text
+                for item in enriched.recommendation_evidence
+            )
         )
 
     def test_price_over_budget_penalizes_without_filtering(self) -> None:
@@ -556,7 +572,8 @@ class BudgetScoringTest(unittest.TestCase):
 
         self.assertEqual(enriched.title, "Expensive Game")
         self.assertLess(enriched.score, game.score)
-        self.assertTrue(any("高于预算" in warning for warning in enriched.warnings))
+        self.assertEqual(enriched.score_breakdown.budget_adjustment, -5)
+        self.assertTrue(any("高于预算" in item.text for item in enriched.recommendation_evidence))
 
     def test_missing_price_for_budget_request_lowers_score(self) -> None:
         game = RankedGame(title="Unknown Price Game", score=10)
@@ -564,7 +581,8 @@ class BudgetScoringTest(unittest.TestCase):
         enriched = attach_missing_price_warning(game)
 
         self.assertLess(enriched.score, game.score)
-        self.assertTrue(any("价格未获取" in warning for warning in enriched.warnings))
+        self.assertEqual(enriched.score_breakdown.budget_adjustment, -2)
+        self.assertTrue(any("价格未获取" in item.text for item in enriched.recommendation_evidence))
 
 
 def price_summary(current_cny: float, lowest_cny: float) -> GamePriceSummary:

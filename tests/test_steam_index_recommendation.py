@@ -18,7 +18,9 @@ class SteamIndexModelTest(unittest.TestCase):
             "review_positive_ratio",
             "review_recent_ratio",
             "release_date",
-            "index_source",
+            "supported_languages",
+            "language_data_available",
+            "internal_source_markers",
         ):
             self.assertIn(field, fields)
 
@@ -112,8 +114,13 @@ class SimilarityRankerTest(unittest.TestCase):
             [game.title for game in ranked],
             ["Lower Review Better Match", "High Review Generic Co-op"],
         )
-        self.assertGreater(ranked[0].facts.match_score, ranked[1].facts.match_score)
-        self.assertTrue(any("相似标签" in reason for reason in ranked[0].fit_points))
+        self.assertGreater(
+            ranked[0].score_breakdown.tag_coverage,
+            ranked[1].score_breakdown.tag_coverage,
+        )
+        self.assertTrue(
+            any(item.evidence_id == "tag_match" for item in ranked[0].recommendation_evidence)
+        )
 
     def test_excludes_disliked_tags_and_singleplayer_only_candidates(self) -> None:
         ranker = optional_import("astrbot_plugin_game_recommender.services.similarity_ranker")
@@ -295,8 +302,8 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("farming sim", enriched.ordered_tags)
         self.assertIn("life sim", enriched.ordered_tags)
-        self.assertIn("tag_enrichment:steam_popular_tags", enriched.source_reasons)
-        self.assertIn("tag_enrichment:steam_store_page_tags", enriched.source_reasons)
+        self.assertIn("tag_enrichment:steam_popular_tags", enriched.internal_source_markers)
+        self.assertIn("tag_enrichment:steam_store_page_tags", enriched.internal_source_markers)
 
     async def test_steam_store_tags_improve_recommendation_ranking(self) -> None:
         index_module = optional_import("astrbot_plugin_game_recommender.services.steam_index")
@@ -375,7 +382,7 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
             GamePreference(
                 platforms=["steam"],
                 genres_like=["co-op", "local co-op", "puzzle", "casual"],
-                language="中文",
+                preferred_languages=["schinese"],
                 result_count=2,
             ),
             limit=2,
@@ -385,7 +392,7 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
             [game.title for game in ranked],
             ["Better Local Puzzle", "Generic High Review"],
         )
-        self.assertEqual(ranked[0].index_source, "steam_index")
+        self.assertIn("steam_index", ranked[0].internal_source_markers)
 
 
 def optional_import(module_name: str):
@@ -412,7 +419,7 @@ def steam_index_game(
         review_total=review_total,
         review_positive_ratio=review_positive_ratio,
         review_recent_ratio=review_positive_ratio,
-        index_source="steam_index",
+        internal_source_markers=["steam_index"],
     )
 
 

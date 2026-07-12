@@ -233,8 +233,8 @@ class OwnedAwareSteamIndex:
 
     async def recommend(self, _preference, **_kwargs):
         return [
-            RankedGame(appid=1, title="Owned Game", score=90, tier="strong"),
-            RankedGame(appid=2, title="Fresh Game", score=80, tier="strong"),
+            RankedGame(appid=1, title="Owned Game", score=90),
+            RankedGame(appid=2, title="Fresh Game", score=80),
         ]
 
 

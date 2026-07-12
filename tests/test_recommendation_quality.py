@@ -6,7 +6,6 @@ from typing import Any
 from astrbot_plugin_game_recommender.services.similarity_ranker import (
     build_profile_from_preference,
     rank_steam_candidates,
-    select_diverse_results,
 )
 from astrbot_plugin_game_recommender.services.steam_index import SteamGameIndexService
 from astrbot_plugin_game_recommender.storage.models import GameCandidate, GamePreference
@@ -59,7 +58,7 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(ranked[0].title, "Focused Co-op Puzzle")
         self.assertNotIn("It Takes Two", [game.title for game in ranked])
-        self.assertIn("puzzle", ranked[0].facts.matched_like_terms)
+        self.assertTrue(any("puzzle" in item.text for item in ranked[0].recommendation_evidence))
         self.assertTrue(any(call["search"] == "双人成行" for call in steam.calls))
 
     async def test_reference_search_terms_and_tags_find_dark_souls_like_games(self) -> None:
@@ -123,8 +122,8 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([game.title for game in ranked], ["Puzzle Team", "Kitchen Shift"])
         self.assertNotIn("Overcooked", [game.title for game in ranked])
         self.assertGreater(
-            ranked[1].facts.negative_reference_score,
-            ranked[0].facts.negative_reference_score,
+            ranked[1].score_breakdown.negative_reference_penalty,
+            ranked[0].score_breakdown.negative_reference_penalty,
         )
 
     async def test_cached_index_orders_tag_coverage_before_reviews(self) -> None:
@@ -167,7 +166,10 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
             [game.title for game in ranked],
             ["Lower Review Better Match", "High Review Generic Co-op"],
         )
-        self.assertGreater(ranked[0].facts.match_score, ranked[1].facts.match_score)
+        self.assertGreater(
+            ranked[0].score_breakdown.tag_coverage,
+            ranked[1].score_breakdown.tag_coverage,
+        )
 
     async def test_cached_index_defaults_to_strict_primary_ranking(self) -> None:
         cache = MemoryCache(
@@ -257,28 +259,6 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([game.title for game in ranked], ["Safe Co-op Puzzle"])
 
-    def test_diversity_rerank_only_changes_equal_primary_matches(self) -> None:
-        ranked = rank_steam_candidates(
-            [
-                steam_game("Farm Co-op A", ["Co-op", "Puzzle", "Farming", "Crafting"]),
-                steam_game("Farm Co-op B", ["Co-op", "Puzzle", "Farming", "Crafting"]),
-                steam_game("Story Co-op", ["Co-op", "Puzzle", "Story Rich", "Choices Matter"]),
-                steam_game("Lower Match Builder", ["Co-op", "Building", "Automation"]),
-            ],
-            build_profile_from_preference(
-                GamePreference(platforms=["steam"], genres_like=["co-op", "puzzle"])
-            ),
-        )
-
-        selected = select_diverse_results(ranked, limit=4)
-
-        self.assertEqual(
-            [game.title for game in selected],
-            ["Farm Co-op A", "Story Co-op", "Farm Co-op B", "Lower Match Builder"],
-        )
-        self.assertGreater(selected[2].facts.diversity_penalty, 0)
-        self.assertLess(selected[3].facts.match_score, selected[2].facts.match_score)
-
 
 def steam_game(
     title: str,
@@ -298,7 +278,7 @@ def steam_game(
         review_total=reviews,
         review_positive_ratio=ratio,
         review_recent_ratio=ratio,
-        index_source="steam_index",
+        internal_source_markers=["steam_index"],
     )
 
 

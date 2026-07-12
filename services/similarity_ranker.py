@@ -5,16 +5,30 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..storage.models import GameCandidate, GameFacts, GamePreference, RankedGame
-from .constraint_evaluator import evaluate_candidate_constraints
+from ..storage.models import (
+    GameCandidate,
+    GamePreference,
+    RankedGame,
+    RecommendationEvidence,
+    ScoreBreakdown,
+    split_language_list,
+)
+from .constraint_evaluator import ConstraintAssessment, evaluate_candidate_constraints
 from .tag_normalizer import (
     candidate_canonical_tags,
     canonical_tags_from_terms,
     extract_description_terms,
 )
 
-TIER_ORDER = {"strong": 0, "recommended": 1, "backup": 2}
 MULTIPLAYER_TAGS = {"co_op", "local_coop", "online_coop", "multiplayer"}
+POSITIVE_COMPONENT_WEIGHTS = {
+    "tag_coverage": 50.0,
+    "positive_reference": 15.0,
+    "library_profile": 10.0,
+    "review_reputation": 10.0,
+    "popularity": 10.0,
+    "data_completeness": 5.0,
+}
 TAG_WEIGHTS = {
     "co_op": 1.5,
     "local_coop": 1.6,
@@ -27,7 +41,18 @@ TAG_WEIGHTS = {
     "crafting": 1.25,
     "building": 1.2,
     "management": 1.2,
-    "chinese": 1.1,
+}
+LANGUAGE_LABELS = {
+    "schinese": "简体中文",
+    "tchinese": "繁体中文",
+    "english": "英语",
+    "japanese": "日语",
+    "koreana": "韩语",
+    "french": "法语",
+    "german": "德语",
+    "spanish": "西班牙语",
+    "russian": "俄语",
+    "portuguese": "葡萄牙语",
 }
 
 
@@ -36,6 +61,8 @@ class SteamTagProfile:
     include_tags: list[str] = field(default_factory=list)
     required_tags: list[str] = field(default_factory=list)
     exclude_tags: list[str] = field(default_factory=list)
+    preferred_languages: list[str] = field(default_factory=list)
+    required_languages: list[str] = field(default_factory=list)
     reference_titles: list[str] = field(default_factory=list)
     reference_titles_dislike: list[str] = field(default_factory=list)
     reference_appids: list[int] = field(default_factory=list)
@@ -55,8 +82,6 @@ def build_profile_from_preference(
 
     if preference.players and preference.players >= 2:
         include = merge_tags(include, ["co_op", "multiplayer"])
-    if preference.language and ("中文" in preference.language or "chinese" in preference.language):
-        include = merge_tags(include, ["chinese"])
     if preference.difficulty and any(
         word in preference.difficulty for word in ("easy", "简单", "轻松", "休闲")
     ):
@@ -71,6 +96,8 @@ def build_profile_from_preference(
         include_tags=include,
         required_tags=required,
         exclude_tags=exclude,
+        preferred_languages=split_language_list(preference.preferred_languages),
+        required_languages=split_language_list(preference.required_languages),
         reference_titles=list(preference.reference_games_like),
         reference_titles_dislike=list(preference.reference_games_dislike),
         reference_appids=[
@@ -101,6 +128,8 @@ def rank_steam_candidates(
     idf = compute_tag_idf([ordered_tag_sequence(candidate) for candidate in candidates])
     review_prior = candidate_pool_review_prior(candidates)
     prior_strength = max(int(min_review_count), 50)
+    desired_languages = merge_tags(profile.preferred_languages, profile.required_languages)
+
     for candidate in candidates:
         reference_appids = {*profile.reference_appids, *profile.reference_appids_dislike}
         if (
@@ -110,18 +139,25 @@ def rank_steam_candidates(
             [*profile.reference_titles, *profile.reference_titles_dislike],
         ):
             continue
+
         constraints = evaluate_candidate_constraints(
             candidate,
             required_tags=profile.required_tags,
             exclude_tags=profile.exclude_tags,
+            required_languages=profile.required_languages,
         )
         if constraints.status == "violated":
             continue
-        tags = candidate_canonical_tags(candidate)
 
+        tags = candidate_canonical_tags(candidate)
         matched = [tag for tag in profile.include_tags if tag in tags]
         missing = [tag for tag in profile.include_tags if tag not in matched]
-        tag_coverage = weighted_overlap(matched, profile.include_tags)
+        tag_coverage = preference_coverage(
+            matched,
+            profile.include_tags,
+            candidate,
+            desired_languages,
+        )
         candidate_weights = candidate_tag_weights(candidate, idf)
         positive_reference = maximum_reference_similarity(
             candidate_weights,
@@ -134,219 +170,332 @@ def rank_steam_candidates(
             idf,
         )
         library_profile = profile_weight_bonus(tags, profile_weights) if profile_weights else None
-        data_confidence = confidence_for(candidate, tags)
         review_reputation = bayesian_review_score(
             candidate,
             prior=review_prior,
             prior_strength=prior_strength,
         )
-        review_confidence = min(review_reputation * 0.8 + data_confidence * 0.2, 1.0)
-        base_relevance = blend_relevance_components(
-            tag_coverage=tag_coverage if profile.include_tags else None,
+        popularity = popularity_score(candidate.review_total)
+        completeness = data_completeness_score(
+            candidate, language_requested=bool(desired_languages)
+        )
+        positive_score = weighted_positive_score(
+            tag_coverage=tag_coverage,
             positive_reference=(
                 positive_reference if profile.positive_reference_candidates else None
             ),
             library_profile=library_profile,
-            review_confidence=review_confidence,
+            review_reputation=review_reputation,
+            popularity=popularity,
+            data_completeness=completeness,
+        )
+        negative_penalty = min(max(negative_reference, 0.0), 1.0) * 20.0
+        unknown_penalty = unknown_constraint_penalty(constraints, profile)
+        score = clamp_score(positive_score - negative_penalty - unknown_penalty)
+        breakdown = ScoreBreakdown(
+            tag_coverage=tag_coverage,
+            positive_reference=(
+                positive_reference if profile.positive_reference_candidates else None
+            ),
+            library_profile=library_profile,
+            review_reputation=review_reputation,
+            popularity=popularity,
+            data_completeness=completeness,
+            positive_score=positive_score,
+            negative_reference_penalty=negative_penalty,
+            unknown_constraints_penalty=unknown_penalty,
+        )
+        evidence = build_recommendation_evidence(
+            candidate=candidate,
+            profile=profile,
+            matched_tags=matched,
+            missing_tags=missing,
+            constraints=constraints,
+            positive_reference=positive_reference,
             negative_reference=negative_reference,
-        )
-
-        tier = classify_similarity_tier(base_relevance)
-        if constraints.status == "unknown" and tier == "strong":
-            tier = "recommended"
-        facts = GameFacts(
-            constraint_status=constraints.status,
-            constraint_hits=constraints.hits,
-            constraint_violations=constraints.violations,
-            constraint_unknowns=constraints.unknowns,
-            matched_like_terms=matched,
-            missing_like_terms=missing,
-            required_hits=constraints.hits,
-            required_misses=constraints.violations,
-            required_unknowns=constraints.unknowns,
-            has_coop=bool(set(tags) & {"co_op", "local_coop", "online_coop"}),
-            has_local_coop="local_coop" in tags,
-            has_online_coop="online_coop" in tags,
-            ordinary_multiplayer=(
-                "multiplayer" in tags
-                and not bool(set(tags) & {"co_op", "local_coop", "online_coop"})
-            ),
-            singleplayer_only="singleplayer" in tags and not bool(set(tags) & MULTIPLAYER_TAGS),
-            chinese="chinese" in tags,
-            reference_similarity=positive_reference,
-            match_coverage=(
-                len(matched) / len(profile.include_tags) if profile.include_tags else 0.0
-            ),
-            match_score=tag_coverage,
-            base_tag_score=tag_coverage,
-            profile_weight_bonus=library_profile or 0.0,
-            confidence=data_confidence,
-            tag_coverage_score=tag_coverage,
-            positive_reference_score=positive_reference,
-            negative_reference_score=negative_reference,
-            library_profile_score=library_profile or 0.0,
-            review_confidence_score=review_confidence,
-            base_relevance_score=base_relevance,
-        )
-        score = similarity_score(facts)
-        fit_points = fit_points_for(candidate, matched, tag_coverage)
-        if positive_reference > 0:
-            fit_points = merge_tags(
-                fit_points,
-                [f"正向参考相似度 {positive_reference:.0%}"],
-            )
-        if constraints.hits:
-            fit_points = merge_tags(
-                fit_points,
-                [f"Steam 信息确认硬条件：{'、'.join(constraints.hits)}"],
-            )
-        if facts.profile_weight_bonus > 0:
-            fit_points = merge_tags(
-                fit_points,
-                [profile_fit_point(tags, profile_weights)],
-            )
-        risk_points = risk_points_for(
-            candidate,
-            missing,
-            tier,
-            min_review_count,
-            constraints.unknowns,
-            negative_reference,
+            library_profile=library_profile,
+            review_reputation=review_reputation,
+            popularity=popularity,
         )
         ranked.append(
-            copy_ranked_game(
-                RankedGame.from_candidate(candidate, score, fit_points, risk_points),
-                {
-                    "tier": tier,
-                    "fit_points": fit_points,
-                    "risk_points": risk_points,
-                    "facts": facts,
-                    "index_source": candidate.index_source or "steam_index",
-                },
+            RankedGame.from_candidate(
+                mark_index_source(candidate),
+                score,
+                breakdown,
+                evidence,
             )
         )
 
-    return sorted(
-        ranked,
-        key=lambda game: (
-            TIER_ORDER.get(game.tier, 9),
-            -game.facts.base_relevance_score,
-            -game.facts.match_score,
-            -float(game.score),
-            -release_year(game.release_date or game.released),
-            game.title,
-        ),
+    return sorted(ranked, key=ranked_game_sort_key)
+
+
+def preference_coverage(
+    matched_tags: list[str],
+    include_tags: list[str],
+    candidate: GameCandidate,
+    desired_languages: list[str],
+) -> float:
+    total_weight = sum(tag_weight(tag) for tag in include_tags) + len(desired_languages)
+    if total_weight <= 0:
+        return 1.0
+    matched_weight = sum(tag_weight(tag) for tag in matched_tags)
+    if candidate.language_data_available:
+        supported = set(candidate.supported_languages)
+        matched_weight += sum(1.0 for language in desired_languages if language in supported)
+    return min(max(matched_weight / total_weight, 0.0), 1.0)
+
+
+def weighted_positive_score(**components: float | None) -> float:
+    available = [
+        (POSITIVE_COMPONENT_WEIGHTS[name], value)
+        for name, value in components.items()
+        if value is not None
+    ]
+    total_weight = sum(weight for weight, _value in available)
+    if not total_weight:
+        return 0.0
+    return (
+        sum(weight * min(max(float(value), 0.0), 1.0) for weight, value in available)
+        / total_weight
+        * 100
     )
 
 
-def select_diverse_results(
-    games: list[RankedGame],
-    limit: int,
-    group_by: str = "primary",
-    penalty_weight: float = 15,
-) -> list[RankedGame]:
-    if limit <= 0 or not games:
-        return []
+def popularity_score(review_total: int | None) -> float:
+    total = max(int(review_total or 0), 0)
+    return min(math.log10(total + 1) / 5, 1.0)
 
-    selected: list[RankedGame] = []
-    groups = tier_groups(games) if group_by == "tier" else primary_match_groups(games)
-    for group in groups:
-        group_selected: list[RankedGame] = []
-        remaining = list(group)
-        while remaining and len(selected) < limit:
-            best_index, best_game, best_penalty = max(
+
+def data_completeness_score(
+    candidate: GameCandidate,
+    language_requested: bool = False,
+) -> float:
+    checks = [
+        candidate.appid is not None,
+        bool(candidate.ordered_tags or candidate.tags or candidate.genres),
+        candidate.review_total is not None,
+        candidate.review_positive_ratio is not None,
+        bool(candidate.release_date or candidate.released),
+    ]
+    if language_requested:
+        checks.append(candidate.language_data_available)
+    return sum(bool(value) for value in checks) / len(checks)
+
+
+def unknown_constraint_penalty(
+    constraints: ConstraintAssessment,
+    profile: SteamTagProfile,
+) -> float:
+    total_required = len(profile.required_tags) + len(profile.required_languages)
+    if not total_required or not constraints.unknowns:
+        return 0.0
+    return min(len(constraints.unknowns) / total_required, 1.0) * 15.0
+
+
+def clamp_score(value: float) -> int:
+    return min(max(round(float(value)), 0), 100)
+
+
+def build_recommendation_evidence(
+    candidate: GameCandidate,
+    profile: SteamTagProfile,
+    matched_tags: list[str],
+    missing_tags: list[str],
+    constraints: ConstraintAssessment,
+    positive_reference: float,
+    negative_reference: float,
+    library_profile: float | None,
+    review_reputation: float,
+    popularity: float,
+) -> list[RecommendationEvidence]:
+    evidence: list[RecommendationEvidence] = []
+    if matched_tags:
+        evidence.append(
+            evidence_item(
+                "tag_match",
+                "preference",
+                "positive",
+                f"匹配偏好标签：{'、'.join(matched_tags[:5])}",
+            )
+        )
+    elif profile.include_tags:
+        evidence.append(
+            evidence_item(
+                "tag_mismatch",
+                "preference",
+                "negative",
+                f"未命中主要偏好标签：{'、'.join(missing_tags[:5])}",
+                important=True,
+            )
+        )
+    if profile.positive_reference_candidates:
+        evidence.append(
+            evidence_item(
+                "positive_reference",
+                "reference",
+                "positive",
+                f"与正向参考的玩法标签相似度为 {positive_reference:.0%}",
+            )
+        )
+    if profile.negative_reference_candidates and negative_reference > 0:
+        evidence.append(
+            evidence_item(
+                "negative_reference",
+                "reference",
+                "negative",
+                f"与不喜欢的参考游戏相似度为 {negative_reference:.0%}",
+                important=negative_reference >= 0.25,
+            )
+        )
+    if library_profile is not None and library_profile > 0:
+        evidence.append(
+            evidence_item(
+                "library_profile",
+                "library",
+                "positive",
+                f"命中个人游戏库画像，匹配度为 {library_profile:.0%}",
+            )
+        )
+
+    if candidate.review_total is not None and candidate.review_positive_ratio is not None:
+        evidence.append(
+            evidence_item(
+                "review_reputation",
+                "reviews",
+                "positive" if review_reputation >= 0.7 else "negative",
                 (
-                    (
-                        index,
-                        game,
-                        diversity_penalty_for(game, group_selected),
-                    )
-                    for index, game in enumerate(remaining)
-                ),
-                key=lambda item: (
-                    float(item[1].score) - item[2] * penalty_weight,
-                    -item[0],
+                    f"Steam 好评率 {candidate.review_positive_ratio:.0%}，"
+                    f"共 {candidate.review_total} 条评测"
                 ),
             )
-            if best_penalty > 0:
-                best_game = copy_ranked_game(
-                    best_game,
-                    {
-                        "facts": copy_facts(
-                            best_game.facts,
-                            {"diversity_penalty": best_penalty},
-                        )
-                    },
+        )
+    else:
+        evidence.append(
+            evidence_item(
+                "review_unknown",
+                "reviews",
+                "uncertain",
+                "Steam 评测数据尚未获取",
+            )
+        )
+    if candidate.review_total:
+        evidence.append(
+            evidence_item(
+                "popularity",
+                "popularity",
+                "positive",
+                f"评测规模对应的知名度指标为 {popularity:.0%}",
+            )
+        )
+
+    append_language_evidence(evidence, candidate, profile)
+    for unknown in constraints.unknowns:
+        if unknown.startswith("language:"):
+            continue
+        evidence.append(
+            evidence_item(
+                f"constraint_unknown:{unknown}",
+                "constraint",
+                "uncertain",
+                f"硬条件尚未确认：{unknown}",
+                important=True,
+            )
+        )
+    return dedupe_evidence(evidence)
+
+
+def append_language_evidence(
+    evidence: list[RecommendationEvidence],
+    candidate: GameCandidate,
+    profile: SteamTagProfile,
+) -> None:
+    requested = merge_tags(profile.preferred_languages, profile.required_languages)
+    if not requested:
+        return
+    supported = set(candidate.supported_languages)
+    required = set(profile.required_languages)
+    for language in requested:
+        label = language_label(language)
+        if not candidate.language_data_available:
+            evidence.append(
+                evidence_item(
+                    f"language_unknown:{language}",
+                    "language",
+                    "uncertain",
+                    f"Steam 语言数据缺失，无法确认是否支持{label}",
+                    important=language in required,
                 )
-            selected.append(best_game)
-            group_selected.append(best_game)
-            del remaining[best_index]
-        if len(selected) >= limit:
-            break
-    return selected
+            )
+        elif language in supported:
+            evidence.append(
+                evidence_item(
+                    f"language_supported:{language}",
+                    "language",
+                    "positive",
+                    f"Steam 明确标注支持{label}",
+                )
+            )
+        else:
+            evidence.append(
+                evidence_item(
+                    f"language_unsupported:{language}",
+                    "language",
+                    "negative",
+                    f"Steam 语言列表未标注支持{label}",
+                    important=language in required,
+                )
+            )
 
 
-def tier_groups(games: list[RankedGame]) -> list[list[RankedGame]]:
-    groups: list[list[RankedGame]] = []
-    current: list[RankedGame] = []
-    current_key: int | None = None
-    for game in games:
-        key = TIER_ORDER.get(game.tier, 9)
-        if current and key != current_key:
-            groups.append(current)
-            current = []
-        current.append(game)
-        current_key = key
-    if current:
-        groups.append(current)
-    return groups
+def evidence_item(
+    evidence_id: str,
+    category: str,
+    sentiment: str,
+    text: str,
+    important: bool = False,
+) -> RecommendationEvidence:
+    return RecommendationEvidence(
+        evidence_id=evidence_id,
+        category=category,
+        sentiment=sentiment,
+        text=text,
+        important=important,
+    )
 
 
-def primary_match_groups(games: list[RankedGame]) -> list[list[RankedGame]]:
-    groups: list[list[RankedGame]] = []
-    current: list[RankedGame] = []
-    current_key: tuple[int, float] | None = None
-    for game in games:
-        key = (TIER_ORDER.get(game.tier, 9), round(game.facts.match_score, 6))
-        if current and key != current_key:
-            groups.append(current)
-            current = []
-        current.append(game)
-        current_key = key
-    if current:
-        groups.append(current)
-    return groups
+def dedupe_evidence(values: list[RecommendationEvidence]) -> list[RecommendationEvidence]:
+    result: list[RecommendationEvidence] = []
+    seen: set[str] = set()
+    for value in values:
+        if value.evidence_id and value.evidence_id not in seen:
+            result.append(value)
+            seen.add(value.evidence_id)
+    return result
 
 
-def diversity_penalty_for(game: RankedGame, selected: list[RankedGame]) -> float:
-    if not selected:
-        return 0.0
-    tags = set(diversity_tags_for(game))
-    if not tags:
-        return 0.0
-    used_tags: set[str] = set()
-    for selected_game in selected:
-        used_tags.update(diversity_tags_for(selected_game))
-    if not used_tags:
-        return 0.0
-    return min(len(tags & used_tags) / len(tags), 1.0)
+def language_label(language: str) -> str:
+    return LANGUAGE_LABELS.get(language, language)
 
 
-def diversity_tags_for(game: RankedGame) -> list[str]:
-    ignored = {
-        *MULTIPLAYER_TAGS,
-        "singleplayer",
-        "chinese",
-        *game.facts.matched_like_terms,
-    }
-    return [tag for tag in candidate_canonical_tags(game) if tag not in ignored]
+def ranked_game_sort_key(game: RankedGame) -> tuple[Any, ...]:
+    return (
+        -int(game.score),
+        -float(game.score_breakdown.tag_coverage),
+        -int(game.review_total or 0),
+        -release_year(game.release_date or game.released),
+        game.title.casefold(),
+    )
 
 
-def copy_facts(facts: GameFacts, update: dict[str, Any]) -> GameFacts:
-    copier = getattr(facts, "model_copy", None)
-    if copier:
-        return copier(update=update)
-    return facts.copy(update=update)
+def mark_index_source(candidate: GameCandidate) -> GameCandidate:
+    if "steam_index" in candidate.internal_source_markers:
+        return candidate
+    data = dump_model(candidate)
+    data["internal_source_markers"] = [
+        *candidate.internal_source_markers,
+        "steam_index",
+    ]
+    return validate_candidate(data)
 
 
 def reference_expansion_tags(candidate: GameCandidate) -> list[str]:
@@ -476,33 +625,9 @@ def bayesian_review_score(
     return (total * observed + strength * baseline) / (total + strength)
 
 
-def blend_relevance_components(
-    tag_coverage: float | None,
-    positive_reference: float | None,
-    library_profile: float | None,
-    review_confidence: float | None,
-    negative_reference: float,
-) -> float:
-    components = (
-        (0.55, tag_coverage),
-        (0.20, positive_reference),
-        (0.10, library_profile),
-        (0.15, review_confidence),
-    )
-    available = [(weight, value) for weight, value in components if value is not None]
-    total_weight = sum(weight for weight, _value in available)
-    positive_score = (
-        sum(weight * min(max(float(value), 0.0), 1.0) for weight, value in available) / total_weight
-        if total_weight
-        else 0.0
-    )
-    score = positive_score - 0.20 * min(max(float(negative_reference), 0.0), 1.0)
-    return min(max(score, 0.0), 1.0)
-
-
 def weighted_overlap(matched: list[str], include_tags: list[str]) -> float:
     if not include_tags:
-        return 0.0
+        return 1.0
     matched_weight = sum(tag_weight(tag) for tag in matched)
     total_weight = sum(tag_weight(tag) for tag in include_tags)
     return matched_weight / total_weight if total_weight else 0.0
@@ -512,31 +637,6 @@ def tag_weight(tag: str) -> float:
     return TAG_WEIGHTS.get(tag, 1.0)
 
 
-def classify_similarity_tier(match_score: float) -> str:
-    if match_score >= 0.72:
-        return "strong"
-    if match_score >= 0.38:
-        return "recommended"
-    return "backup"
-
-
-def similarity_score(facts: GameFacts) -> float:
-    return round(facts.base_relevance_score * 100, 6)
-
-
-def confidence_for(candidate: GameCandidate, tags: list[str]) -> float:
-    confidence = 0.20
-    if tags:
-        confidence += 0.25
-    if candidate.review_total:
-        confidence += 0.20
-    if candidate.review_positive_ratio is not None:
-        confidence += 0.15
-    if candidate.appid is not None:
-        confidence += 0.10
-    return min(confidence, 1.0)
-
-
 def profile_weight_bonus(tags: list[str], weights: dict[str, float]) -> float:
     if not weights:
         return 0.0
@@ -544,49 +644,6 @@ def profile_weight_bonus(tags: list[str], weights: dict[str, float]) -> float:
     if not matched:
         return 0.0
     return min(sum(matched) / 3, 1.0)
-
-
-def profile_fit_point(tags: list[str], weights: dict[str, float]) -> str:
-    matched = [tag for tag in tags if tag in weights]
-    ranked = sorted(matched, key=lambda tag: (-weights.get(tag, 0.0), tag))
-    return f"个人游戏库偏好命中：{'、'.join(ranked[:4])}"
-
-
-def fit_points_for(candidate: GameCandidate, matched: list[str], match_score: float) -> list[str]:
-    points = [f"相似标签：{'、'.join(matched[:6])}"] if matched else []
-    points.append(f"Steam 索引匹配度 {match_score:.0%}")
-    if candidate.review_total is not None and candidate.review_positive_ratio is not None:
-        review = f"{candidate.review_positive_ratio:.0%} 好评，{candidate.review_total} 条"
-        points.append(f"Steam 评测：{review}")
-    if "chinese" in matched:
-        points.append("Steam 信息确认支持中文")
-    return dedupe(points)
-
-
-def risk_points_for(
-    candidate: GameCandidate,
-    missing: list[str],
-    tier: str,
-    min_review_count: int,
-    constraint_unknowns: list[str] | None = None,
-    negative_reference_similarity: float = 0.0,
-) -> list[str]:
-    risks: list[str] = []
-    if constraint_unknowns:
-        risks.append(f"硬条件尚未确认：{'、'.join(constraint_unknowns[:5])}")
-    if negative_reference_similarity > 0:
-        risks.append(f"与负向参考相似度 {negative_reference_similarity:.0%}")
-    if tier == "backup":
-        risks.append("标签相似度较弱，仅作为备选")
-    if missing and tier != "strong":
-        risks.append(f"部分偏好标签未命中：{'、'.join(missing[:5])}")
-    if candidate.review_total is None:
-        risks.append("Steam 评测量未获取到")
-    elif candidate.review_total < min_review_count * 2:
-        risks.append("Steam 评测量偏少，口碑稳定性较弱")
-    if not risks:
-        risks.append("价格和具体版本仍需以商店页面确认")
-    return dedupe(risks)
 
 
 def merge_tags(left: list[str], right: list[str]) -> list[str]:
@@ -604,17 +661,6 @@ def copy_ranked_game(game: RankedGame, update: dict[str, Any]) -> RankedGame:
     return game.copy(update=update)
 
 
-def dedupe(values: list[str]) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        key = value.lower()
-        if value and key not in seen:
-            result.append(value)
-            seen.add(key)
-    return result
-
-
 def is_reference_title(title: str, reference_titles: list[str]) -> bool:
     normalized = normalize_title(title)
     return any(
@@ -629,3 +675,13 @@ def normalize_title(value: str) -> str:
 def release_year(value: str | None) -> int:
     match = re.search(r"\b(19|20)\d{2}\b", str(value or ""))
     return int(match.group(0)) if match else 0
+
+
+def dump_model(model: Any) -> dict[str, Any]:
+    dumper = getattr(model, "model_dump", None)
+    return dumper() if dumper else model.dict()
+
+
+def validate_candidate(data: dict[str, Any]) -> GameCandidate:
+    validator = getattr(GameCandidate, "model_validate", None)
+    return validator(data) if validator else GameCandidate.parse_obj(data)

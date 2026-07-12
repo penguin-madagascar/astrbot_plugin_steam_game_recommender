@@ -136,10 +136,13 @@ def apply_preference_patch(
             value for value in data.get(field_name) or [] if str(value).lower() not in removed
         ]
     for field_name in patch.clear_conditions:
-        if field_name in {"budget", "players", "language", "difficulty", "mood"}:
+        if field_name == "language":
+            data["preferred_languages"] = []
+            data["required_languages"] = []
+        elif field_name in {"budget", "players", "difficulty", "mood"}:
             data[field_name] = None
     for field_name, value in patch.condition_overrides.items():
-        if field_name in {"budget", "players", "language", "difficulty", "mood"}:
+        if field_name in {"budget", "players", "difficulty", "mood"}:
             data[field_name] = value
 
     positive_titles = list(data.get("reference_games_like") or [])
@@ -180,6 +183,8 @@ def merge_retry_preferences(
         "reference_games_like",
         "reference_search_terms",
         "reference_games_dislike",
+        "preferred_languages",
+        "required_languages",
         "parse_warnings",
     ):
         data[field_name] = merge_text(
@@ -188,7 +193,7 @@ def merge_retry_preferences(
         )
     if supplement.platforms:
         data["platforms"] = list(supplement.platforms)
-    for field_name in ("players", "budget", "language", "difficulty", "mood"):
+    for field_name in ("players", "budget", "region", "budget_currency", "difficulty", "mood"):
         value = getattr(supplement, field_name)
         if value is not None:
             data[field_name] = value
