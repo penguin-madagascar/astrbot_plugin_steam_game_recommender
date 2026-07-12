@@ -5,6 +5,7 @@ import unittest
 from types import SimpleNamespace
 from typing import Any
 
+from astrbot_plugin_game_recommender.services.similarity_ranker import build_profile_from_preference
 from astrbot_plugin_game_recommender.services.steam_index import (
     STEAM_INDEX_CACHE_KEY,
     SteamGameIndexService,
@@ -12,10 +13,12 @@ from astrbot_plugin_game_recommender.services.steam_index import (
     SteamIndexSnapshot,
     prune_snapshot,
     reference_candidates,
+    search_terms_for,
 )
 from astrbot_plugin_game_recommender.storage.models import (
     GameCandidate,
     GamePreference,
+    ResolvedReferenceGame,
     SteamSearchHit,
 )
 
@@ -123,6 +126,7 @@ class SteamIndexSnapshotTest(unittest.IsolatedAsyncioTestCase):
 
         resolved = {item.raw_text: item for item in preference.resolved_reference_games}
         self.assertGreaterEqual(resolved["Dark Souls"].confidence, 0.75)
+        self.assertEqual(resolved["Dark Souls"].appid, 11)
         self.assertEqual(resolved["Dark Souls"].polarity, "like")
         self.assertGreaterEqual(resolved["Overcooked"].confidence, 0.75)
         self.assertEqual(resolved["Overcooked"].polarity, "dislike")
@@ -140,6 +144,76 @@ class SteamIndexSnapshotTest(unittest.IsolatedAsyncioTestCase):
                 for item in reference_candidates(preference, entries)
             )
         )
+
+    def test_historical_reference_marker_does_not_contaminate_current_request(self) -> None:
+        preference = GamePreference(reference_games_like=["Current Seed"])
+        preference.resolved_reference_games = [
+            ResolvedReferenceGame(
+                raw_text="Current Seed",
+                normalized_title="currentseed",
+                canonical_title="Current Seed",
+                appid=2,
+                confidence=1.0,
+                polarity="like",
+            )
+        ]
+        historical = game(1, "Old Seed", ["Horror"])
+        historical.source_reasons = ["reference_query:like:Old Seed"]
+        current = game(2, "Current Seed", ["Farming"])
+
+        matches = reference_candidates(preference, [historical, current])
+
+        self.assertEqual([item.appid for item in matches], [2])
+
+    async def test_coverage_is_filtered_before_round_query_limit(self) -> None:
+        preference = GamePreference(
+            genres_like=["aaa", "co-op", "puzzle", "farming", "crafting", "building"]
+        )
+        terms = search_terms_for(preference, build_profile_from_preference(preference))
+        covered = {term.lower(): 999.0 for term in terms[:8]}
+        cache = MemoryCache(
+            {
+                "steam_index:v2": {
+                    "version": 2,
+                    "entries": [],
+                    "search_coverage": covered,
+                }
+            }
+        )
+        client = QueryAwareSteamClient()
+        service = SteamGameIndexService(client, cache, clock=lambda: 1_000.0)
+
+        await service.refresh_entries(preference, [], target_pool=30)
+
+        self.assertTrue(set(client.search_queries) & set(terms[8:]))
+
+    async def test_reference_only_query_expands_seed_tags_in_same_round(self) -> None:
+        client = ReferenceExpansionSteamClient()
+        service = SteamGameIndexService(client, MemoryCache({}), clock=lambda: 1_000.0)
+
+        ranked = await service.recommend(
+            GamePreference(reference_games_like=["Stardew Valley"]),
+            limit=3,
+        )
+
+        self.assertIn("Stardew Valley", client.search_queries)
+        self.assertGreater(len(client.search_queries), 1)
+        self.assertLessEqual(len(client.search_queries), 8)
+        self.assertIn("Similar Farm", [item.title for item in ranked])
+        self.assertNotIn("Stardew Valley", [item.title for item in ranked])
+
+    async def test_cached_quality_pool_does_not_skip_current_reference_resolution(self) -> None:
+        cached = [game(index, f"Generic {index}", ["Action"]) for index in range(1, 13)]
+        cache = MemoryCache({"steam_index:v2": snapshot_payload(cached, refreshed_at=900.0)})
+        client = ReferenceExpansionSteamClient()
+        service = SteamGameIndexService(client, cache, clock=lambda: 1_000.0)
+
+        await service.recommend(
+            GamePreference(reference_games_like=["Stardew Valley"]),
+            limit=3,
+        )
+
+        self.assertIn("Stardew Valley", client.search_queries)
 
 
 class MemoryCache:
@@ -220,12 +294,33 @@ class ReferenceSteamClient(QueryAwareSteamClient):
         del page_size
         self.search_queries.append(search)
         mapping = {
-            "Dark Souls": SteamSearchHit(appid=10, title="Dark Souls Remastered"),
-            "Slay the Spire": SteamSearchHit(appid=20, title="Unrelated Adventure"),
-            "Overcooked": SteamSearchHit(appid=30, title="Overcooked! 2"),
+            "Dark Souls": [
+                SteamSearchHit(appid=10, title="Unrelated Adventure"),
+                SteamSearchHit(appid=11, title="Dark Souls Remastered"),
+            ],
+            "Slay the Spire": [SteamSearchHit(appid=20, title="Unrelated Adventure")],
+            "Overcooked": [SteamSearchHit(appid=30, title="Overcooked! 2")],
         }
-        hit = mapping.get(search)
-        return [hit] if hit else []
+        return mapping.get(search, [])
+
+
+class ReferenceExpansionSteamClient(QueryAwareSteamClient):
+    async def search_game_refs(self, search: str, page_size: int, **_kwargs: Any):
+        self.search_queries.append(search)
+        self.search_page_sizes.append(page_size)
+        if search == "Stardew Valley":
+            return [SteamSearchHit(appid=100, title="Stardew Valley")]
+        return [SteamSearchHit(appid=101, title="Similar Farm")]
+
+    async def get_game_detail(self, appid: int) -> GameCandidate:
+        self.detail_appids.append(appid)
+        if appid == 100:
+            return game(appid, "Stardew Valley", ["Farming", "Life Sim", "Relaxing"])
+        return game(appid, "Similar Farm", ["Farming", "Life Sim", "Relaxing"])
+
+    async def get_store_page_tags(self, appid: int) -> list[str]:
+        del appid
+        return ["Farming", "Life Sim", "Relaxing"]
 
 
 def snapshot_payload(

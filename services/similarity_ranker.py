@@ -38,8 +38,10 @@ class SteamTagProfile:
     exclude_tags: list[str] = field(default_factory=list)
     reference_titles: list[str] = field(default_factory=list)
     reference_titles_dislike: list[str] = field(default_factory=list)
-    positive_reference_tag_sequences: list[list[str]] = field(default_factory=list)
-    negative_reference_tag_sequences: list[list[str]] = field(default_factory=list)
+    reference_appids: list[int] = field(default_factory=list)
+    reference_appids_dislike: list[int] = field(default_factory=list)
+    positive_reference_candidates: list[GameCandidate] = field(default_factory=list)
+    negative_reference_candidates: list[GameCandidate] = field(default_factory=list)
 
 
 def build_profile_from_preference(
@@ -71,12 +73,18 @@ def build_profile_from_preference(
         exclude_tags=exclude,
         reference_titles=list(preference.reference_games_like),
         reference_titles_dislike=list(preference.reference_games_dislike),
-        positive_reference_tag_sequences=[
-            ordered_tag_sequence(candidate) for candidate in reference_candidates or []
+        reference_appids=[
+            int(candidate.appid)
+            for candidate in reference_candidates or []
+            if candidate.appid is not None
         ],
-        negative_reference_tag_sequences=[
-            ordered_tag_sequence(candidate) for candidate in negative_reference_candidates or []
+        reference_appids_dislike=[
+            int(candidate.appid)
+            for candidate in negative_reference_candidates or []
+            if candidate.appid is not None
         ],
+        positive_reference_candidates=list(reference_candidates or []),
+        negative_reference_candidates=list(negative_reference_candidates or []),
     )
 
 
@@ -94,10 +102,13 @@ def rank_steam_candidates(
     review_prior = candidate_pool_review_prior(candidates)
     prior_strength = max(int(min_review_count), 50)
     for candidate in candidates:
-        if is_reference_title(
+        reference_appids = {*profile.reference_appids, *profile.reference_appids_dislike}
+        if (
+            candidate.appid is not None and int(candidate.appid) in reference_appids
+        ) or is_reference_title(
             candidate.title,
             [*profile.reference_titles, *profile.reference_titles_dislike],
-        ) or is_reference_query(candidate):
+        ):
             continue
         constraints = evaluate_candidate_constraints(
             candidate,
@@ -114,12 +125,12 @@ def rank_steam_candidates(
         candidate_weights = candidate_tag_weights(candidate, idf)
         positive_reference = maximum_reference_similarity(
             candidate_weights,
-            profile.positive_reference_tag_sequences,
+            profile.positive_reference_candidates,
             idf,
         )
         negative_reference = maximum_reference_similarity(
             candidate_weights,
-            profile.negative_reference_tag_sequences,
+            profile.negative_reference_candidates,
             idf,
         )
         library_profile = profile_weight_bonus(tags, profile_weights) if profile_weights else None
@@ -133,7 +144,7 @@ def rank_steam_candidates(
         base_relevance = blend_relevance_components(
             tag_coverage=tag_coverage if profile.include_tags else None,
             positive_reference=(
-                positive_reference if profile.positive_reference_tag_sequences else None
+                positive_reference if profile.positive_reference_candidates else None
             ),
             library_profile=library_profile,
             review_confidence=review_confidence,
@@ -340,7 +351,9 @@ def copy_facts(facts: GameFacts, update: dict[str, Any]) -> GameFacts:
 
 def reference_expansion_tags(candidate: GameCandidate) -> list[str]:
     ignored = {"singleplayer", "chinese"}
-    direct_tags = canonical_tags_from_terms([*candidate.tags, *candidate.genres])
+    direct_tags = canonical_tags_from_terms(
+        [*candidate.ordered_tags, *candidate.tags, *candidate.genres]
+    )
     return [tag for tag in direct_tags if tag not in ignored]
 
 
@@ -349,9 +362,9 @@ def ordered_tag_sequence(candidate: GameCandidate) -> list[str]:
     if candidate.description:
         inferred.extend(extract_description_terms(candidate.description))
     return merge_tags(
-        canonical_tags_from_terms(candidate.tags),
+        canonical_tags_from_terms(candidate.ordered_tags),
         merge_tags(
-            canonical_tags_from_terms(candidate.genres),
+            canonical_tags_from_terms([*candidate.tags, *candidate.genres]),
             canonical_tags_from_terms(inferred),
         ),
     )
@@ -389,8 +402,8 @@ def candidate_tag_weights(
     candidate: GameCandidate,
     idf: dict[str, float],
 ) -> dict[str, float]:
-    weights = ordered_sequence_weights(candidate.tags, idf)
-    for tag in canonical_tags_from_terms(candidate.genres):
+    weights = ordered_sequence_weights(candidate.ordered_tags, idf)
+    for tag in canonical_tags_from_terms([*candidate.tags, *candidate.genres]):
         weights[tag] = max(weights.get(tag, 0.0), idf.get(tag, 1.0))
     inferred = [*candidate.inferred_tags]
     if candidate.description:
@@ -424,16 +437,16 @@ def ordered_tfidf_cosine(
 
 def maximum_reference_similarity(
     candidate_weights: dict[str, float],
-    reference_sequences: list[list[str]],
+    reference_candidates: list[GameCandidate],
     idf: dict[str, float],
 ) -> float:
     return max(
         (
             weighted_cosine(
                 candidate_weights,
-                ordered_sequence_weights(sequence, idf),
+                candidate_tag_weights(reference, idf),
             )
-            for sequence in reference_sequences
+            for reference in reference_candidates
         ),
         default=0.0,
     )
@@ -607,10 +620,6 @@ def is_reference_title(title: str, reference_titles: list[str]) -> bool:
     return any(
         normalized == normalize_title(reference) for reference in reference_titles if reference
     )
-
-
-def is_reference_query(candidate: GameCandidate) -> bool:
-    return any(reason.startswith("reference_query:") for reason in candidate.source_reasons)
 
 
 def normalize_title(value: str) -> str:

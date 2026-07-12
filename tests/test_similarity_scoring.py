@@ -56,6 +56,31 @@ class OrderedTagSimilarityTest(unittest.TestCase):
         self.assertAlmostEqual(weights["rpg"], 1.0)
         self.assertAlmostEqual(weights["horror"], 0.5)
 
+    def test_reference_and_candidate_use_the_same_source_weights(self) -> None:
+        profile = SteamTagProfile(
+            positive_reference_candidates=[
+                candidate(
+                    "Reference",
+                    tags=["Action"],
+                    genres=["RPG"],
+                    inferred_tags=["Horror"],
+                )
+            ]
+        )
+        ranked = rank_steam_candidates(
+            [
+                candidate(
+                    "Candidate",
+                    tags=["Action"],
+                    genres=["RPG"],
+                    inferred_tags=["Horror"],
+                )
+            ],
+            profile,
+        )
+
+        self.assertAlmostEqual(ranked[0].facts.positive_reference_score, 1.0)
+
 
 class HybridRelevanceTest(unittest.TestCase):
     def test_bayesian_review_score_uses_pool_prior_and_minimum_strength(self) -> None:
@@ -88,7 +113,7 @@ class HybridRelevanceTest(unittest.TestCase):
         profile = SteamTagProfile(
             include_tags=["co_op"],
             reference_titles_dislike=["Negative Seed"],
-            negative_reference_tag_sequences=[["management", "casual"]],
+            negative_reference_candidates=[candidate("Negative Seed", ["Management", "Casual"])],
         )
         ranked = rank_steam_candidates(
             [
@@ -110,8 +135,12 @@ class HybridRelevanceTest(unittest.TestCase):
     def test_all_component_scores_are_recorded_and_drive_ranking(self) -> None:
         profile = SteamTagProfile(
             include_tags=["co_op", "puzzle", "farming"],
-            positive_reference_tag_sequences=[["farming", "co_op", "puzzle"]],
-            negative_reference_tag_sequences=[["horror", "soulslike", "violent"]],
+            positive_reference_candidates=[
+                candidate("Positive Seed", ["Farming", "Co-op", "Puzzle"])
+            ],
+            negative_reference_candidates=[
+                candidate("Negative Seed", ["Horror", "Soulslike", "Violent"])
+            ],
         )
         ranked = rank_steam_candidates(
             [

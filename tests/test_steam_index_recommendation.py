@@ -293,10 +293,8 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertIn("farming sim", enriched.tags)
-        self.assertIn("farming_sim", enriched.tags)
-        self.assertIn("life sim", enriched.tags)
-        self.assertIn("life_sim", enriched.tags)
+        self.assertIn("farming sim", enriched.ordered_tags)
+        self.assertIn("life sim", enriched.ordered_tags)
         self.assertIn("tag_enrichment:steam_popular_tags", enriched.source_reasons)
         self.assertIn("tag_enrichment:steam_store_page_tags", enriched.source_reasons)
 

@@ -21,7 +21,6 @@ from .similarity_ranker import (
     rank_steam_candidates,
 )
 from .tag_normalizer import (
-    candidate_direct_canonical_tags,
     canonical_tags_from_terms,
     extract_description_terms,
     register_steam_tag_aliases,
@@ -120,7 +119,7 @@ class SteamGameIndexService:
         ranked = exclude_previously_shown(ranked, excluded_appids, excluded_titles)
         quality_target = max(10, max(int(limit), 0) * 2)
         quality_count = sum(game.tier in {"strong", "recommended"} for game in ranked)
-        if quality_count >= quality_target:
+        if quality_count >= quality_target and references_are_resolved(preference):
             return select_results_by_diversity(ranked, limit, diversity_mode)
 
         target_pool = min(60, max(30, max(int(limit), 0) * 6))
@@ -182,57 +181,122 @@ class SteamGameIndexService:
             if key not in records:
                 records[key] = SteamIndexEntry(candidate=candidate, refreshed_at=now)
 
-        profile = build_profile_from_preference(preference)
-        queries = search_terms_for(preference, profile)[:STEAM_INDEX_MAX_SEARCHES_PER_ROUND]
-        queries = [
-            query
-            for query in queries
-            if not query_is_covered(query, current.search_coverage, now, self.ttl_hours)
-        ]
         self._round_prefetched = {}
-        search_results = await self._search_queries(queries)
         coverage = dict(current.search_coverage)
         markers: dict[int, list[tuple[str, str]]] = {}
-        ordered_hits: list[SteamSearchHit] = []
         seen_hits: set[int] = set()
-        for query, hits, succeeded in search_results:
-            if succeeded:
-                coverage[normalize_text(query)] = now
-            polarity = reference_polarity_for(query, preference)
-            if polarity:
-                accepted = record_reference_resolution(preference, query, hits, polarity)
-                if accepted and hits:
-                    markers.setdefault(hits[0].appid, []).append((query, polarity))
-            for hit in hits:
-                if hit.appid not in seen_hits:
-                    ordered_hits.append(hit)
-                    seen_hits.add(hit.appid)
-
-        for key, record in list(records.items()):
-            candidate = record.candidate
-            if candidate.appid is None or candidate.appid not in markers:
-                continue
-            marked = candidate
-            for query, polarity in markers[candidate.appid]:
-                marked = mark_reference_query(marked, query, polarity)
-            records[key] = SteamIndexEntry(marked, record.refreshed_at)
-
-        existing_appids = {
-            int(record.candidate.appid)
-            for record in records.values()
-            if record.candidate.appid is not None
-        }
-        new_hits = [hit for hit in ordered_hits if hit.appid not in existing_appids]
         enrichment_limit = min(
             STEAM_INDEX_MAX_NEW_APPIDS_PER_ROUND,
             max(int(target_pool), 0),
         )
-        enriched = await self._enrich_hits(new_hits[:enrichment_limit])
-        for candidate in enriched:
-            if candidate.appid is not None:
-                for query, polarity in markers.get(int(candidate.appid), []):
-                    candidate = mark_reference_query(candidate, query, polarity)
-            records[entry_key(candidate)] = SteamIndexEntry(candidate, now)
+        enriched_count = 0
+        searched_queries: list[str] = []
+
+        pending_references: list[str] = []
+        for query in reference_terms_for(preference):
+            polarity = reference_polarity_for(query, preference) or "like"
+            existing_hit = best_reference_hit(
+                query,
+                [
+                    SteamSearchHit(
+                        appid=int(record.candidate.appid),
+                        title=record.candidate.title,
+                        store_url=record.candidate.raw_url,
+                    )
+                    for record in records.values()
+                    if record.candidate.appid is not None
+                ],
+            )
+            if existing_hit is not None:
+                record_reference_resolution(preference, query, [existing_hit], polarity)
+                markers.setdefault(existing_hit.appid, []).append((query, polarity))
+            else:
+                pending_references.append(query)
+
+        initial_profile = build_profile_from_preference(preference)
+        if pending_references:
+            initial_queries = pending_references[:STEAM_INDEX_MAX_SEARCHES_PER_ROUND]
+        else:
+            initial_queries = [
+                query
+                for query in search_terms_for(preference, initial_profile)
+                if not query_is_covered(query, coverage, now, self.ttl_hours)
+            ][:STEAM_INDEX_MAX_SEARCHES_PER_ROUND]
+
+        async def process_searches(queries: list[str]) -> None:
+            nonlocal enriched_count
+            if not queries:
+                return
+            searched_queries.extend(queries)
+            results = await self._search_queries(queries)
+            selected_hits: list[SteamSearchHit] = []
+            other_hits: list[SteamSearchHit] = []
+            for query, hits, succeeded in results:
+                if succeeded:
+                    coverage[normalize_text(query)] = now
+                polarity = reference_polarity_for(query, preference)
+                if polarity:
+                    selected = record_reference_resolution(
+                        preference,
+                        query,
+                        hits,
+                        polarity,
+                    )
+                    if selected is not None:
+                        markers.setdefault(selected.appid, []).append((query, polarity))
+                        selected_hits.append(selected)
+                other_hits.extend(hits)
+
+            existing_appids = {
+                int(record.candidate.appid)
+                for record in records.values()
+                if record.candidate.appid is not None
+            }
+            new_hits: list[SteamSearchHit] = []
+            for hit in [*selected_hits, *other_hits]:
+                if hit.appid in seen_hits or hit.appid in existing_appids:
+                    continue
+                seen_hits.add(hit.appid)
+                new_hits.append(hit)
+            remaining = max(enrichment_limit - enriched_count, 0)
+            enriched = await self._enrich_hits(new_hits[:remaining])
+            enriched_count += len(enriched)
+            for candidate in enriched:
+                if candidate.appid is not None:
+                    for query, polarity in markers.get(int(candidate.appid), []):
+                        candidate = mark_reference_query(candidate, query, polarity)
+                records[entry_key(candidate)] = SteamIndexEntry(candidate, now)
+
+        await process_searches(initial_queries)
+
+        for key, record in list(records.items()):
+            candidate = record.candidate
+            if candidate.appid is None or int(candidate.appid) not in markers:
+                continue
+            marked = candidate
+            for query, polarity in markers[int(candidate.appid)]:
+                marked = mark_reference_query(marked, query, polarity)
+            records[key] = SteamIndexEntry(marked, record.refreshed_at)
+
+        remaining_searches = STEAM_INDEX_MAX_SEARCHES_PER_ROUND - len(searched_queries)
+        if remaining_searches > 0 and enriched_count < enrichment_limit:
+            candidates = [record.candidate for record in records.values()]
+            expanded_profile = build_profile_from_preference(
+                preference,
+                reference_candidates=reference_candidates(preference, candidates),
+                negative_reference_candidates=negative_reference_candidates(
+                    preference,
+                    candidates,
+                ),
+            )
+            searched_keys = {normalize_text(query) for query in searched_queries}
+            supplemental_queries = [
+                query
+                for query in search_terms_for(preference, expanded_profile)
+                if normalize_text(query) not in searched_keys
+                and not query_is_covered(query, coverage, now, self.ttl_hours)
+            ][:remaining_searches]
+            await process_searches(supplemental_queries)
 
         refreshed_snapshot = prune_snapshot(
             SteamIndexSnapshot(
@@ -331,13 +395,15 @@ class SteamGameIndexService:
             except Exception:
                 store_tags = []
             if store_tags:
-                data["tags"] = dedupe_texts([*(data.get("tags") or []), *store_tags])
+                data["ordered_tags"] = dedupe_texts(store_tags)
                 if "tag_enrichment:steam_store_page_tags" not in reasons:
                     reasons.append("tag_enrichment:steam_store_page_tags")
         data["source_reasons"] = reasons
 
         enriched_candidate = validate_candidate(data)
-        direct_tags = candidate_direct_canonical_tags(enriched_candidate)
+        direct_tags = canonical_tags_from_terms(
+            [*enriched_candidate.tags, *enriched_candidate.genres]
+        )
         if direct_tags:
             data["tags"] = dedupe_texts([*(data.get("tags") or []), *direct_tags])
             if "tag_enrichment:steam_detail" not in reasons:
@@ -426,6 +492,7 @@ def reference_candidates(
         preference.reference_games_like,
         entries,
         polarity="like",
+        resolved=preference.resolved_reference_games,
     )
 
 
@@ -437,6 +504,7 @@ def negative_reference_candidates(
         preference.reference_games_dislike,
         entries,
         polarity="dislike",
+        resolved=preference.resolved_reference_games,
     )
 
 
@@ -444,17 +512,26 @@ def matching_reference_candidates(
     titles: list[str],
     entries: list[GameCandidate],
     polarity: str,
+    resolved: list[ResolvedReferenceGame] | None = None,
 ) -> list[GameCandidate]:
+    resolved_appids = {
+        int(item.appid)
+        for item in resolved or []
+        if item.polarity == polarity
+        if item.appid is not None and item.confidence >= REFERENCE_MATCH_THRESHOLD
+    }
     references = [title for title in titles if title]
-    marker_prefix = f"reference_query:{polarity}:"
     return [
         entry
         for entry in entries
-        if any(
-            title_match_confidence(reference, entry.title) >= REFERENCE_MATCH_THRESHOLD
-            for reference in references
+        if (entry.appid is not None and int(entry.appid) in resolved_appids)
+        or (
+            not resolved_appids
+            and any(
+                title_match_confidence(reference, entry.title) >= REFERENCE_MATCH_THRESHOLD
+                for reference in references
+            )
         )
-        or any(reason.startswith(marker_prefix) for reason in entry.source_reasons)
     ]
 
 
@@ -509,8 +586,8 @@ def record_reference_resolution(
     query: str,
     hits: list[SteamSearchHit],
     polarity: str,
-) -> bool:
-    hit = hits[0] if hits else None
+) -> SteamSearchHit | None:
+    hit = best_reference_hit(query, hits)
     confidence = title_match_confidence(query, hit.title) if hit else 0.0
     resolved = ResolvedReferenceGame(
         raw_text=query,
@@ -532,11 +609,39 @@ def record_reference_resolution(
     ]
     preference.resolved_reference_games.append(resolved)
     if confidence >= REFERENCE_MATCH_THRESHOLD:
-        return True
+        return hit
     warning = f"参考游戏“{query}”未能可靠解析，未扩展其标签。"
     if warning not in preference.parse_warnings:
         preference.parse_warnings.append(warning)
-    return False
+    return None
+
+
+def best_reference_hit(query: str, hits: list[SteamSearchHit]) -> SteamSearchHit | None:
+    if not hits:
+        return None
+    hit, confidence = max(
+        (
+            (hit, title_match_confidence(query, hit.title))
+            for hit in hits[:STEAM_INDEX_SEARCH_RESULTS_PER_TERM]
+        ),
+        key=lambda item: item[1],
+    )
+    return hit if confidence >= REFERENCE_MATCH_THRESHOLD else None
+
+
+def references_are_resolved(preference: GamePreference) -> bool:
+    expected = {
+        (normalize_text(query), reference_polarity_for(query, preference) or "like")
+        for query in reference_terms_for(preference)
+    }
+    if not expected:
+        return True
+    resolved = {
+        (normalize_text(item.raw_text), item.polarity)
+        for item in preference.resolved_reference_games
+        if item.appid is not None and item.confidence >= REFERENCE_MATCH_THRESHOLD
+    }
+    return expected <= resolved
 
 
 def title_match_confidence(query: str, candidate_title: str) -> float:
@@ -548,7 +653,7 @@ def title_match_confidence(query: str, candidate_title: str) -> float:
         return 1.0
     if actual.startswith(expected) or expected.startswith(actual):
         coverage = min(len(expected), len(actual)) / max(len(expected), len(actual))
-        return min(0.8 + coverage * 0.2, 0.99)
+        return min(0.65 + coverage * 0.35, 0.99)
     return SequenceMatcher(None, expected, actual).ratio()
 
 
