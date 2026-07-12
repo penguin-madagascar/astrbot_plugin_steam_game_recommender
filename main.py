@@ -471,6 +471,15 @@ class GameRecommenderPlugin(Star):
         excluded_titles: list[str] | None = None,
     ) -> RecommendationRun:
         started_at = time.perf_counter()
+        checkpoint = started_at
+        phase_times: dict[str, float] = {}
+
+        def finish_phase(name: str) -> None:
+            nonlocal checkpoint
+            now = time.perf_counter()
+            phase_times[name] = (now - checkpoint) * 1000
+            checkpoint = now
+
         preference = prepared.preference
         result_limit = prepared.result_limit
         ranked_games: list[RankedGame] = []
@@ -484,6 +493,7 @@ class GameRecommenderPlugin(Star):
                 required=bool(preference.library_filter_mode),
             )
             profile_tag_weights = await self._user_profile_tag_weights(event, owned_games)
+            finish_phase("profile")
             ranked_games = await self._recommend_with_steam_index(
                 preference,
                 limit=candidate_pool_size,
@@ -493,6 +503,7 @@ class GameRecommenderPlugin(Star):
                 excluded_titles=excluded_titles,
             )
             retrieved_count = len(ranked_games)
+            finish_phase("recall_rank")
             embedding_reranker = getattr(self, "embedding_reranker", None)
             if embedding_reranker is not None:
                 ranked_games = await embedding_reranker.rerank(
@@ -503,6 +514,7 @@ class GameRecommenderPlugin(Star):
                 degradation_reason = (
                     getattr(embedding_reranker, "last_degradation_reason", None) or "none"
                 )
+            finish_phase("embedding")
             if preference.library_filter_mode:
                 ranked_games = await self._filter_library_games(
                     preference,
@@ -511,6 +523,7 @@ class GameRecommenderPlugin(Star):
                     owned_games,
                 )
             filtered_count = max(retrieved_count - len(ranked_games), 0)
+            finish_phase("library_filter")
             if preference.budget is not None:
                 ranked_games = await self.price_bridge.enrich_ranked_games(
                     ranked_games,
@@ -531,15 +544,23 @@ class GameRecommenderPlugin(Star):
                     ranked_games,
                     preference,
                 )
+            finish_phase("final_selection")
         logger.debug(
             "Game recommendation pipeline: elapsed_ms=%.1f candidates=%d "
-            "filtered=%d selected=%d refill_pool=%d degradation=%s",
+            "filtered=%d selected=%d refill_pool=%d degradation=%s "
+            "profile_ms=%.1f recall_rank_ms=%.1f embedding_ms=%.1f "
+            "library_filter_ms=%.1f final_selection_ms=%.1f",
             (time.perf_counter() - started_at) * 1000,
             retrieved_count,
             filtered_count,
             len(ranked_games),
             max(retrieved_count - result_limit, 0),
             degradation_reason,
+            phase_times.get("profile", 0.0),
+            phase_times.get("recall_rank", 0.0),
+            phase_times.get("embedding", 0.0),
+            phase_times.get("library_filter", 0.0),
+            phase_times.get("final_selection", 0.0),
         )
         messages = await format_recommendation_messages_with_llm(
             self.context,

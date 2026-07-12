@@ -175,6 +175,7 @@ class SteamGameIndexService:
         target_pool: int = STEAM_INDEX_MAX_NEW_APPIDS_PER_ROUND,
         snapshot: SteamIndexSnapshot | None = None,
     ) -> list[GameCandidate]:
+        refresh_started = time.perf_counter()
         await self.ensure_steam_tag_aliases()
         now = float(self.clock())
         current = snapshot or await self.load_snapshot()
@@ -312,7 +313,9 @@ class SteamGameIndexService:
             snapshot_payload(refreshed_snapshot),
         )
         logger.debug(
-            "Steam index refresh: searches=%d enriched=%d candidates=%d coverage=%d",
+            "Steam index refresh: elapsed_ms=%.1f searches=%d enriched=%d "
+            "candidates=%d coverage=%d",
+            (time.perf_counter() - refresh_started) * 1000,
             len(searched_queries),
             enriched_count,
             len(refreshed_snapshot.entries),
