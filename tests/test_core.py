@@ -11,7 +11,7 @@ try:
     from astrbot_plugin_game_recommender.storage.models import GameCandidate
 except ModuleNotFoundError as exc:
     if exc.name in {"pydantic", "astrbot"}:
-        raise unittest.SkipTest(f"{exc.name} is not installed in this environment")
+        raise unittest.SkipTest(f"{exc.name} is not installed in this environment") from exc
     raise
 
 

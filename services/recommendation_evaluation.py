@@ -20,9 +20,7 @@ def ndcg_at_k(
     actual = _discounted_cumulative_gain(
         relevance_by_id.get(item_id, 0) for item_id in unique_ranking[:k]
     )
-    ideal = _discounted_cumulative_gain(
-        sorted(relevance_by_id.values(), reverse=True)[:k]
-    )
+    ideal = _discounted_cumulative_gain(sorted(relevance_by_id.values(), reverse=True)[:k])
     return actual / ideal if ideal else 0.0
 
 
@@ -33,9 +31,7 @@ def recall_at_k(
 ) -> float:
     """Return the share of positive-relevance candidates retrieved in the first ``k`` results."""
     unique_ranking = _unique_ids(ranking)
-    relevant_ids = {
-        item_id for item_id, relevance in relevance_by_id.items() if relevance > 0
-    }
+    relevant_ids = {item_id for item_id, relevance in relevance_by_id.items() if relevance > 0}
     if not relevant_ids or k <= 0:
         return 0.0
 
@@ -86,10 +82,7 @@ def _unique_ids(ranking: Sequence[str]) -> list[str]:
 
 
 def _discounted_cumulative_gain(relevances: Iterable[int]) -> float:
-    return sum(
-        (2**relevance - 1) / log2(rank + 2)
-        for rank, relevance in enumerate(relevances)
-    )
+    return sum((2**relevance - 1) / log2(rank + 2) for rank, relevance in enumerate(relevances))
 
 
 def _tag_cosine(left_tags: Collection[str], right_tags: Collection[str]) -> float:

@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 
 from astrbot_plugin_game_recommender.services.account_binding import (
-    AccountBindingError,
     STEAMID64_BASE,
+    AccountBindingError,
     parse_account_binding_command,
 )
 from astrbot_plugin_game_recommender.storage.models import AccountBinding
@@ -106,7 +106,10 @@ class AccountBindingRepositoryTest(unittest.IsolatedAsyncioTestCase):
 
             bindings = await repo.list_account_bindings("qq", "user-1")
 
-            self.assertEqual([binding.provider for binding in bindings], ["future_provider", "steam"])
+            self.assertEqual(
+                [binding.provider for binding in bindings],
+                ["future_provider", "steam"],
+            )
             steam = await repo.get_account_binding("qq", "user-1", "steam")
             self.assertEqual(steam.account_id, "76561198012345678")
 

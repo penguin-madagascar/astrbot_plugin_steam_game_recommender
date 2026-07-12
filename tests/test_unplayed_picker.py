@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import random
 import unittest
-from typing import Any
 
 from astrbot_plugin_game_recommender.storage.models import (
     GameCandidate,

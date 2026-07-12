@@ -12,11 +12,9 @@ class UnplayedRecommendationError(ValueError):
 
 
 class UnplayedSteamClient(Protocol):
-    async def get_review_summary(self, appid: int) -> Any:
-        ...
+    async def get_review_summary(self, appid: int) -> Any: ...
 
-    async def get_game_detail(self, appid: int) -> GameCandidate:
-        ...
+    async def get_game_detail(self, appid: int) -> GameCandidate: ...
 
 
 @dataclass(frozen=True)
@@ -33,11 +31,7 @@ async def pick_random_unplayed_game(
     min_positive_ratio: float = 0.65,
     rng: random.Random | None = None,
 ) -> UnplayedRecommendation:
-    candidates = [
-        game
-        for game in owned_games
-        if game.appid and game.playtime_forever <= 0
-    ]
+    candidates = [game for game in owned_games if game.appid and game.playtime_forever <= 0]
     if not candidates:
         raise UnplayedRecommendationError("Steam 游戏库中没有未游玩过的游戏。")
 
@@ -87,9 +81,7 @@ def attach_review_summary(
     data["playtime"] = 0
     data["review_total"] = optional_int(getattr(summary, "total_reviews", None))
     data["review_positive_ratio"] = optional_float(getattr(summary, "positive_ratio", None))
-    data["review_recent_ratio"] = optional_float(
-        getattr(summary, "recent_positive_ratio", None)
-    )
+    data["review_recent_ratio"] = optional_float(getattr(summary, "recent_positive_ratio", None))
     data["stores"] = data.get("stores") or ["Steam"]
     data["raw_url"] = data.get("raw_url") or (
         f"https://store.steampowered.com/app/{owned_game.appid}/"

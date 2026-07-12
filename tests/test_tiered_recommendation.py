@@ -49,7 +49,10 @@ class TieredRecommendationTest(unittest.TestCase):
 
 class TieredFormatterTest(unittest.TestCase):
     def test_recommendation_messages_include_tier_summary_and_game_tier(self) -> None:
-        game = steam_game("Unravel Two", ["Co-op", "Local Co-op", "Multiplayer", "Puzzle", "Casual"])
+        game = steam_game(
+            "Unravel Two",
+            ["Co-op", "Local Co-op", "Multiplayer", "Puzzle", "Casual"],
+        )
         ranked = rank_steam_candidates(
             [game],
             build_profile_from_preference(

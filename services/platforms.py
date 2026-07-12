@@ -82,7 +82,6 @@ def platform_matches(requested: str, families: list[str]) -> bool:
 
 def is_switch2_only(platforms: list[str]) -> bool:
     normalized = [platform.lower() for platform in platforms]
-    text = " | ".join(normalized)
     has_switch_2 = any("switch 2" in platform for platform in normalized)
     has_switch_1 = any(
         platform in {"nintendo switch", "switch"} or platform.endswith(" nintendo switch")

@@ -54,7 +54,7 @@ def match_prefix_argument(text: str) -> tuple[str, str] | None:
         phrase_lower = phrase.lower()
         if not lowered.startswith(phrase_lower):
             continue
-        rest = stripped[len(phrase):]
+        rest = stripped[len(phrase) :]
         if phrase_lower.isascii() and rest and not rest[0].isspace():
             continue
         return mode, rest
@@ -89,17 +89,9 @@ def filter_games_by_library_mode(
 ) -> tuple[list[RankedGame], int]:
     owned_appids = {owned.appid for owned in owned_games if owned.appid}
     if mode == LIBRARY_FILTER_EXCLUDE_OWNED:
-        filtered = [
-            game
-            for game in games
-            if game.appid is None or game.appid not in owned_appids
-        ]
+        filtered = [game for game in games if game.appid is None or game.appid not in owned_appids]
     elif mode == LIBRARY_FILTER_ONLY_OWNED:
-        filtered = [
-            game
-            for game in games
-            if game.appid is not None and game.appid in owned_appids
-        ]
+        filtered = [game for game in games if game.appid is not None and game.appid in owned_appids]
     else:
         raise LibraryFilterModeError(f"未知游戏库过滤模式：{mode}")
     return filtered, len(games) - len(filtered)

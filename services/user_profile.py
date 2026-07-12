@@ -34,11 +34,7 @@ def build_user_tag_weights(
     index_entries: list[GameCandidate],
     max_tags: int = 12,
 ) -> dict[str, float]:
-    by_appid = {
-        entry.appid: entry
-        for entry in index_entries
-        if entry.appid is not None
-    }
+    by_appid = {entry.appid: entry for entry in index_entries if entry.appid is not None}
     weights: dict[str, float] = {}
     for owned in owned_games:
         if owned.playtime_forever <= 0:
@@ -57,8 +53,4 @@ def build_user_tag_weights(
 
     max_weight = max(weights.values())
     ranked = sorted(weights.items(), key=lambda item: (-item[1], item[0]))[:max_tags]
-    return {
-        tag: round(weight / max_weight, 4)
-        for tag, weight in ranked
-        if weight > 0
-    }
+    return {tag: round(weight / max_weight, 4) for tag, weight in ranked if weight > 0}
