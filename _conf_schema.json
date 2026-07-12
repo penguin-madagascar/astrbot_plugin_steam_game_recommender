@@ -1,8 +1,8 @@
 {
   "llm_provider_id": {
     "type": "string",
-    "description": "用于偏好解析和结果解释的 LLM 提供商",
-    "hint": "留空时尝试使用当前会话模型；调用失败会降级为关键词解析和规则格式化。",
+    "description": "用于偏好解析的 LLM 提供商",
+    "hint": "留空时尝试使用当前会话模型；调用失败会降级为关键词解析。推荐理由始终由结构化 Steam 证据生成。",
     "_special": "select_provider",
     "default": ""
   },
@@ -60,14 +60,14 @@
   },
   "steam_min_review_count": {
     "type": "int",
-    "description": "Steam 推荐最低评测数量",
-    "hint": "索引推荐中，已知评测数低于该值的候选会被过滤；设置为 0 可关闭该过滤。",
+    "description": "Steam 口碑先验强度",
+    "hint": "索引推荐使用该值（最低按 50）进行好评率贝叶斯平滑；/unplayedrec 仍将它作为最低评测数量。",
     "default": 50
   },
   "steam_min_positive_ratio": {
     "type": "float",
-    "description": "Steam 推荐最低好评率",
-    "hint": "索引推荐中，已知好评率低于该值的候选会被过滤；默认 0.65 表示 65%。",
+    "description": "未玩推荐最低好评率",
+    "hint": "仅用于 /unplayedrec 的评价门槛；索引推荐使用贝叶斯平滑口碑分，不按好评率直接删除候选。",
     "default": 0.65
   },
   "cache_ttl_hours": {

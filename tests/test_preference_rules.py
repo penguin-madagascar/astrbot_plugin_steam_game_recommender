@@ -11,6 +11,13 @@ from astrbot_plugin_game_recommender.storage.models import GamePreference
 
 
 class PreferenceRulesTest(unittest.TestCase):
+    def test_library_exclusion_prefix_does_not_negate_requested_gameplay(self) -> None:
+        preference = infer_preference_from_text("排除已有的合作游戏")
+
+        self.assertIn("co-op", preference.genres_like)
+        self.assertNotIn("co_op", preference.genres_dislike)
+        self.assertEqual(preference.library_filter_mode, "exclude_owned")
+
     def test_positive_horror_and_soulslike_intent_is_not_treated_as_exclusion(self) -> None:
         cases = (
             ("想玩恐怖合作游戏", "horror"),

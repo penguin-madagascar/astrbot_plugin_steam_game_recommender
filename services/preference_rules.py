@@ -370,6 +370,11 @@ def has_negative_reference_prefix(text: str, start: int) -> bool:
 
 def detect_tag_polarities(text: str) -> dict[str, str]:
     lower = text.lower()
+    lower = re.sub(
+        r"排除\s*已有|exclude[-_ ]owned",
+        lambda match: " " * len(match.group(0)),
+        lower,
+    )
     events: list[tuple[int, int, str, str]] = []
     for tag, terms in TAG_INTENT_TERMS.items():
         for term in terms:

@@ -48,7 +48,13 @@ try:
     )
     from astrbot_plugin_game_recommender.services.played_filter import LibraryFilterModeError
     from astrbot_plugin_game_recommender.services.steam_index import STEAM_ONLY_SCOPE_WARNING
-    from astrbot_plugin_game_recommender.storage.models import GamePreference, RankedGame
+    from astrbot_plugin_game_recommender.storage.models import (
+        AccountBinding,
+        GameCandidate,
+        GamePreference,
+        RankedGame,
+        SteamOwnedGame,
+    )
 except ModuleNotFoundError as exc:
     if exc.name in {"astrbot", "pydantic"}:
         raise unittest.SkipTest(f"{exc.name} is not installed in this environment") from exc
@@ -202,9 +208,38 @@ class EmbeddingPipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plugin.embedding_reranker.seen_query, "Steam 合作解谜")
         self.assertEqual([game.title for game in run.ranked_games], ["Second", "First"])
 
+    async def test_library_snapshot_is_loaded_once_for_profile_and_filtering(self) -> None:
+        plugin = object.__new__(GameRecommenderPlugin)
+        plugin.enable_llm_fallback = False
+        plugin.provider_id = ""
+        plugin.context = FakeLlmContext("")
+        plugin.cache = BoundAccountCache()
+        plugin.steam_client = CountingOwnedGamesClient()
+        plugin.steam_index = OwnedAwareSteamIndex()
+        plugin.price_bridge = IdentityPriceBridge()
+        plugin.embedding_reranker = None
+        prepared = PreparedRecommendation(
+            raw_query="排除已有的合作游戏",
+            preference=GamePreference(
+                platforms=["steam"],
+                genres_like=["co-op"],
+                library_filter_mode="exclude_owned",
+                result_count=2,
+            ),
+            diversity_mode=DIVERSITY_STRICT,
+            result_limit=2,
+        )
+
+        run = await plugin._run_recommendation(FakeEvent(), prepared)
+
+        self.assertEqual(plugin.steam_client.owned_calls, 1)
+        self.assertEqual([game.title for game in run.ranked_games], ["Fresh Game"])
+
 
 class FakeEvent:
     unified_msg_origin = "qq:test"
+    sender_id = "test"
+    platform = "qq"
 
 
 class FakeLlmResponse:
@@ -262,6 +297,40 @@ class IdentityPriceBridge:
 
     async def enrich_ranked_games(self, games, _preference):
         return games
+
+
+class BoundAccountCache:
+    async def get_account_binding(self, _platform, _user_id, _provider):
+        return AccountBinding(
+            chat_user_id="test",
+            provider="steam",
+            account_id="76561198000000000",
+            account_kind="steamid64",
+            display_value="76561198000000000",
+        )
+
+
+class CountingOwnedGamesClient:
+    def __init__(self) -> None:
+        self.owned_calls = 0
+
+    def has_web_api_key(self) -> bool:
+        return True
+
+    async def get_owned_games(self, _account_id):
+        self.owned_calls += 1
+        return [SteamOwnedGame(appid=1, name="Owned Game", playtime_forever=120)]
+
+
+class OwnedAwareSteamIndex:
+    async def load_entries(self):
+        return [GameCandidate(appid=1, title="Owned Game", tags=["Co-op"])]
+
+    async def recommend(self, _preference, **_kwargs):
+        return [
+            RankedGame(appid=1, title="Owned Game", score=90, tier="strong"),
+            RankedGame(appid=2, title="Fresh Game", score=80, tier="strong"),
+        ]
 
 
 if __name__ == "__main__":

@@ -13,6 +13,19 @@ from astrbot_plugin_game_recommender.storage.models import GameCandidate, GameFa
 
 
 class ConstraintEvaluatorTest(unittest.TestCase):
+    def test_ordered_steam_tags_are_direct_constraint_evidence(self) -> None:
+        assessment = evaluate_candidate_constraints(
+            GameCandidate(
+                title="Steam Tagged Horror",
+                ordered_tags=["Horror", "Co-op"],
+            ),
+            required_tags=[],
+            exclude_tags=["horror"],
+        )
+
+        self.assertEqual(assessment.status, "violated")
+        self.assertEqual(assessment.violations, ["horror"])
+
     def test_reports_satisfied_required_tags_with_multiplayer_implications(self) -> None:
         assessment = evaluate_candidate_constraints(
             candidate("Couch Team", ["Local Co-op", "Chinese"]),

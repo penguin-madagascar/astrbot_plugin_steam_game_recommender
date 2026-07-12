@@ -22,7 +22,9 @@ def evaluate_candidate_constraints(
     required_tags: list[str],
     exclude_tags: list[str],
 ) -> ConstraintAssessment:
-    direct_tags = set(normalize_terms([*candidate.genres, *candidate.tags]))
+    direct_tags = set(
+        normalize_terms([*candidate.genres, *candidate.tags, *candidate.ordered_tags])
+    )
     required = normalize_terms(required_tags)
     excluded = normalize_terms(exclude_tags)
 

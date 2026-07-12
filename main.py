@@ -69,7 +69,7 @@ from .storage.models import AccountBinding, GamePreference, RankedGame, SteamOwn
 from .storage.repository import SQLiteCacheRepository
 
 PLUGIN_NAME = "astrbot_plugin_game_recommender"
-PLUGIN_VERSION = "0.4.0"
+PLUGIN_VERSION = "0.5.0"
 PLUGIN_DESCRIPTION = (
     "基于 Steam/PC 公开数据、本地索引和标签相似度推荐游戏；当前版本暂不做跨平台候选召回。"
 )
@@ -470,9 +470,13 @@ class GameRecommenderPlugin(Star):
         excluded_appids: list[int] | None = None,
         excluded_titles: list[str] | None = None,
     ) -> RecommendationRun:
+        started_at = time.perf_counter()
         preference = prepared.preference
         result_limit = prepared.result_limit
         ranked_games: list[RankedGame] = []
+        retrieved_count = 0
+        filtered_count = 0
+        degradation_reason = "none"
         if has_supported_steam_platform(preference):
             candidate_pool_size = min(60, max(30, result_limit * 6))
             owned_games = await self._owned_games_for_recommendation(
@@ -488,12 +492,16 @@ class GameRecommenderPlugin(Star):
                 excluded_appids=excluded_appids,
                 excluded_titles=excluded_titles,
             )
+            retrieved_count = len(ranked_games)
             embedding_reranker = getattr(self, "embedding_reranker", None)
             if embedding_reranker is not None:
                 ranked_games = await embedding_reranker.rerank(
                     preference,
                     prepared.raw_query,
                     ranked_games,
+                )
+                degradation_reason = (
+                    getattr(embedding_reranker, "last_degradation_reason", None) or "none"
                 )
             if preference.library_filter_mode:
                 ranked_games = await self._filter_library_games(
@@ -502,6 +510,7 @@ class GameRecommenderPlugin(Star):
                     preference.library_filter_mode,
                     owned_games,
                 )
+            filtered_count = max(retrieved_count - len(ranked_games), 0)
             if preference.budget is not None:
                 ranked_games = await self.price_bridge.enrich_ranked_games(
                     ranked_games,
@@ -522,6 +531,16 @@ class GameRecommenderPlugin(Star):
                     ranked_games,
                     preference,
                 )
+        logger.debug(
+            "Game recommendation pipeline: elapsed_ms=%.1f candidates=%d "
+            "filtered=%d selected=%d refill_pool=%d degradation=%s",
+            (time.perf_counter() - started_at) * 1000,
+            retrieved_count,
+            filtered_count,
+            len(ranked_games),
+            max(retrieved_count - result_limit, 0),
+            degradation_reason,
+        )
         messages = await format_recommendation_messages_with_llm(
             self.context,
             event,

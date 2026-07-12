@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import time
 from dataclasses import dataclass, field
@@ -25,6 +26,8 @@ from .tag_normalizer import (
     extract_description_terms,
     register_steam_tag_aliases,
 )
+
+logger = logging.getLogger(__name__)
 
 STEAM_INDEX_CACHE_KEY = "steam_index:v2"
 STEAM_INDEX_VERSION = 2
@@ -307,6 +310,13 @@ class SteamGameIndexService:
         await self.cache.set_json(
             STEAM_INDEX_CACHE_KEY,
             snapshot_payload(refreshed_snapshot),
+        )
+        logger.debug(
+            "Steam index refresh: searches=%d enriched=%d candidates=%d coverage=%d",
+            len(searched_queries),
+            enriched_count,
+            len(refreshed_snapshot.entries),
+            len(refreshed_snapshot.search_coverage),
         )
         return [record.candidate for record in refreshed_snapshot.entries]
 
