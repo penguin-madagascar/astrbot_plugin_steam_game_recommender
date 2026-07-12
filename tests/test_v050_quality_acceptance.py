@@ -96,8 +96,8 @@ class V050QualityAcceptanceTest(unittest.TestCase):
             scenario["id"]: evaluate_legacy_scenario(scenario)
             for scenario in self.fixture["scenarios"]
         }
-        current_ndcg = fmean(result["ndcg_at_target"] for result in current.values())
-        legacy_ndcg = fmean(result["ndcg_at_target"] for result in legacy.values())
+        current_ndcg = fmean(result["ndcg_at_5"] for result in current.values())
+        legacy_ndcg = fmean(result["ndcg_at_5"] for result in legacy.values())
         current_recall = fmean(result["recall_at_20"] for result in current.values())
 
         self.assertGreaterEqual(current_recall, 0.95)
@@ -116,8 +116,8 @@ class V050QualityAcceptanceTest(unittest.TestCase):
                 for scenario in self.fixture["scenarios"]
                 if scenario["category"] == category
             ]
-            current_category = fmean(current[item]["ndcg_at_target"] for item in scenario_ids)
-            legacy_category = fmean(legacy[item]["ndcg_at_target"] for item in scenario_ids)
+            current_category = fmean(current[item]["ndcg_at_5"] for item in scenario_ids)
+            legacy_category = fmean(legacy[item]["ndcg_at_5"] for item in scenario_ids)
             self.assertGreaterEqual(
                 current_category,
                 legacy_category - 0.02,
@@ -182,6 +182,7 @@ def evaluate_current_scenario(scenario: dict) -> dict[str, float]:
     strict_ndcg = ndcg_at_k(strict_ranking, relevance, k=scenario["target_count"])
     return {
         "ndcg_at_target": ndcg,
+        "ndcg_at_5": ndcg_at_k(ranking, relevance, k=5),
         "recall_at_20": recall_at_k(candidate_ranking, relevance, k=20),
         "constraint_violation_rate": constraint_violation_rate(
             ranking,
@@ -291,7 +292,12 @@ def evaluate_legacy_scenario(scenario: dict) -> dict[str, float]:
             scenario["legacy_ranking"],
             relevance,
             k=scenario["target_count"],
-        )
+        ),
+        "ndcg_at_5": ndcg_at_k(
+            scenario["legacy_ranking"],
+            relevance,
+            k=5,
+        ),
     }
 
 
