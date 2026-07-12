@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+# ruff: noqa: E402, I001
+
 import unittest
 from statistics import fmean
+
+_astrbot_stubs = __import__("tests.test_diversity")
 
 from astrbot_plugin_game_recommender.services.diversity import (
     DIVERSITY_BALANCED,
@@ -39,7 +43,6 @@ from astrbot_plugin_game_recommender.storage.models import (
     SteamOwnedGame,
 )
 
-from tests import test_diversity as _astrbot_stubs  # noqa: F401
 from tests.recommendation_scenario_loader import load_recommendation_quality_fixture
 
 REFERENCE_TAGS = {
