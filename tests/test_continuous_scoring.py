@@ -4,10 +4,12 @@ import math
 import unittest
 
 from astrbot_plugin_steam_game_recommender.services.similarity_ranker import (
+    POSITIVE_COMPONENT_WEIGHTS,
     SteamTagProfile,
     popularity_score,
     rank_steam_candidates,
     ranked_game_sort_key,
+    weighted_positive_score,
 )
 from astrbot_plugin_steam_game_recommender.storage.models import (
     GameCandidate,
@@ -18,6 +20,47 @@ from astrbot_plugin_steam_game_recommender.storage.models import (
 
 
 class ContinuousScoringTest(unittest.TestCase):
+    def test_positive_component_weights_match_rebalanced_scoring(self) -> None:
+        self.assertEqual(
+            POSITIVE_COMPONENT_WEIGHTS,
+            {
+                "tag_coverage": 30.0,
+                "positive_reference": 25.0,
+                "library_profile": 5.0,
+                "review_reputation": 20.0,
+                "popularity": 20.0,
+            },
+        )
+
+    def test_optional_components_are_renormalized_for_all_availability_states(self) -> None:
+        components = {
+            "tag_coverage": 0.8,
+            "positive_reference": 0.6,
+            "library_profile": 0.4,
+            "review_reputation": 0.9,
+            "popularity": 0.7,
+        }
+
+        self.assertAlmostEqual(weighted_positive_score(**components), 73.0)
+        self.assertAlmostEqual(
+            weighted_positive_score(**{**components, "library_profile": None}),
+            (30 * 0.8 + 25 * 0.6 + 20 * 0.9 + 20 * 0.7) / 95 * 100,
+        )
+        self.assertAlmostEqual(
+            weighted_positive_score(**{**components, "positive_reference": None}),
+            (30 * 0.8 + 5 * 0.4 + 20 * 0.9 + 20 * 0.7) / 75 * 100,
+        )
+        self.assertAlmostEqual(
+            weighted_positive_score(
+                tag_coverage=0.8,
+                positive_reference=None,
+                library_profile=None,
+                review_reputation=0.9,
+                popularity=0.7,
+            ),
+            (30 * 0.8 + 20 * 0.9 + 20 * 0.7) / 70 * 100,
+        )
+
     def test_popularity_uses_logarithmic_review_count(self) -> None:
         self.assertEqual(popularity_score(None), 0.0)
         self.assertAlmostEqual(popularity_score(99_999), 1.0)
@@ -32,7 +75,7 @@ class ContinuousScoringTest(unittest.TestCase):
 
         game = ranked[0]
         popularity = min(math.log10(1_000) / 5, 1)
-        expected = round((50 * 1.0 + 10 * 0.8 + 10 * popularity + 5 * 1.0) / 75 * 100)
+        expected = round((30 * 1.0 + 20 * 0.8 + 20 * popularity) / 70 * 100)
 
         self.assertEqual(game.score, expected)
         self.assertIsNone(game.score_breakdown.positive_reference)
@@ -187,7 +230,7 @@ class ContinuousScoringTest(unittest.TestCase):
 
 
 class LanguageScoringTest(unittest.TestCase):
-    def test_required_language_support_filters_unsupported_but_keeps_unknown(self) -> None:
+    def test_required_language_uses_penalty_without_filtering(self) -> None:
         ranked = rank_steam_candidates(
             [
                 candidate(
@@ -211,10 +254,57 @@ class LanguageScoringTest(unittest.TestCase):
             ),
         )
 
-        self.assertEqual([game.title for game in ranked], ["Simplified", "Unknown"])
-        unknown = ranked[1]
-        self.assertEqual(unknown.score_breakdown.unknown_constraints_penalty, 15)
-        self.assertTrue(any("简体中文" in item.text for item in unknown.recommendation_evidence))
+        self.assertEqual(
+            [game.title for game in ranked],
+            ["Simplified", "Unknown", "Traditional Only"],
+        )
+        by_title = {game.title: game for game in ranked}
+        self.assertEqual(by_title["Simplified"].score_breakdown.language_adjustment, 0)
+        self.assertEqual(by_title["Unknown"].score_breakdown.language_adjustment, -2)
+        self.assertEqual(by_title["Traditional Only"].score_breakdown.language_adjustment, -10)
+        self.assertEqual(by_title["Unknown"].score_breakdown.unknown_constraints_penalty, 0)
+        self.assertEqual(by_title["Simplified"].score_breakdown.tag_coverage, 1)
+        self.assertTrue(
+            any("简体中文" in item.text for item in by_title["Unknown"].recommendation_evidence)
+        )
+
+    def test_soft_language_mismatch_deducts_five_points(self) -> None:
+        game = rank_steam_candidates(
+            [
+                candidate(
+                    "Traditional Only",
+                    ["Puzzle"],
+                    supported_languages=["tchinese"],
+                    language_data_available=True,
+                )
+            ],
+            SteamTagProfile(
+                include_tags=["puzzle"],
+                preferred_languages=["schinese"],
+            ),
+        )[0]
+
+        self.assertEqual(game.score_breakdown.language_adjustment, -5)
+        self.assertEqual(game.score_breakdown.tag_coverage, 1)
+
+    def test_multiple_languages_apply_only_the_most_severe_penalty_once(self) -> None:
+        game = rank_steam_candidates(
+            [
+                candidate(
+                    "English Only",
+                    ["Puzzle"],
+                    supported_languages=["english"],
+                    language_data_available=True,
+                )
+            ],
+            SteamTagProfile(
+                include_tags=["puzzle"],
+                preferred_languages=["japanese"],
+                required_languages=["schinese", "tchinese"],
+            ),
+        )[0]
+
+        self.assertEqual(game.score_breakdown.language_adjustment, -10)
 
     def test_language_evidence_is_absent_when_user_did_not_request_language(self) -> None:
         game = rank_steam_candidates(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..storage.models import GameCandidate, split_language_list
+from ..storage.models import GameCandidate
 from .tag_normalizer import normalize_key, normalize_tag
 
 COOPERATIVE_TAGS = {"co_op", "local_coop", "online_coop"}
@@ -21,7 +21,6 @@ def evaluate_candidate_constraints(
     candidate: GameCandidate,
     required_tags: list[str],
     exclude_tags: list[str],
-    required_languages: list[str] | None = None,
 ) -> ConstraintAssessment:
     direct_tags = set(
         normalize_terms([*candidate.genres, *candidate.tags, *candidate.ordered_tags])
@@ -43,16 +42,6 @@ def evaluate_candidate_constraints(
     for tag in excluded:
         if requirement_is_satisfied(tag, direct_tags) and tag not in violations:
             violations.append(tag)
-
-    supported_languages = set(candidate.supported_languages)
-    for language in split_language_list(required_languages or []):
-        marker = f"language:{language}"
-        if not candidate.language_data_available:
-            unknowns.append(marker)
-        elif language in supported_languages:
-            hits.append(marker)
-        else:
-            violations.append(marker)
 
     status = "violated" if violations else "unknown" if unknowns else "satisfied"
     return ConstraintAssessment(

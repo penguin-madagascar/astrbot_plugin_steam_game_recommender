@@ -258,6 +258,7 @@ def known_hard_violation_ids(scenario: dict) -> list[str]:
     if scenario["id"] in {
         "reference-slay-spire-negative",
         "reference-positive-and-negative",
+        "required-chinese",
         "retry-dislike-first",
     }:
         return []

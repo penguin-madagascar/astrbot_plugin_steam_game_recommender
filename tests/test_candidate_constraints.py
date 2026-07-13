@@ -94,7 +94,7 @@ class ConstraintEvaluatorTest(unittest.TestCase):
 
 
 class ConstraintAwareRankerTest(unittest.TestCase):
-    def test_filters_violations_and_penalizes_unknown_language_requirement(self) -> None:
+    def test_language_requirements_do_not_participate_in_hard_constraints(self) -> None:
         profile = SteamTagProfile(
             include_tags=["co_op", "puzzle"],
             required_languages=["schinese"],
@@ -120,13 +120,19 @@ class ConstraintAwareRankerTest(unittest.TestCase):
             min_positive_ratio=0.65,
         )
 
-        self.assertEqual([game.title for game in ranked], ["Confirmed", "Unknown"])
-        self.assertEqual(ranked[0].score_breakdown.unknown_constraints_penalty, 0)
-        self.assertEqual(ranked[1].score_breakdown.unknown_constraints_penalty, 15)
+        self.assertEqual(
+            [game.title for game in ranked],
+            ["Confirmed", "Unknown", "Violated"],
+        )
+        by_title = {game.title: game for game in ranked}
+        self.assertEqual(by_title["Confirmed"].score_breakdown.language_adjustment, 0)
+        self.assertEqual(by_title["Unknown"].score_breakdown.language_adjustment, -2)
+        self.assertEqual(by_title["Violated"].score_breakdown.language_adjustment, -10)
+        self.assertEqual(by_title["Unknown"].score_breakdown.unknown_constraints_penalty, 0)
         self.assertTrue(
             any(
                 item.important and "简体中文" in item.text
-                for item in ranked[1].recommendation_evidence
+                for item in by_title["Unknown"].recommendation_evidence
             )
         )
 
@@ -156,10 +162,11 @@ class ConstraintAwareRankerTest(unittest.TestCase):
             "library_profile",
             "review_reputation",
             "popularity",
-            "data_completeness",
+            "language_adjustment",
             "unknown_constraints_penalty",
         ):
             self.assertIn(field, fields)
+        self.assertNotIn("data_completeness", fields)
 
 
 def candidate(

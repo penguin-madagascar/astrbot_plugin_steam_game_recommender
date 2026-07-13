@@ -384,10 +384,10 @@ class ScoreBreakdown(BaseModel):
     library_profile: float | None = None
     review_reputation: float = 0.0
     popularity: float = 0.0
-    data_completeness: float = 0.0
     positive_score: float = 0.0
     negative_reference_penalty: float = 0.0
     unknown_constraints_penalty: float = 0.0
+    language_adjustment: float = 0.0
     budget_adjustment: float = 0.0
 
     @validator(
@@ -396,7 +396,6 @@ class ScoreBreakdown(BaseModel):
         "library_profile",
         "review_reputation",
         "popularity",
-        "data_completeness",
         pre=True,
     )
     def _normalize_ratio(cls, value: Any) -> float | None:
@@ -432,13 +431,21 @@ class ScoreBreakdown(BaseModel):
             number = 0.0
         return min(max(number, 0.0), 15.0)
 
+    @validator("language_adjustment", pre=True)
+    def _normalize_language_adjustment(cls, value: Any) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = 0.0
+        return min(max(number, -10.0), 0.0)
+
     @validator("budget_adjustment", pre=True)
     def _normalize_budget_adjustment(cls, value: Any) -> float:
         try:
             number = float(value)
         except (TypeError, ValueError):
             number = 0.0
-        return min(max(number, -5.0), 5.0)
+        return min(max(number, -10.0), 5.0)
 
     class Config:
         extra = "ignore"

@@ -22,12 +22,11 @@ from .tag_normalizer import (
 
 MULTIPLAYER_TAGS = {"co_op", "local_coop", "online_coop", "multiplayer"}
 POSITIVE_COMPONENT_WEIGHTS = {
-    "tag_coverage": 50.0,
-    "positive_reference": 15.0,
-    "library_profile": 10.0,
-    "review_reputation": 10.0,
-    "popularity": 10.0,
-    "data_completeness": 5.0,
+    "tag_coverage": 30.0,
+    "positive_reference": 25.0,
+    "library_profile": 5.0,
+    "review_reputation": 20.0,
+    "popularity": 20.0,
 }
 TAG_WEIGHTS = {
     "co_op": 1.5,
@@ -128,8 +127,6 @@ def rank_steam_candidates(
     idf = compute_tag_idf([ordered_tag_sequence(candidate) for candidate in candidates])
     review_prior = candidate_pool_review_prior(candidates)
     prior_strength = max(int(min_review_count), 50)
-    desired_languages = merge_tags(profile.preferred_languages, profile.required_languages)
-
     for candidate in candidates:
         reference_appids = {*profile.reference_appids, *profile.reference_appids_dislike}
         if (
@@ -144,7 +141,6 @@ def rank_steam_candidates(
             candidate,
             required_tags=profile.required_tags,
             exclude_tags=profile.exclude_tags,
-            required_languages=profile.required_languages,
         )
         if constraints.status == "violated":
             continue
@@ -155,8 +151,6 @@ def rank_steam_candidates(
         tag_coverage = preference_coverage(
             matched,
             profile.include_tags,
-            candidate,
-            desired_languages,
         )
         candidate_weights = candidate_tag_weights(candidate, idf)
         positive_reference = maximum_reference_similarity(
@@ -176,9 +170,7 @@ def rank_steam_candidates(
             prior_strength=prior_strength,
         )
         popularity = popularity_score(candidate.review_total)
-        completeness = data_completeness_score(
-            candidate, language_requested=bool(desired_languages)
-        )
+        language_adjustment = language_preference_adjustment(candidate, profile)
         positive_score = weighted_positive_score(
             tag_coverage=tag_coverage,
             positive_reference=(
@@ -187,11 +179,15 @@ def rank_steam_candidates(
             library_profile=library_profile,
             review_reputation=review_reputation,
             popularity=popularity,
-            data_completeness=completeness,
         )
         negative_penalty = min(max(negative_reference, 0.0), 1.0) * 20.0
         unknown_penalty = unknown_constraint_penalty(constraints, profile)
-        score = clamp_score(positive_score - negative_penalty - unknown_penalty)
+        score = clamp_score(
+            positive_score
+            - negative_penalty
+            - unknown_penalty
+            + language_adjustment
+        )
         breakdown = ScoreBreakdown(
             tag_coverage=tag_coverage,
             positive_reference=(
@@ -200,10 +196,10 @@ def rank_steam_candidates(
             library_profile=library_profile,
             review_reputation=review_reputation,
             popularity=popularity,
-            data_completeness=completeness,
             positive_score=positive_score,
             negative_reference_penalty=negative_penalty,
             unknown_constraints_penalty=unknown_penalty,
+            language_adjustment=language_adjustment,
         )
         evidence = build_recommendation_evidence(
             candidate=candidate,
@@ -232,16 +228,11 @@ def rank_steam_candidates(
 def preference_coverage(
     matched_tags: list[str],
     include_tags: list[str],
-    candidate: GameCandidate,
-    desired_languages: list[str],
 ) -> float:
-    total_weight = sum(tag_weight(tag) for tag in include_tags) + len(desired_languages)
+    total_weight = sum(tag_weight(tag) for tag in include_tags)
     if total_weight <= 0:
         return 1.0
     matched_weight = sum(tag_weight(tag) for tag in matched_tags)
-    if candidate.language_data_available:
-        supported = set(candidate.supported_languages)
-        matched_weight += sum(1.0 for language in desired_languages if language in supported)
     return min(max(matched_weight / total_weight, 0.0), 1.0)
 
 
@@ -266,27 +257,29 @@ def popularity_score(review_total: int | None) -> float:
     return min(math.log10(total + 1) / 5, 1.0)
 
 
-def data_completeness_score(
+def language_preference_adjustment(
     candidate: GameCandidate,
-    language_requested: bool = False,
+    profile: SteamTagProfile,
 ) -> float:
-    checks = [
-        candidate.appid is not None,
-        bool(candidate.ordered_tags or candidate.tags or candidate.genres),
-        candidate.review_total is not None,
-        candidate.review_positive_ratio is not None,
-        bool(candidate.release_date or candidate.released),
-    ]
-    if language_requested:
-        checks.append(candidate.language_data_available)
-    return sum(bool(value) for value in checks) / len(checks)
+    requested = merge_tags(profile.preferred_languages, profile.required_languages)
+    if not requested:
+        return 0.0
+    if not candidate.language_data_available:
+        return -2.0
+
+    supported = set(candidate.supported_languages)
+    if any(language not in supported for language in profile.required_languages):
+        return -10.0
+    if any(language not in supported for language in profile.preferred_languages):
+        return -5.0
+    return 0.0
 
 
 def unknown_constraint_penalty(
     constraints: ConstraintAssessment,
     profile: SteamTagProfile,
 ) -> float:
-    total_required = len(profile.required_tags) + len(profile.required_languages)
+    total_required = len(profile.required_tags)
     if not total_required or not constraints.unknowns:
         return 0.0
     return min(len(constraints.unknowns) / total_required, 1.0) * 15.0
