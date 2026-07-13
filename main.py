@@ -69,7 +69,7 @@ from .storage.models import GamePreference, RankedGame, SteamAccountBinding, Ste
 from .storage.repository import SQLiteCacheRepository
 
 PLUGIN_NAME = "astrbot_plugin_steam_game_recommender"
-PLUGIN_VERSION = "0.6.0"
+PLUGIN_VERSION = "0.6.1"
 PLUGIN_DESCRIPTION = "基于 Steam 公开数据、连续评分和可信证据生成精简游戏推荐。"
 
 
@@ -253,11 +253,11 @@ class SteamGameRecommenderPlugin(Star):
         )
 
     @filter.command(
-        "unplayedrec",
-        alias={"未玩推荐"},
+        "randomrec",
+        alias={"随机推荐"},
         desc="从已绑定 Steam 库中随机推荐一款未玩且评价过线的游戏。",
     )
-    async def recommend_unplayed_game(self, event: AstrMessageEvent):
+    async def recommend_random_game(self, event: AstrMessageEvent):
         try:
             chat_platform, chat_user_id = chat_identity_from_event(event)
             binding = await self.cache.get_steam_account_binding(chat_platform, chat_user_id)
@@ -272,7 +272,7 @@ class SteamGameRecommenderPlugin(Star):
 
             owned_games = await self.steam_client.get_owned_games(binding.steam_id64)
             if not owned_games:
-                yield event.plain_result("Steam 游戏库为空或不可见，无法推荐未玩游戏。")
+                yield event.plain_result("Steam 游戏库为空或不可见，无法进行随机推荐。")
                 return
 
             min_review_count = safe_int(self.config.get("steam_min_review_count"), 50)
@@ -290,18 +290,18 @@ class SteamGameRecommenderPlugin(Star):
                 recommendation.game,
             )
         except AccountBindingError as exc:
-            yield event.plain_result(f"未玩游戏推荐失败：{exc}")
+            yield event.plain_result(f"随机推荐失败：{exc}")
             return
         except UnplayedRecommendationError as exc:
-            yield event.plain_result(f"未玩游戏推荐失败：{exc}")
+            yield event.plain_result(f"随机推荐失败：{exc}")
             return
         except SteamApiError as exc:
-            logger.warning(f"Steam unplayed game recommendation failed: {exc}")
+            logger.warning(f"Steam random recommendation failed: {exc}")
             yield event.plain_result(f"Steam 查询失败：{exc}")
             return
         except Exception as exc:
-            logger.exception("Unplayed game recommendation failed")
-            yield event.plain_result(f"未玩游戏推荐失败：{exc}")
+            logger.exception("Random game recommendation failed")
+            yield event.plain_result(f"随机推荐失败：{exc}")
             return
 
         yield event.plain_result(

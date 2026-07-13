@@ -16,7 +16,7 @@ from astrbot_plugin_steam_game_recommender.storage.models import (
 )
 
 
-class UnplayedCommandTest(unittest.IsolatedAsyncioTestCase):
+class RandomRecommendationCommandTest(unittest.IsolatedAsyncioTestCase):
     async def test_command_sends_one_plain_message_without_forward_record_or_extra_fields(
         self,
     ) -> None:
@@ -28,7 +28,7 @@ class UnplayedCommandTest(unittest.IsolatedAsyncioTestCase):
         plugin.config = {"steam_min_review_count": 50, "steam_min_positive_ratio": 0.65}
         event = PlainEvent()
 
-        results = [item async for item in plugin.recommend_unplayed_game(event)]
+        results = [item async for item in plugin.recommend_random_game(event)]
 
         self.assertEqual(len(results), 1)
         self.assertEqual(len(event.plain_messages), 1)

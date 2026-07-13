@@ -35,22 +35,24 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class SteamOnlyMetadataTest(unittest.TestCase):
-    def test_plugin_id_display_name_and_version_are_0_6_0(self) -> None:
+    def test_plugin_id_display_name_and_version_are_0_6_1(self) -> None:
         main_text = (ROOT / "main.py").read_text(encoding="utf-8")
         metadata_text = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
 
         self.assertIn('PLUGIN_NAME = "astrbot_plugin_steam_game_recommender"', main_text)
-        self.assertIn('PLUGIN_VERSION = "0.6.0"', main_text)
+        self.assertIn('PLUGIN_VERSION = "0.6.1"', main_text)
         self.assertIn("class SteamGameRecommenderPlugin", main_text)
         self.assertIn("name: astrbot_plugin_steam_game_recommender", metadata_text)
         self.assertIn("display_name: Steam 游戏推荐助手", metadata_text)
-        self.assertIn("version: 0.6.0", metadata_text)
+        self.assertIn("version: 0.6.1", metadata_text)
 
     def test_readme_documents_only_current_steam_interfaces(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
-        for command in ("/gamerec", "/gamerec_retry", "/accountbind", "/unplayedrec"):
+        for command in ("/gamerec", "/gamerec_retry", "/accountbind", "/randomrec"):
             self.assertIn(command, readme)
+        self.assertNotIn("/unplayedrec", readme)
+        self.assertNotIn("/未玩推荐", readme)
         self.assertIn("-US", readme)
         self.assertIn("推荐分：86%", readme)
 

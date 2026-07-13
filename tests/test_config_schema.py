@@ -23,6 +23,19 @@ class ConfigSchemaTest(unittest.TestCase):
         self.assertEqual(schema["steam_api_key"]["type"], "string")
         self.assertEqual(schema["steam_api_key"]["default"], "")
         self.assertIn("GetOwnedGames", schema["steam_api_key"]["hint"])
+        self.assertIn("/randomrec", schema["steam_api_key"]["hint"])
+        self.assertNotIn("/unplayedrec", schema["steam_api_key"]["hint"])
+
+    def test_random_recommendation_thresholds_use_current_command_name(self) -> None:
+        schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+
+        review_hint = schema["steam_min_review_count"]["hint"]
+        ratio_setting = schema["steam_min_positive_ratio"]
+        self.assertIn("/randomrec", review_hint)
+        self.assertIn("随机推荐", ratio_setting["description"])
+        self.assertIn("/randomrec", ratio_setting["hint"])
+        self.assertNotIn("/unplayedrec", review_hint + ratio_setting["hint"])
 
     def test_llm_fallback_toggle_is_exposed_after_provider(self) -> None:
         schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"

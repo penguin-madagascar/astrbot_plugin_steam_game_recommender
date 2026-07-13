@@ -21,7 +21,7 @@
   "steam_api_key": {
     "type": "string",
     "description": "Steam Web API Key",
-    "hint": "用于 /gamerec 的游戏库过滤和 /unplayedrec 调用 Steam GetOwnedGames；留空时账号绑定仍可用，但无法读取游戏库。",
+    "hint": "用于 /gamerec 的游戏库过滤和 /randomrec 调用 Steam GetOwnedGames；留空时账号绑定仍可用，但无法读取游戏库。",
     "default": ""
   },
   "steam_price_heybox_notice": {
@@ -47,13 +47,13 @@
   "steam_min_review_count": {
     "type": "int",
     "description": "Steam 口碑先验强度",
-    "hint": "索引推荐使用该值（最低按 50）进行好评率贝叶斯平滑；/unplayedrec 仍将它作为最低评测数量。",
+    "hint": "索引推荐使用该值（最低按 50）进行好评率贝叶斯平滑；/randomrec 仍将它作为最低评测数量。",
     "default": 50
   },
   "steam_min_positive_ratio": {
     "type": "float",
-    "description": "未玩推荐最低好评率",
-    "hint": "仅用于 /unplayedrec 的评价门槛；索引推荐使用贝叶斯平滑口碑分，不按好评率直接删除候选。",
+    "description": "随机推荐最低好评率",
+    "hint": "仅用于 /randomrec 的评价门槛；索引推荐使用贝叶斯平滑口碑分，不按好评率直接删除候选。",
     "default": 0.65
   },
   "cache_ttl_hours": {
