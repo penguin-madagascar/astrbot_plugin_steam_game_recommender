@@ -56,6 +56,44 @@ class SteamOnlyMetadataTest(unittest.TestCase):
         self.assertIn("-US", readme)
         self.assertIn("推荐分：86%", readme)
 
+    def test_readme_is_a_user_facing_overview_with_combined_examples(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        headings = (
+            "## 项目定位",
+            "## 核心能力",
+            "## 快速开始",
+            "## 推荐结果",
+            "## 安装与配置",
+            "## 使用边界",
+        )
+        positions = [readme.index(heading) for heading in headings]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn(
+            "/gamerec [排除已有|仅查看已有] [区域] <自然语言需求>",
+            readme,
+        )
+        for example in (
+            "/gamerec 排除已有 -US 双人合作解谜，预算 30 美元",
+            "/游戏推荐 仅查看已有 日区 适合周末通关的剧情游戏，预算 3000 日元",
+            "/gamerec 排除已有 国区 支持简体中文的轻松经营游戏，预算 100 元",
+        ):
+            self.assertIn(example, readme)
+        self.assertIn("游戏库过滤参数必须位于需求开头", readme)
+
+        for implementation_detail in (
+            "## 评分规则",
+            "## LLM 行为",
+            "## 开发验证",
+            "min(log10(",
+            "evidence_ids",
+            "最多 5 路并发",
+            "`+5`",
+            "steam_index_ttl_hours",
+            "cache_ttl_hours",
+        ):
+            self.assertNotIn(implementation_detail, readme)
+
 
 class SteamOnlyPreferenceTest(unittest.TestCase):
     def test_llm_json_accepts_extra_tags_and_reference_titles(self) -> None:

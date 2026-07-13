@@ -100,7 +100,7 @@ class CommandRegistrationTest(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
         self.assertNotIn("插件市场发布信息", readme)
-        self.assertIn("## 返回格式", readme)
+        self.assertIn("## 推荐结果", readme)
 
     def test_dashboard_schema_copy_and_order(self) -> None:
         schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))

@@ -17,6 +17,8 @@ class ChangelogTest(unittest.TestCase):
         self.assertIn("## 0.6.1 - 2026-07-13", text)
         self.assertIn("`/randomrec`", text)
         self.assertIn("`/随机推荐`", text)
+        self.assertIn("README", text)
+        self.assertIn("面向使用者", text)
         self.assertIn("## 0.6.0", text)
         self.assertIn("astrbot_plugin_steam_game_recommender", text)
         self.assertIn("连续分数", text)

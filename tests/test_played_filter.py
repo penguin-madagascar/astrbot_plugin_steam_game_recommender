@@ -8,6 +8,7 @@ from astrbot_plugin_steam_game_recommender.services.played_filter import (
     parse_library_filter_command,
     resolve_library_filter_mode,
 )
+from astrbot_plugin_steam_game_recommender.services.region_query import parse_region_query
 from astrbot_plugin_steam_game_recommender.storage.models import RankedGame, SteamOwnedGame
 
 
@@ -37,6 +38,31 @@ class LibraryFilterCommandTest(unittest.TestCase):
         self.assertEqual(parsed.query, "Steam 合作解谜")
         self.assertIsNone(unchanged.mode)
         self.assertEqual(unchanged.query, "Steam 合作解谜，排除已有的不要")
+
+    def test_documented_filter_and_region_order_is_parseable(self) -> None:
+        cases = (
+            (
+                "排除已有 -US 双人合作解谜，预算 30 美元",
+                "exclude_owned",
+                "US",
+                "双人合作解谜，预算 30 美元",
+            ),
+            (
+                "仅查看已有 日区 适合周末通关的剧情游戏，预算 3000 日元",
+                "only_owned",
+                "JP",
+                "适合周末通关的剧情游戏，预算 3000 日元",
+            ),
+        )
+
+        for query, expected_mode, expected_region, expected_text in cases:
+            with self.subTest(query=query):
+                library = parse_library_filter_command(query)
+                region = parse_region_query(library.query)
+
+                self.assertEqual(library.mode, expected_mode)
+                self.assertEqual(region.region, expected_region)
+                self.assertEqual(region.query, expected_text)
 
     def test_rejects_conflicting_command_or_inferred_modes(self) -> None:
         with self.assertRaises(LibraryFilterModeError):
