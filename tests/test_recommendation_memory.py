@@ -24,7 +24,12 @@ class RecommendationMemoryTest(unittest.IsolatedAsyncioTestCase):
             chat_platform="qq",
             chat_user_id="user-1",
             raw_query="Steam 合作解谜",
-            preference=GamePreference(platforms=["steam"], genres_like=["co-op"]),
+            preference=GamePreference(
+                platforms=["steam"],
+                genres_like=["co-op"],
+                budget=100,
+                budget_is_required=True,
+            ),
             result_limit=2,
             games=[
                 ranked_game("Game A", 1),
@@ -40,7 +45,29 @@ class RecommendationMemoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(loaded.raw_query, "Steam 合作解谜")
         self.assertEqual(loaded.shown_appids, [1, 2])
         self.assertEqual(loaded.preference.platforms, ["steam"])
+        self.assertTrue(loaded.preference.budget_is_required)
         self.assertEqual([item.title for item in loaded.last_results], ["Game A", "Game B"])
+
+    async def test_legacy_memory_defaults_budget_requirement_to_false(self) -> None:
+        cache = MemoryCache()
+        memory = build_recommendation_memory(
+            chat_platform="qq",
+            chat_user_id="user-1",
+            raw_query="预算 100 元",
+            preference=GamePreference(budget=100),
+            result_limit=1,
+            games=[ranked_game("Game A", 1)],
+            now=1000,
+        )
+        await save_recommendation_memory(cache, memory)
+        cache.payloads[recommendation_memory_key("qq", "user-1")]["preference"].pop(
+            "budget_is_required"
+        )
+
+        loaded = await load_recommendation_memory("qq", "user-1", cache, now=1010)
+
+        self.assertIsNotNone(loaded)
+        self.assertFalse(loaded.preference.budget_is_required)
 
     async def test_expired_memory_is_not_loaded(self) -> None:
         cache = MemoryCache()

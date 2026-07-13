@@ -136,6 +136,7 @@ class GamePreference(BaseModel):
     resolved_reference_games: list["ResolvedReferenceGame"] = Field(default_factory=list)
     players: int | None = None
     budget: float | None = None
+    budget_is_required: bool = False
     region: str | None = None
     budget_currency: str | None = None
     preferred_languages: list[str] = Field(default_factory=list)

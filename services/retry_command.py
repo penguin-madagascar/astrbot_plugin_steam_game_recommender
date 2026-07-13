@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..storage.models import GamePreference
+from .preference_rules import extract_budget
 from .recommendation_memory import (
     PreferencePatch,
     RecommendationResultSummary,
@@ -98,9 +99,11 @@ def parse_preference_patch(
             clear_conditions.append(name)
 
     overrides: dict[str, Any] = {}
-    budget = re.search(r"预算(?:改为|改成|调整到|设为|到)?\s*[¥￥]?\s*(\d+(?:\.\d+)?)", source)
-    if budget and "budget" not in clear_conditions:
-        overrides["budget"] = float(budget.group(1))
+    budget, budget_currency, budget_is_required = extract_budget(source.lower())
+    if budget is not None and "budget" not in clear_conditions:
+        overrides["budget"] = budget
+        overrides["budget_currency"] = budget_currency
+        overrides["budget_is_required"] = budget_is_required
     players = re.search(r"(?:改为|改成|调整为|要)?\s*(\d+)\s*人", source)
     if players and "players" not in clear_conditions:
         overrides["players"] = int(players.group(1))
@@ -142,10 +145,18 @@ def apply_preference_patch(
         elif field_name == "budget":
             data["budget"] = None
             data["budget_currency"] = None
+            data["budget_is_required"] = False
         elif field_name in {"players", "difficulty", "mood"}:
             data[field_name] = None
     for field_name, value in patch.condition_overrides.items():
-        if field_name in {"budget", "players", "difficulty", "mood"}:
+        if field_name in {
+            "budget",
+            "budget_currency",
+            "budget_is_required",
+            "players",
+            "difficulty",
+            "mood",
+        }:
             data[field_name] = value
 
     positive_titles = list(data.get("reference_games_like") or [])
@@ -196,7 +207,11 @@ def merge_retry_preferences(
         )
     if supplement.platforms:
         data["platforms"] = list(supplement.platforms)
-    for field_name in ("players", "budget", "region", "budget_currency", "difficulty", "mood"):
+    if supplement.budget is not None:
+        data["budget"] = supplement.budget
+        data["budget_currency"] = supplement.budget_currency
+        data["budget_is_required"] = supplement.budget_is_required
+    for field_name in ("players", "region", "difficulty", "mood"):
         value = getattr(supplement, field_name)
         if value is not None:
             data[field_name] = value

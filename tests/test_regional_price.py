@@ -126,7 +126,7 @@ class RegionalPriceBridgeTest(unittest.IsolatedAsyncioTestCase):
 
 
 class RegionalBudgetAndFormattingTest(unittest.TestCase):
-    def test_currency_mismatch_does_not_adjust_score(self) -> None:
+    def test_currency_mismatch_uses_unknown_budget_penalty(self) -> None:
         game = RankedGame(title="US Game", appid=123, score=80)
         summary = GamePriceSummary(
             region="US",
@@ -143,8 +143,8 @@ class RegionalBudgetAndFormattingTest(unittest.TestCase):
             GamePreference(budget=100, budget_currency="CNY", region="US"),
         )
 
-        self.assertEqual(enriched.score, 80)
-        self.assertEqual(enriched.score_breakdown.budget_adjustment, 0)
+        self.assertEqual(enriched.score, 78)
+        self.assertEqual(enriched.score_breakdown.budget_adjustment, -2)
 
     def test_region_local_budget_is_used_when_currency_is_implicit(self) -> None:
         game = RankedGame(title="US Game", appid=123, score=80)

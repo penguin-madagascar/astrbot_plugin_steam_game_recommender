@@ -7,6 +7,7 @@ from astrbot_plugin_steam_game_recommender.services.recommendation_memory import
 )
 from astrbot_plugin_steam_game_recommender.services.retry_command import (
     apply_preference_patch,
+    merge_retry_preferences,
     parse_preference_patch,
     parse_retry_request,
 )
@@ -94,7 +95,12 @@ class PreferencePatchTest(unittest.TestCase):
     def test_latest_condition_patch_can_override_and_clear(self) -> None:
         overridden = parse_preference_patch("预算改为 80，改成 3 人", len(self.results))
         preference, _appids, _titles = apply_preference_patch(
-            GamePreference(budget=100, budget_currency="CNY", players=2),
+            GamePreference(
+                budget=100,
+                budget_currency="CNY",
+                budget_is_required=True,
+                players=2,
+            ),
             overridden.patch,
             self.results,
         )
@@ -107,7 +113,26 @@ class PreferencePatchTest(unittest.TestCase):
 
         self.assertIsNone(preference.budget)
         self.assertIsNone(preference.budget_currency)
+        self.assertFalse(preference.budget_is_required)
         self.assertEqual(preference.players, 3)
+
+    def test_budget_patch_updates_requirement_level(self) -> None:
+        soft = parse_preference_patch("预算改为 80 元", len(self.results))
+        required = parse_preference_patch("预算必须低于 60 元", len(self.results))
+
+        self.assertEqual(soft.patch.condition_overrides["budget"], 80)
+        self.assertFalse(soft.patch.condition_overrides["budget_is_required"])
+        self.assertEqual(required.patch.condition_overrides["budget"], 60)
+        self.assertTrue(required.patch.condition_overrides["budget_is_required"])
+
+    def test_retry_merge_carries_required_budget_with_new_amount(self) -> None:
+        merged = merge_retry_preferences(
+            GamePreference(budget=100, budget_is_required=False),
+            GamePreference(budget=60, budget_is_required=True),
+        )
+
+        self.assertEqual(merged.budget, 60)
+        self.assertTrue(merged.budget_is_required)
 
 
 if __name__ == "__main__":

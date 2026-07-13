@@ -228,6 +228,24 @@ class PreferenceRulesTest(unittest.TestCase):
 
         self.assertEqual(merged.platforms, ["steam"])
 
+    def test_text_languages_override_llm_language_hallucinations(self) -> None:
+        absent = merge_text_preference(
+            GamePreference(
+                preferred_languages=["japanese"],
+                required_languages=["english"],
+            ),
+            "推荐合作解谜游戏",
+        )
+        explicit = merge_text_preference(
+            GamePreference(preferred_languages=["japanese"]),
+            "最好支持简体中文",
+        )
+
+        self.assertEqual(absent.preferred_languages, [])
+        self.assertEqual(absent.required_languages, [])
+        self.assertEqual(explicit.preferred_languages, ["schinese"])
+        self.assertEqual(explicit.required_languages, [])
+
     def test_pc_and_steam_are_distinct_platform_preferences(self) -> None:
         pc_preference = infer_preference_from_text("我想找 PC 上玩的合作射击游戏")
         steam_preference = infer_preference_from_text("Steam 上有没有双人合作游戏")
@@ -257,6 +275,17 @@ class PreferenceRulesTest(unittest.TestCase):
         self.assertEqual((usd.budget, usd.budget_currency), (30, "USD"))
         self.assertEqual((jpy.budget, jpy.budget_currency), (3000, "JPY"))
         self.assertEqual((implicit.budget, implicit.budget_currency), (100, None))
+
+    def test_marks_only_budget_clause_with_hard_marker_as_required(self) -> None:
+        unrelated = infer_preference_from_text("必须支持本地合作，预算 100 元")
+        required = infer_preference_from_text("合作游戏，预算必须低于 100 元")
+        required_english = infer_preference_from_text(
+            "Co-op games where the price must be under $30"
+        )
+
+        self.assertFalse(unrelated.budget_is_required)
+        self.assertTrue(required.budget_is_required)
+        self.assertTrue(required_english.budget_is_required)
 
     def test_explicit_text_count_overrides_llm_default_count(self) -> None:
         llm_preference = GamePreference(result_count=5)

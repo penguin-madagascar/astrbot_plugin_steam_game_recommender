@@ -150,7 +150,7 @@ def infer_preference_from_text(text: str) -> GamePreference:
     )
     players = 2 if wants_multiple_players else None
 
-    budget, budget_currency = extract_budget(lower)
+    budget, budget_currency, budget_is_required = extract_budget(lower)
 
     result_count = extract_result_count(lower) or 5
 
@@ -211,6 +211,7 @@ def infer_preference_from_text(text: str) -> GamePreference:
         reference_games_dislike=reference_dislike,
         players=players,
         budget=budget,
+        budget_is_required=budget_is_required,
         budget_currency=budget_currency,
         preferred_languages=preferred_languages,
         required_languages=required_languages,
@@ -266,14 +267,9 @@ def merge_text_preference(preference: GamePreference, text: str) -> GamePreferen
         inferred.parse_warnings,
     )
     data["platforms"] = merge_platforms(preference.platforms, inferred.platforms)
-    data["preferred_languages"] = merge_lists(
-        preference.preferred_languages,
-        inferred.preferred_languages,
-    )
-    data["required_languages"] = merge_lists(
-        preference.required_languages,
-        inferred.required_languages,
-    )
+    data["preferred_languages"] = list(inferred.preferred_languages)
+    data["required_languages"] = list(inferred.required_languages)
+    data["budget_is_required"] = inferred.budget_is_required
     for field in ("players", "budget", "difficulty", "mood"):
         if getattr(preference, field) in (None, "", []):
             data[field] = getattr(inferred, field)
@@ -515,13 +511,16 @@ def extract_result_count(text: str) -> int | None:
     return min(max(int(count_match.group(1)), 1), 10)
 
 
-def extract_budget(text: str) -> tuple[float | None, str | None]:
+def extract_budget(text: str) -> tuple[float | None, str | None, bool]:
     currency_pattern = (
         r"美元|美金|usd|日元|日币|jpy|円|欧元|eur|英镑|gbp|港币|hkd|"
         r"台币|新台币|twd|韩元|krw|人民币|rmb|cny|元|块"
     )
     patterns = (
-        rf"(?:预算|价格|价位)\s*(?:为|是|约|最多|不超过)?\s*"
+        rf"(?:预算|价格|价位|budget|price)\s*"
+        rf"(?:(?:改为|改成|调整到|设为|到|为|是|约|最多|不超过|不得超过|"
+        rf"不能超过|低于|小于|必须|一定要|只接受|务必|must|be|required|to|"
+        rf"under|below|at\s+most|less\s+than|only|accept)\s*)*"
         rf"(?P<symbol>[$€£¥￥]?)\s*(?P<amount>\d+(?:\.\d+)?)\s*"
         rf"(?P<currency>{currency_pattern})?",
         r"(?P<symbol>[$€£])\s*(?P<amount>\d+(?:\.\d+)?)",
@@ -530,12 +529,30 @@ def extract_budget(text: str) -> tuple[float | None, str | None]:
     )
     match = next((result for pattern in patterns if (result := re.search(pattern, text))), None)
     if match is None:
-        return None, None
+        return None, None, False
     amount = float(match.group("amount"))
     symbol = str(match.groupdict().get("symbol") or "")
     currency_text = str(match.groupdict().get("currency") or "").lower()
     currency = currency_from_budget_token(symbol or currency_text)
-    return amount, currency
+    clause_start = max(
+        (text.rfind(mark, 0, match.start()) for mark in ",，。；;!?！？\n"),
+        default=-1,
+    )
+    clause_ends = [
+        position
+        for mark in ",，。；;!?！？\n"
+        if (position := text.find(mark, match.end())) >= 0
+    ]
+    clause_end = min(clause_ends) if clause_ends else len(text)
+    clause = text[clause_start + 1 : clause_end]
+    is_required = bool(
+        re.search(
+            r"必须|一定要|只接受|务必|不得超过|不能超过|"
+            r"\bmust\b|\brequired\b|\bonly\s+accept\b",
+            clause,
+        )
+    )
+    return amount, currency, is_required
 
 
 def currency_from_budget_token(value: str) -> str | None:

@@ -29,6 +29,7 @@ from astrbot_plugin_steam_game_recommender.storage.models import (  # noqa: E402
     GamePriceSummary,
     RankedGame,
     RecommendationEvidence,
+    ScoreBreakdown,
 )
 from astrbot_plugin_steam_price_heybox.models import (  # noqa: E402
     GameIdentity,
@@ -351,6 +352,22 @@ class PriceBridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enriched[0].title, "Test Game")
         self.assertIsNone(enriched[0].price_summary)
 
+    async def test_missing_price_plugin_penalizes_steam_budget_candidate(self) -> None:
+        bridge = SteamPriceBridge(client=None, config={})
+        games = [
+            RankedGame(
+                title="Steam Game",
+                score=10,
+                platforms=["PC"],
+                stores=["Steam"],
+            )
+        ]
+
+        enriched = await bridge.enrich_ranked_games(games, GamePreference(budget=100))
+
+        self.assertEqual(enriched[0].score, 8)
+        self.assertEqual(enriched[0].score_breakdown.budget_adjustment, -2)
+
     async def test_bridge_uses_default_region_and_internal_price_defaults(self) -> None:
         captured_config = {}
 
@@ -414,6 +431,26 @@ class PriceBridgeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(enriched[0].score, 95)
         self.assertEqual(enriched[1].score, 95)
+
+    async def test_required_budget_penalty_reranks_without_filtering(self) -> None:
+        bridge = FixedPriceBridge(
+            {
+                "Expensive Game": price_summary(current_cny=120, lowest_cny=110),
+                "Budget Game": price_summary(current_cny=40, lowest_cny=30),
+            }
+        )
+        games = [
+            RankedGame(title="Expensive Game", score=100, platforms=["PC"], stores=["Steam"]),
+            RankedGame(title="Budget Game", score=90, platforms=["PC"], stores=["Steam"]),
+        ]
+
+        enriched = await bridge.enrich_ranked_games(
+            games,
+            GamePreference(budget=50, budget_is_required=True),
+        )
+
+        self.assertEqual([game.title for game in enriched], ["Budget Game", "Expensive Game"])
+        self.assertEqual([game.score for game in enriched], [95, 90])
 
     async def test_budget_enrichment_keeps_unknown_prices_with_small_penalty(self) -> None:
         bridge = FixedPriceBridge({"Budget Game": price_summary(current_cny=40, lowest_cny=30)})
@@ -524,6 +561,9 @@ class PriceBridgeTest(unittest.IsolatedAsyncioTestCase):
 
 
 class BudgetScoringTest(unittest.TestCase):
+    def test_score_breakdown_accepts_required_budget_penalty(self) -> None:
+        self.assertEqual(ScoreBreakdown(budget_adjustment=-10).budget_adjustment, -10)
+
     def test_current_price_inside_budget_adds_score(self) -> None:
         game = RankedGame(title="Budget Game", score=10)
         enriched = attach_price_summary(
@@ -552,6 +592,24 @@ class BudgetScoringTest(unittest.TestCase):
             )
         )
 
+    def test_historic_low_satisfies_budget_when_current_price_is_missing(self) -> None:
+        game = RankedGame(title="Historic Low Game", score=10)
+        summary = GamePriceSummary(
+            region="CN",
+            currency="CNY",
+            historic_low="¥80",
+            historic_low_amount=80,
+        )
+
+        enriched = attach_price_summary(
+            game,
+            summary,
+            GamePreference(budget=100, budget_is_required=True),
+        )
+
+        self.assertEqual(enriched.score, game.score)
+        self.assertEqual(enriched.score_breakdown.budget_adjustment, 0)
+
     def test_price_over_budget_penalizes_without_filtering(self) -> None:
         game = RankedGame(title="Expensive Game", score=10)
         enriched = attach_price_summary(
@@ -564,6 +622,36 @@ class BudgetScoringTest(unittest.TestCase):
         self.assertLess(enriched.score, game.score)
         self.assertEqual(enriched.score_breakdown.budget_adjustment, -5)
         self.assertTrue(any("高于预算" in item.text for item in enriched.recommendation_evidence))
+
+    def test_required_budget_violation_deducts_ten_without_filtering(self) -> None:
+        game = RankedGame(title="Required Budget Game", score=80)
+        enriched = attach_price_summary(
+            game,
+            price_summary(current_cny=120, lowest_cny=110),
+            GamePreference(budget=100, budget_is_required=True),
+        )
+
+        self.assertEqual(enriched.title, game.title)
+        self.assertEqual(enriched.score, 70)
+        self.assertEqual(enriched.score_breakdown.budget_adjustment, -10)
+
+    def test_incomplete_price_pair_uses_unknown_penalty(self) -> None:
+        game = RankedGame(title="Incomplete Price Game", score=80)
+        summary = GamePriceSummary(
+            region="CN",
+            currency="CNY",
+            current_price="¥120",
+            current_amount=120,
+        )
+
+        enriched = attach_price_summary(
+            game,
+            summary,
+            GamePreference(budget=100, budget_is_required=True),
+        )
+
+        self.assertEqual(enriched.score, 78)
+        self.assertEqual(enriched.score_breakdown.budget_adjustment, -2)
 
     def test_missing_price_for_budget_request_lowers_score(self) -> None:
         game = RankedGame(title="Unknown Price Game", score=10)

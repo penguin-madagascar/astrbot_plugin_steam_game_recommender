@@ -331,26 +331,33 @@ def attach_price_summary(
         )
         summary_currency = normalize_currency(summary.currency or "")
         if not expected_currency or not summary_currency:
+            adjustment = -2.0
             evidence.append(
                 budget_evidence(
                     "budget_currency_unknown",
                     "uncertain",
-                    "价格币种未确认，未调整预算评分",
+                    "价格币种未确认，预算匹配无法确认",
                 )
             )
         elif expected_currency != summary_currency:
+            adjustment = -2.0
             evidence.append(
                 budget_evidence(
                     "budget_currency_mismatch",
                     "uncertain",
                     (
                         f"预算币种 {expected_currency} 与价格币种 {summary_currency} 不一致，"
-                        "未调整预算评分"
+                        "预算匹配无法确认"
                     ),
                 )
             )
         else:
-            adjustment, budget_item = evaluate_budget(summary, budget, expected_currency)
+            adjustment, budget_item = evaluate_budget(
+                summary,
+                budget,
+                expected_currency,
+                preference.budget_is_required,
+            )
             evidence.append(budget_item)
 
     data["score"] = clamp_score(game.score + adjustment)
@@ -366,36 +373,34 @@ def evaluate_budget(
     summary: GamePriceSummary,
     budget: float,
     currency: str,
+    budget_is_required: bool = False,
 ) -> tuple[float, RecommendationEvidence]:
     budget_text = format_money(budget, currency)
-    if summary.current_amount is None:
-        return -2.0, budget_evidence(
-            "budget_price_unknown",
-            "uncertain",
-            "当前价格未获取，预算匹配无法确认",
-        )
-    if summary.current_amount <= budget:
+    if summary.current_amount is not None and summary.current_amount <= budget:
         return 5.0, budget_evidence(
             "budget_current_within",
             "positive",
             f"当前价 {summary.current_price} 在预算 {budget_text} 以内",
         )
-    if summary.historic_low_amount is None:
-        return -2.0, budget_evidence(
-            "budget_history_unknown",
-            "uncertain",
-            f"当前价 {summary.current_price} 高于预算 {budget_text}，但史低未知",
+    if summary.historic_low_amount is not None and summary.historic_low_amount <= budget:
+        current_context = (
+            f"当前价 {summary.current_price} 高于预算 {budget_text}"
+            if summary.current_amount is not None
+            else "当前价格未知"
         )
-    if summary.historic_low_amount <= budget:
         return 0.0, budget_evidence(
             "budget_historic_within",
             "negative",
-            (
-                f"当前价 {summary.current_price} 高于预算 {budget_text}，"
-                f"但史低 {summary.historic_low} 进过预算"
-            ),
+            f"{current_context}，但史低 {summary.historic_low} 进过预算",
         )
-    return -5.0, budget_evidence(
+    if summary.current_amount is None or summary.historic_low_amount is None:
+        return -2.0, budget_evidence(
+            "budget_price_unknown",
+            "uncertain",
+            "当前价格或史低未获取完整，预算匹配无法确认",
+        )
+    penalty = -10.0 if budget_is_required else -5.0
+    return penalty, budget_evidence(
         "budget_over",
         "negative",
         (f"当前价 {summary.current_price} 与史低 {summary.historic_low} 都高于预算 {budget_text}"),
