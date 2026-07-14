@@ -238,6 +238,21 @@ class PriceFormattingTest(unittest.TestCase):
         self.assertFalse(messages[0].startswith("一句话结论："))
         self.assertIn("当前条件", messages[0])
 
+    def test_empty_recommendations_preserve_resolution_and_recall_warnings(self) -> None:
+        messages = format_recommendation_messages(
+            GamePreference(
+                parse_warnings=[
+                    "参考游戏未能可靠解析",
+                    "Steam 标签召回能力暂时下降",
+                ]
+            ),
+            [],
+        )
+
+        self.assertIn("偏好解析提示：", messages[0])
+        self.assertIn("参考游戏未能可靠解析", messages[0])
+        self.assertIn("steam 标签召回能力暂时下降", messages[0].lower())
+
     def test_empty_warnings_do_not_emit_vague_no_issue_placeholder(self) -> None:
         game = RankedGame(
             title="Test Game",

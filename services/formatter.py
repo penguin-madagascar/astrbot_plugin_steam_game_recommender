@@ -34,11 +34,14 @@ def format_recommendation_messages(
 ) -> list[str]:
     count = min(limit or preference.result_count or 5, len(ranked_games))
     if not ranked_games:
+        lines = [
+            "暂时没有找到满足当前条件的游戏。",
+            "可以尝试放宽排除标签、人数、语言或类型条件后再查一次。",
+        ]
+        if preference.parse_warnings:
+            lines.append("偏好解析提示：" + "；".join(preference.parse_warnings))
         return [
-            (
-                "暂时没有找到满足当前条件的游戏。\n"
-                "可以尝试放宽排除标签、人数、语言或类型条件后再查一次。"
-            )
+            "\n".join(lines)
         ]
 
     displayed_games = ranked_games[:count]
