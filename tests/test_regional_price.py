@@ -20,6 +20,8 @@ from astrbot_plugin_steam_game_recommender.storage.models import (
     GamePreference,
     GamePriceSummary,
     RankedGame,
+    RecommendationEvidence,
+    ScoreBreakdown,
 )
 from astrbot_plugin_steam_price_heybox.models import (
     GameIdentity,
@@ -191,7 +193,7 @@ class RegionalBudgetAndFormattingTest(unittest.TestCase):
             text,
             "\n".join(
                 [
-                    "1. 《Test Game》｜推荐分：86%",
+                    "1. 《Test Game》｜推荐分：86/100",
                     "推荐理由：玩法契合合作解谜偏好。评测规模较大，口碑稳定。",
                     "价格（US）：当前价 $60；历史最低 $40；最近促销 $50（结束于 12 天前）",
                     "购买链接：https://store.steampowered.com/app/123/",
@@ -218,6 +220,83 @@ class RegionalBudgetAndFormattingTest(unittest.TestCase):
             warned[0],
             "找到 1 款 Steam 游戏，按推荐分从高到低排列。\n偏好解析提示：已排除已有游戏",
         )
+
+    def test_intro_uses_tier_first_wording_when_ranked_results_have_anchor_tiers(self) -> None:
+        tiered = RankedGame(
+            title="Tiered Game",
+            appid=123,
+            score=86,
+            score_breakdown=ScoreBreakdown(relevance_tier="A"),
+        )
+
+        messages = format_recommendation_messages(
+            GamePreference(region="CN", result_count=1),
+            [tiered],
+        )
+
+        self.assertEqual(
+            messages[0],
+            "找到 1 款 Steam 游戏，按核心匹配层级及层内推荐分排列。",
+        )
+
+    def test_relaxed_tier_reason_names_missing_core_feature(self) -> None:
+        relaxed = RankedGame(
+            title="Relaxed Game",
+            appid=123,
+            score=72,
+            score_breakdown=ScoreBreakdown(relevance_tier="B"),
+            recommendation_reason="Steam 口碑表现较稳定。",
+            recommendation_evidence=[
+                RecommendationEvidence(
+                    evidence_id="core_missing",
+                    category="core",
+                    sentiment="uncertain",
+                    text="宽松匹配：缺失或证据不足的核心特征为soulslike",
+                    important=True,
+                )
+            ],
+        )
+
+        text = "\n".join(format_game_block(1, relaxed))
+
+        self.assertIn("推荐理由：Steam 口碑表现较稳定。宽松匹配：", text)
+        self.assertIn("核心特征为soulslike", text)
+
+    def test_relaxed_tier_without_core_evidence_still_discloses_limited_match(self) -> None:
+        relaxed = RankedGame(
+            title="Relaxed Game",
+            appid=123,
+            score=60,
+            score_breakdown=ScoreBreakdown(relevance_tier="C"),
+            recommendation_reason="Steam 口碑表现较稳定。",
+        )
+
+        text = "\n".join(format_game_block(1, relaxed))
+
+        self.assertIn("宽松匹配", text)
+        self.assertIn("核心特征", text)
+
+    def test_relaxed_tier_adds_label_when_core_evidence_uses_plain_wording(self) -> None:
+        relaxed = RankedGame(
+            title="Relaxed Game",
+            appid=123,
+            score=60,
+            score_breakdown=ScoreBreakdown(relevance_tier="C"),
+            recommendation_reason="Steam 口碑表现较稳定。",
+            recommendation_evidence=[
+                RecommendationEvidence(
+                    evidence_id="core_missing",
+                    category="core",
+                    sentiment="uncertain",
+                    text="核心特征 soulslike 缺失",
+                    important=True,
+                )
+            ],
+        )
+
+        text = "\n".join(format_game_block(1, relaxed))
+
+        self.assertIn("宽松匹配：核心特征 soulslike 缺失", text)
 
 
 class TrackingPriceService:

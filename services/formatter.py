@@ -41,7 +41,17 @@ def format_recommendation_messages(
             )
         ]
 
-    lines = [f"找到 {count} 款 Steam 游戏，按推荐分从高到低排列。"]
+    displayed_games = ranked_games[:count]
+    has_anchor_tiers = any(
+        game.score_breakdown.relevance_tier in {"A", "B", "C"}
+        for game in displayed_games
+    )
+    order_text = (
+        "按核心匹配层级及层内推荐分排列"
+        if has_anchor_tiers
+        else "按推荐分从高到低排列"
+    )
+    lines = [f"找到 {count} 款 Steam 游戏，{order_text}。"]
     if preference.parse_warnings:
         lines.append("偏好解析提示：" + "；".join(preference.parse_warnings))
 
@@ -157,10 +167,11 @@ async def format_empty_recommendations_with_llm(
 
 def format_game_block(index: int, game: RankedGame, region: str | None = None) -> list[str]:
     reason = game.recommendation_reason or fallback_recommendation_reason(game)
+    reason = disclose_relaxed_match(game, reason)
     price_summary = game.price_summary
     selected_region = price_summary.region if price_summary else (region or "CN")
     lines = [
-        f"{index}. 《{game.title}》｜推荐分：{game.score}%",
+        f"{index}. 《{game.title}》｜推荐分：{game.score}/100",
         f"推荐理由：{reason}",
         (
             f"价格（{selected_region}）："
@@ -174,6 +185,33 @@ def format_game_block(index: int, game: RankedGame, region: str | None = None) -
 
 def fallback_recommendation_reason(game: RankedGame) -> str:
     return fallback_reason(game.recommendation_evidence)
+
+
+def disclose_relaxed_match(game: RankedGame, reason: str) -> str:
+    if game.score_breakdown.relevance_tier not in {"B", "C"}:
+        return reason
+    has_relaxed_label = "宽松匹配" in reason
+    has_core_gap = "核心" in reason and any(
+        marker in reason for marker in ("缺失", "不足", "未命中", "证据")
+    )
+    if has_relaxed_label and has_core_gap:
+        return reason
+    core_missing = next(
+        (
+            item.text
+            for item in game.recommendation_evidence
+            if item.evidence_id == "core_missing" and item.text
+        ),
+        "宽松匹配：部分核心特征缺失或证据不足",
+    )
+    if "宽松匹配" not in core_missing:
+        core_missing = f"宽松匹配：{core_missing}"
+    return f"{reason.rstrip()}{sentence(core_missing)}"
+
+
+def sentence(value: str) -> str:
+    text = str(value or "").strip().rstrip("。！？.!?")
+    return f"{text}。" if text else ""
 
 
 def valid_game_message(text: str, index: int, title: str) -> bool:

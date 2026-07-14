@@ -17,7 +17,8 @@ MAX_REASON_LENGTH = 180
 MAX_REASON_EVIDENCE = 8
 SYSTEM_PROMPT = (
     "你是 Steam 游戏推荐理由编辑器。只能使用输入的可信证据，不得补充未提供的玩法、"
-    "语言、价格、口碑或平台事实。输出 2 至 3 句简短中文理由，并只返回指定 JSON。"
+    "语言、价格、口碑或平台事实。大作意图只能表述为高知名度/大作倾向，不得声称 AAA 制作预算。"
+    "输出 2 至 3 句简短中文理由，并只返回指定 JSON。"
 )
 
 
@@ -115,7 +116,10 @@ def reason_prompt(
     unplayed: bool = False,
 ) -> str:
     numbered = "\n".join(
-        (f"{index}. ID={item.evidence_id} | {item.sentiment} | {item.category} | {item.text}")
+        (
+            f"{index}. ID={item.evidence_id} | {item.sentiment} | {item.category} | "
+            f"{user_facing_evidence_text(item.text)}"
+        )
         for index, item in enumerate(evidence, start=1)
     )
     important_ids = [
@@ -128,10 +132,16 @@ def reason_prompt(
         if unplayed
         else "优先保留最关键的匹配点；次要优点和非重要缺点可以省略。"
     )
+    mainstream_rule = (
+        "大作意图只能表述为高知名度/大作倾向，不得声称 AAA 制作预算。\n"
+        if any(item.evidence_id == "mainstream_intent" for item in evidence)
+        else ""
+    )
     return (
         f"APPID={appid if appid is not None else 'null'}\n"
         f"TITLE={title}\n"
         f"{focus}\n"
+        f"{mainstream_rule}"
         "从下面编号证据中选择通常 2 至 4 条来写 2 至 3 句理由，总长度不超过 180 字。\n"
         f"重要风险 ID（必须全部保留）：{json.dumps(important_ids, ensure_ascii=False)}\n"
         f"可信证据：\n{numbered}\n"
@@ -156,6 +166,10 @@ def validate_reason_response(
     if len(reason) > MAX_REASON_LENGTH or sentence_count(reason) not in {2, 3}:
         return None
     if not reason.endswith(("。", "！", "？", ".", "!", "?")):
+        return None
+    if any(item.evidence_id == "mainstream_intent" for item in evidence) and re.search(
+        r"AAA|3A", reason, flags=re.I
+    ):
         return None
 
     evidence_ids = normalize_evidence_ids(payload.get("evidence_ids"))
@@ -188,13 +202,16 @@ def select_reason_evidence(
         item for item in evidence if item.important and item.sentiment in {"negative", "uncertain"}
     ]
     priority = {
-        "preference": 0,
-        "reference": 1,
-        "language": 2,
-        "budget": 3,
+        "core": 0,
+        "supporting": 1,
+        "reference": 2,
+        "quality": 3,
         "reviews": 4,
         "popularity": 5,
-        "library": 6,
+        "preference": 6,
+        "library": 7,
+        "language": 8,
+        "budget": 9,
     }
     remaining = [
         item for item in evidence if item.evidence_id not in {x.evidence_id for x in important}
@@ -211,9 +228,13 @@ def select_reason_evidence(
 
 def fallback_reason(evidence: list[RecommendationEvidence]) -> str:
     selected = select_reason_evidence(evidence)
-    positives = [item.text for item in selected if item.sentiment == "positive"]
+    positives = [
+        user_facing_evidence_text(item.text)
+        for item in selected
+        if item.sentiment == "positive"
+    ]
     important_risks = [
-        item.text
+        user_facing_evidence_text(item.text)
         for item in selected
         if item.important and item.sentiment in {"negative", "uncertain"}
     ]
@@ -246,6 +267,11 @@ def fallback_unplayed_reason(evidence: list[RecommendationEvidence]) -> str:
 
 def important_risk_is_mentioned(item: RecommendationEvidence, reason: str) -> bool:
     text = reason.casefold()
+    if item.category == "core":
+        return any(word in text for word in ("宽松", "缺失")) or (
+            "核心" in text
+            and any(word in text for word in ("不足", "未命中", "证据", "未确认", "未知"))
+        )
     if item.category == "language":
         return any(word in text for word in ("语言", "中文", "英文", "日语", "韩语")) and any(
             word in text for word in ("未确认", "不支持", "缺失", "未知")
@@ -259,6 +285,13 @@ def important_risk_is_mentioned(item: RecommendationEvidence, reason: str) -> bo
     return any(
         word in text
         for word in ("未确认", "不支持", "高于", "不一致", "未命中", "相似", "缺失", "未知")
+    )
+
+
+def user_facing_evidence_text(value: str) -> str:
+    return str(value or "").replace(
+        "Wilson 置信下界",
+        "95% Wilson 好评率下界",
     )
 
 

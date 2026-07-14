@@ -7,8 +7,10 @@ import unittest
 
 from astrbot_plugin_steam_game_recommender.services.explanation_builder import (
     build_unplayed_evidence,
+    fallback_reason,
     generate_recommendation_reasons,
     generate_unplayed_reason,
+    reason_prompt,
     select_reason_evidence,
     validate_reason_response,
 )
@@ -131,6 +133,105 @@ class ReasonValidationTest(unittest.TestCase):
 
         self.assertLessEqual(len(selected), 8)
         self.assertIn("required_risk", [item.evidence_id for item in selected])
+
+    def test_positive_evidence_is_selected_in_user_facing_priority_order(self) -> None:
+        values = [
+            evidence("library", "library", "positive", "命中游戏库偏好"),
+            evidence("reviews", "reviews", "positive", "Steam 口碑稳定"),
+            evidence("quality", "quality", "positive", "高知名度/大作倾向"),
+            evidence("reference", "reference", "positive", "已解析参考游戏"),
+            evidence("supporting", "supporting", "positive", "命中辅助标签"),
+            evidence("core", "core", "positive", "命中核心标签"),
+        ]
+
+        selected = select_reason_evidence(values, limit=4)
+
+        self.assertEqual(
+            [item.evidence_id for item in selected],
+            ["core", "supporting", "reference", "quality"],
+        )
+
+    def test_core_missing_risk_accepts_core_relaxed_or_missing_wording(self) -> None:
+        core_missing = evidence(
+            "core_missing",
+            "core",
+            "uncertain",
+            "宽松匹配：缺失核心特征 soulslike",
+            important=True,
+        )
+        risk_sentences = (
+            "核心特征证据仍不足。",
+            "这是宽松匹配结果。",
+            "关键玩法存在缺失。",
+        )
+
+        for risk_sentence in risk_sentences:
+            with self.subTest(risk_sentence=risk_sentence):
+                result = validate_reason_response(
+                    json.dumps(
+                        {
+                            "appid": 123,
+                            "reason": f"游戏命中部分偏好。{risk_sentence}",
+                            "evidence_ids": ["core_missing"],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    appid=123,
+                    evidence=[core_missing],
+                )
+
+                self.assertIsNotNone(result)
+
+    def test_wilson_evidence_uses_statistically_precise_user_facing_wording(self) -> None:
+        reviews = evidence(
+            "review_confidence",
+            "reviews",
+            "positive",
+            "Steam 好评率 90%，共 1000 条评测；Wilson 置信下界 88%",
+        )
+
+        prompt = reason_prompt(123, "Test Game", [reviews])
+        fallback = fallback_reason([reviews])
+
+        self.assertIn("95% Wilson 好评率下界 88%", prompt)
+        self.assertIn("95% Wilson 好评率下界 88%", fallback)
+        self.assertNotIn("Wilson 置信下界", prompt)
+
+    def test_mainstream_prompt_forbids_claiming_aaa_budget(self) -> None:
+        mainstream = evidence(
+            "mainstream_intent",
+            "quality",
+            "positive",
+            "按高知名度/大作倾向提高成熟口碑在层内的权重",
+        )
+
+        prompt = reason_prompt(123, "Test Game", [mainstream])
+
+        self.assertIn("只能表述为高知名度/大作倾向", prompt)
+        self.assertIn("不得声称 AAA 制作预算", prompt)
+
+    def test_mainstream_reason_rejects_unverifiable_aaa_budget_claim(self) -> None:
+        mainstream = evidence(
+            "mainstream_intent",
+            "quality",
+            "positive",
+            "按高知名度/大作倾向提高成熟口碑在层内的权重",
+        )
+
+        result = validate_reason_response(
+            json.dumps(
+                {
+                    "appid": 123,
+                    "reason": "这是 AAA 制作预算的游戏。整体口碑表现稳定。",
+                    "evidence_ids": ["mainstream_intent"],
+                },
+                ensure_ascii=False,
+            ),
+            appid=123,
+            evidence=[mainstream],
+        )
+
+        self.assertIsNone(result)
 
 
 class ConcurrentReasonGenerationTest(unittest.IsolatedAsyncioTestCase):
