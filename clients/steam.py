@@ -261,19 +261,39 @@ class SteamClient:
         )
 
     async def get_popular_tags(self) -> list[dict[str, Any]]:
-        data = await self._get_json(STEAM_POPULAR_TAGS_URL, {})
-        if not isinstance(data, list):
-            return []
+        cache_key = self._cache_key(STEAM_POPULAR_TAGS_URL, {})
+        fresh_key = f"{cache_key}:fresh"
+        stale_key = f"{cache_key}:stale"
+        fresh = await self.cache.get_json(fresh_key, STOREFRONT_FRESH_TTL_HOURS)
+        if fresh is not None:
+            try:
+                return parse_popular_tags(fresh)
+            except SteamApiError:
+                pass
 
-        tags: list[dict[str, Any]] = []
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            tagid = optional_int(item.get("tagid"))
-            name = optional_text(item.get("name"))
-            if tagid is not None and name:
-                tags.append({"tagid": tagid, "name": name})
-        return tags
+        error: SteamApiError
+        try:
+            response = await self.client.get(STEAM_POPULAR_TAGS_URL, params={})
+            response.raise_for_status()
+            tags = parse_popular_tags(response.json())
+        except httpx.HTTPError as exc:
+            error = SteamApiError(f"Steam 热门标签请求失败：{exc}")
+        except ValueError:
+            error = SteamApiError("Steam 热门标签返回了无法解析的 JSON。")
+        except SteamApiError as exc:
+            error = exc
+        else:
+            await self.cache.set_json(fresh_key, tags)
+            await self.cache.set_json(stale_key, tags)
+            return tags
+
+        stale = await self.cache.get_json(stale_key, STOREFRONT_STALE_TTL_HOURS)
+        if stale is not None:
+            try:
+                return parse_popular_tags(stale)
+            except SteamApiError:
+                pass
+        raise error
 
     async def get_store_page_tags(self, appid: int) -> list[str]:
         text = await self._get_text(
@@ -422,6 +442,24 @@ def parse_storefront_page(payload: Any) -> SteamStorefrontPage:
         total_count=total_count,
         start=start,
     )
+
+
+def parse_popular_tags(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, list) or not payload:
+        raise SteamApiError("Steam 热门标签返回了无效数据。")
+
+    tags: list[dict[str, Any]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            raise SteamApiError("Steam 热门标签返回了无效数据。")
+        tagid = item.get("tagid")
+        name = item.get("name")
+        if type(tagid) is not int or tagid <= 0:
+            raise SteamApiError("Steam 热门标签包含无效 tagid。")
+        if not isinstance(name, str) or not name.strip():
+            raise SteamApiError("Steam 热门标签包含无效名称。")
+        tags.append({"tagid": tagid, "name": name.strip()})
+    return tags
 
 
 def storefront_non_negative_int(value: Any, field_name: str) -> int:
