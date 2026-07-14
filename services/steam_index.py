@@ -16,6 +16,7 @@ from ..storage.models import (
     ResolvedReferenceGame,
     SteamSearchHit,
 )
+from .game_identity import is_confirmed_base_game
 from .similarity_ranker import (
     SteamTagProfile,
     build_profile_from_preference,
@@ -30,8 +31,8 @@ from .tag_normalizer import (
 
 logger = logging.getLogger(__name__)
 
-STEAM_INDEX_CACHE_KEY = "steam_index:v2"
-STEAM_INDEX_VERSION = 2
+STEAM_INDEX_CACHE_KEY = "steam_index:v3"
+STEAM_INDEX_VERSION = 3
 STEAM_INDEX_MAX_ENTRIES = 3_000
 STEAM_INDEX_MAX_SEARCH_TERMS = 256
 STEAM_INDEX_MAX_SEARCHES_PER_ROUND = 8
@@ -186,8 +187,14 @@ class SteamGameIndexService:
         await self.ensure_steam_tag_aliases()
         now = float(self.clock())
         current = snapshot or await self.load_snapshot()
-        records = {entry_key(record.candidate): record for record in current.entries}
+        records = {
+            entry_key(record.candidate): record
+            for record in current.entries
+            if is_confirmed_base_game(record.candidate)
+        }
         for candidate in existing or []:
+            if not is_confirmed_base_game(candidate):
+                continue
             key = entry_key(candidate)
             if key not in records:
                 records[key] = SteamIndexEntry(candidate=candidate, refreshed_at=now)
@@ -242,20 +249,16 @@ class SteamGameIndexService:
             results = await self._search_queries(queries)
             selected_hits: list[SteamSearchHit] = []
             other_hits: list[SteamSearchHit] = []
+            reference_results: list[tuple[str, str, list[SteamSearchHit]]] = []
             for query, hits, succeeded in results:
                 if succeeded:
                     coverage[normalize_text(query)] = now
                 polarity = reference_polarity_for(query, preference)
                 if polarity:
-                    selected = record_reference_resolution(
-                        preference,
-                        query,
-                        hits,
-                        polarity,
-                    )
+                    selected = best_reference_hit(query, hits)
                     if selected is not None:
-                        markers.setdefault(selected.appid, []).append((query, polarity))
                         selected_hits.append(selected)
+                    reference_results.append((query, polarity, hits))
                 other_hits.extend(hits)
 
             existing_appids = {
@@ -273,10 +276,33 @@ class SteamGameIndexService:
             enriched = await self._enrich_hits(new_hits[:remaining])
             enriched_count += len(enriched)
             for candidate in enriched:
-                if candidate.appid is not None:
-                    for query, polarity in markers.get(int(candidate.appid), []):
-                        candidate = mark_reference_query(candidate, query, polarity)
                 records[entry_key(candidate)] = SteamIndexEntry(candidate, now)
+
+            confirmed_appids = {
+                int(record.candidate.appid)
+                for record in records.values()
+                if record.candidate.appid is not None
+                and is_confirmed_base_game(record.candidate)
+            }
+            for query, polarity, hits in reference_results:
+                confirmed_hits = [hit for hit in hits if hit.appid in confirmed_appids]
+                selected = record_reference_resolution(
+                    preference,
+                    query,
+                    confirmed_hits,
+                    polarity,
+                )
+                if selected is not None:
+                    markers.setdefault(selected.appid, []).append((query, polarity))
+
+            for key, record in list(records.items()):
+                candidate = record.candidate
+                if candidate.appid is None or int(candidate.appid) not in markers:
+                    continue
+                marked = candidate
+                for query, polarity in markers[int(candidate.appid)]:
+                    marked = mark_reference_query(marked, query, polarity)
+                records[key] = SteamIndexEntry(marked, record.refreshed_at)
 
         await process_searches(initial_queries)
 
@@ -380,7 +406,7 @@ class SteamGameIndexService:
     async def _enrich_hits(self, hits: list[SteamSearchHit]) -> list[GameCandidate]:
         semaphore = asyncio.Semaphore(STEAM_HTTP_CONCURRENCY)
 
-        async def enrich_one(hit: SteamSearchHit) -> GameCandidate:
+        async def enrich_one(hit: SteamSearchHit) -> GameCandidate | None:
             async with semaphore:
                 candidate = self._round_prefetched.get(hit.appid)
                 detail_getter = getattr(self.steam_client, "get_game_detail", None)
@@ -389,17 +415,12 @@ class SteamGameIndexService:
                         candidate = await detail_getter(hit.appid)
                     except Exception:
                         candidate = None
-                if candidate is None:
-                    candidate = GameCandidate(
-                        appid=hit.appid,
-                        title=hit.title,
-                        platforms=["PC"],
-                        stores=["Steam"],
-                        raw_url=hit.store_url,
-                    )
+                if candidate is None or not is_confirmed_base_game(candidate):
+                    return None
                 return await self.enrich_candidate(candidate)
 
-        return list(await asyncio.gather(*(enrich_one(hit) for hit in hits)))
+        candidates = await asyncio.gather(*(enrich_one(hit) for hit in hits))
+        return [candidate for candidate in candidates if candidate is not None]
 
     async def enrich_candidate(self, candidate: GameCandidate) -> GameCandidate:
         has_steam_tags = await self.ensure_steam_tag_aliases()
@@ -705,12 +726,14 @@ def parse_snapshot(payload: Any) -> SteamIndexSnapshot:
             refreshed_at = float(item.get("refreshed_at") or 0.0)
         except (TypeError, ValueError):
             refreshed_at = 0.0
-        entries.append(
-            SteamIndexEntry(
-                candidate=validate_candidate(item["candidate"]),
-                refreshed_at=refreshed_at,
+        candidate = validate_candidate(item["candidate"])
+        if is_confirmed_base_game(candidate):
+            entries.append(
+                SteamIndexEntry(
+                    candidate=candidate,
+                    refreshed_at=refreshed_at,
+                )
             )
-        )
     raw_coverage = payload.get("search_coverage")
     coverage: dict[str, float] = {}
     if isinstance(raw_coverage, dict):
@@ -725,6 +748,8 @@ def parse_snapshot(payload: Any) -> SteamIndexSnapshot:
 def prune_snapshot(snapshot: SteamIndexSnapshot) -> SteamIndexSnapshot:
     newest_by_key: dict[str, SteamIndexEntry] = {}
     for record in snapshot.entries:
+        if not is_confirmed_base_game(record.candidate):
+            continue
         key = entry_key(record.candidate)
         current = newest_by_key.get(key)
         if current is None or record.refreshed_at >= current.refreshed_at:

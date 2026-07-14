@@ -13,6 +13,7 @@ from astrbot_plugin_steam_game_recommender.services.steam_index import (
     SteamGameIndexService,
     SteamIndexEntry,
     SteamIndexSnapshot,
+    parse_snapshot,
     prune_snapshot,
     reference_candidates,
     search_terms_for,
@@ -46,24 +47,86 @@ class SteamIndexSnapshotTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("query 0", pruned.search_coverage)
         self.assertIn("query 259", pruned.search_coverage)
 
-    async def test_v2_cache_key_ignores_legacy_index_payload(self) -> None:
+    async def test_v3_cache_key_ignores_v2_index_payload(self) -> None:
         cache = MemoryCache(
             {
-                "steam_index:entries": [dump_model(game(1, "Legacy", ["Co-op"]))],
+                "steam_index:v2": snapshot_payload(
+                    [game(1, "Legacy", ["Co-op"])],
+                    refreshed_at=900.0,
+                ),
             }
         )
         service = SteamGameIndexService(NoopSteamClient(), cache, clock=lambda: 1_000.0)
 
         entries = await service.load_entries()
 
-        self.assertEqual(STEAM_INDEX_CACHE_KEY, "steam_index:v2")
+        self.assertEqual(STEAM_INDEX_CACHE_KEY, "steam_index:v3")
         self.assertEqual(entries, [])
-        self.assertEqual(cache.read_keys, ["steam_index:v2"])
+        self.assertEqual(cache.read_keys, ["steam_index:v3"])
+
+    def test_v3_snapshot_keeps_only_confirmed_base_games(self) -> None:
+        payload = {
+            "version": 3,
+            "entries": [
+                {
+                    "candidate": dump_model(game(1, "Base Game", ["Co-op"])),
+                    "refreshed_at": 3.0,
+                },
+                {
+                    "candidate": dump_model(
+                        game(2, "Expansion", ["Co-op"], app_type="dlc")
+                    ),
+                    "refreshed_at": 2.0,
+                },
+                {
+                    "candidate": dump_model(
+                        game(3, "Unknown App", ["Co-op"], app_type=None)
+                    ),
+                    "refreshed_at": 1.0,
+                },
+            ],
+            "search_coverage": {},
+        }
+
+        snapshot = parse_snapshot(payload)
+
+        self.assertEqual([entry.candidate.appid for entry in snapshot.entries], [1])
+
+    async def test_refresh_drops_non_games_and_failed_details(self) -> None:
+        service = SteamGameIndexService(
+            MixedTypeSteamClient(),
+            MemoryCache({}),
+            clock=lambda: 1_000.0,
+        )
+
+        entries = await service.refresh_entries(
+            GamePreference(genres_like=["co-op"]),
+            [],
+            target_pool=10,
+        )
+
+        self.assertEqual([entry.appid for entry in entries], [1])
+
+    async def test_reference_resolution_ignores_exact_title_dlc(self) -> None:
+        preference = GamePreference(reference_games_like=["The Witcher 3"])
+        service = SteamGameIndexService(
+            TypeAwareReferenceSteamClient(),
+            MemoryCache({}),
+            clock=lambda: 1_000.0,
+        )
+
+        entries = await service.refresh_entries(preference, [], target_pool=10)
+
+        self.assertEqual(preference.resolved_reference_games[0].appid, 11)
+        self.assertEqual(
+            [entry.appid for entry in reference_candidates(preference, entries)],
+            [11],
+        )
 
     async def test_weak_cached_pool_triggers_deduplicated_query_recall(self) -> None:
         cache = MemoryCache(
             {
-                "steam_index:v2": snapshot_payload(
+                "steam_index:v3": snapshot_payload(
                     [game(1, "Cached Generic", ["Multiplayer"])],
                     refreshed_at=900.0,
                 )
@@ -90,8 +153,8 @@ class SteamIndexSnapshotTest(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(client.max_active_enrichments, 6)
         self.assertEqual(client.popular_tag_calls, 1)
 
-        written = cache.payloads["steam_index:v2"]
-        self.assertEqual(written["version"], 2)
+        written = cache.payloads["steam_index:v3"]
+        self.assertEqual(written["version"], 3)
         self.assertTrue(written["entries"])
         self.assertTrue(
             all("refreshed_at" in record and "candidate" in record for record in written["entries"])
@@ -178,8 +241,8 @@ class SteamIndexSnapshotTest(unittest.IsolatedAsyncioTestCase):
         covered = {term.lower(): 999.0 for term in terms[:8]}
         cache = MemoryCache(
             {
-                "steam_index:v2": {
-                    "version": 2,
+                "steam_index:v3": {
+                    "version": 3,
                     "entries": [],
                     "search_coverage": covered,
                 }
@@ -209,7 +272,7 @@ class SteamIndexSnapshotTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_cached_quality_pool_does_not_skip_current_reference_resolution(self) -> None:
         cached = [game(index, f"Generic {index}", ["Action"]) for index in range(1, 13)]
-        cache = MemoryCache({"steam_index:v2": snapshot_payload(cached, refreshed_at=900.0)})
+        cache = MemoryCache({"steam_index:v3": snapshot_payload(cached, refreshed_at=900.0)})
         client = ReferenceExpansionSteamClient()
         service = SteamGameIndexService(client, cache, clock=lambda: 1_000.0)
 
@@ -328,12 +391,43 @@ class ReferenceExpansionSteamClient(QueryAwareSteamClient):
         return ["Farming", "Life Sim", "Relaxing"]
 
 
+class MixedTypeSteamClient(QueryAwareSteamClient):
+    async def search_game_refs(self, search: str, page_size: int, **_kwargs: Any):
+        del search, page_size
+        return [
+            SteamSearchHit(appid=1, title="Base Game"),
+            SteamSearchHit(appid=2, title="Expansion"),
+            SteamSearchHit(appid=3, title="Missing Detail"),
+        ]
+
+    async def get_game_detail(self, appid: int) -> GameCandidate:
+        if appid == 1:
+            return game(1, "Base Game", ["Co-op"])
+        if appid == 2:
+            return game(2, "Expansion", ["Co-op"], app_type="dlc")
+        raise RuntimeError("detail unavailable")
+
+
+class TypeAwareReferenceSteamClient(QueryAwareSteamClient):
+    async def search_game_refs(self, search: str, page_size: int, **_kwargs: Any):
+        del search, page_size
+        return [
+            SteamSearchHit(appid=10, title="The Witcher 3"),
+            SteamSearchHit(appid=11, title="The Witcher 3: Wild Hunt"),
+        ]
+
+    async def get_game_detail(self, appid: int) -> GameCandidate:
+        if appid == 10:
+            return game(appid, "The Witcher 3", ["RPG"], app_type="dlc")
+        return game(appid, "The Witcher 3: Wild Hunt", ["RPG"])
+
+
 def snapshot_payload(
     candidates: list[GameCandidate],
     refreshed_at: float,
 ) -> dict[str, Any]:
     return {
-        "version": 2,
+        "version": 3,
         "entries": [
             {"candidate": dump_model(candidate), "refreshed_at": refreshed_at}
             for candidate in candidates
@@ -347,10 +441,12 @@ def game(
     title: str,
     tags: list[str],
     description: str | None = None,
+    app_type: str | None = "game",
 ) -> GameCandidate:
     return GameCandidate(
         appid=appid,
         title=title,
+        app_type=app_type,
         platforms=["PC"],
         genres=[],
         tags=tags,

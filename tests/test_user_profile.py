@@ -208,6 +208,7 @@ def steam_game(
     return GameCandidate(
         title=title,
         appid=appid,
+        app_type="game",
         platforms=["PC"],
         tags=tags,
         stores=["Steam"],
@@ -222,7 +223,7 @@ class MemoryCache:
 
     async def get_json(self, _key: str, _ttl_hours: int):
         return {
-            "version": 2,
+            "version": 3,
             "entries": [
                 {"candidate": entry.model_dump(), "refreshed_at": 1.0} for entry in self.entries
             ],

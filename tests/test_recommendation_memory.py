@@ -174,9 +174,26 @@ class ExcludedRecommendationTest(unittest.IsolatedAsyncioTestCase):
             steam_client=NoLiveSearchSteamClient(),
             cache=IndexCache(
                 [
-                    RankedGame(title="Shown Appid", appid=1, tags=["Co-op", "Puzzle"], score=10),
-                    RankedGame(title="Shown Title", tags=["Co-op", "Puzzle"], score=9),
-                    RankedGame(title="Fresh Game", appid=3, tags=["Co-op", "Puzzle"], score=8),
+                    RankedGame(
+                        title="Shown Appid",
+                        appid=1,
+                        app_type="game",
+                        tags=["Co-op", "Puzzle"],
+                        score=10,
+                    ),
+                    RankedGame(
+                        title="Shown Title",
+                        app_type="game",
+                        tags=["Co-op", "Puzzle"],
+                        score=9,
+                    ),
+                    RankedGame(
+                        title="Fresh Game",
+                        appid=3,
+                        app_type="game",
+                        tags=["Co-op", "Puzzle"],
+                        score=8,
+                    ),
                 ]
             ),
             min_review_count=0,
@@ -198,7 +215,7 @@ class IndexCache:
 
     async def get_json(self, _key: str, _ttl_hours: int) -> Any:
         return {
-            "version": 2,
+            "version": 3,
             "entries": [
                 {"candidate": entry.model_dump(), "refreshed_at": 1.0} for entry in self.entries
             ],
