@@ -14,7 +14,6 @@ from ..storage.models import (
     ScoreBreakdown,
     split_language_list,
 )
-from .game_identity import game_family_key
 from .constraint_evaluator import ConstraintAssessment, evaluate_candidate_constraints
 from .tag_normalizer import (
     candidate_canonical_tags,
@@ -131,19 +130,8 @@ def rank_steam_candidates(
     review_prior = candidate_pool_review_prior(candidates)
     prior_strength = max(int(min_review_count), 50)
     reference_appids = {*profile.reference_appids, *profile.reference_appids_dislike}
-    reference_titles = [
-        *profile.reference_titles,
-        *profile.reference_titles_dislike,
-        *(candidate.title for candidate in profile.positive_reference_candidates),
-        *(candidate.title for candidate in profile.negative_reference_candidates),
-    ]
     for candidate in candidates:
-        if (
-            candidate.appid is not None and int(candidate.appid) in reference_appids
-        ) or is_reference_title(
-            candidate.title,
-            reference_titles,
-        ):
+        if candidate.appid is not None and int(candidate.appid) in reference_appids:
             continue
 
         constraints = evaluate_candidate_constraints(
@@ -677,13 +665,6 @@ def copy_ranked_game(game: RankedGame, update: dict[str, Any]) -> RankedGame:
     if copier:
         return copier(update=update)
     return game.copy(update=update)
-
-
-def is_reference_title(title: str, reference_titles: list[str]) -> bool:
-    family = game_family_key(title)
-    return any(
-        family == game_family_key(reference) for reference in reference_titles if reference
-    )
 
 
 def release_year(value: str | None) -> int:

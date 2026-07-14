@@ -108,19 +108,23 @@ class EditionDeduplicationTest(unittest.TestCase):
 
         self.assertEqual([game.title for game in filtered], ["Portal 2"])
 
-    def test_reference_title_excludes_every_edition_in_same_family(self) -> None:
+    def test_resolved_reference_excludes_only_exact_seed_appid(self) -> None:
         ranked_games = rank_steam_candidates(
             [
-                candidate(1, "Control Ultimate Edition"),
-                candidate(2, "Portal 2"),
+                candidate(1, "Control"),
+                candidate(2, "Control Ultimate Edition"),
+                candidate(3, "Portal 2"),
             ],
-            SteamTagProfile(reference_titles=["Control"]),
+            SteamTagProfile(reference_titles=["Control"], reference_appids=[1]),
             min_review_count=0,
         )
 
-        self.assertEqual([game.title for game in ranked_games], ["Portal 2"])
+        self.assertEqual(
+            {game.title for game in ranked_games},
+            {"Control Ultimate Edition", "Portal 2"},
+        )
 
-    def test_resolved_reference_title_excludes_family_when_raw_query_is_localized(self) -> None:
+    def test_localized_reference_keeps_other_family_appids_eligible(self) -> None:
         ranked_games = rank_steam_candidates(
             [
                 candidate(2, "Control Ultimate Edition"),
@@ -134,7 +138,10 @@ class EditionDeduplicationTest(unittest.TestCase):
             min_review_count=0,
         )
 
-        self.assertEqual([game.title for game in ranked_games], ["Portal 2"])
+        self.assertEqual(
+            {game.title for game in ranked_games},
+            {"Control Ultimate Edition", "Portal 2"},
+        )
 
 
 def ranked(appid: int, title: str, score: int) -> RankedGame:
