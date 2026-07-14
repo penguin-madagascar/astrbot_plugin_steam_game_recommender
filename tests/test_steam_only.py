@@ -81,12 +81,12 @@ class SteamOnlyMetadataTest(unittest.TestCase):
             self.assertIn(example, readme)
         self.assertIn("游戏库过滤参数必须位于需求开头", readme)
         for scoring_detail in (
-            "标签覆盖 | 30%",
+            "标签覆盖 | 35%",
             "正向参考 | 25%",
             "游戏库画像 | 5%",
             "口碑 | 20%",
-            "知名度 | 20%",
-            "两项都不可用 | 42.86%",
+            "知名度 | 15%",
+            "两项都不可用 | 50%",
             "数据完整度不再作为独立评分项",
             "上限为 20 分",
             "上限为 15 分",
@@ -97,6 +97,18 @@ class SteamOnlyMetadataTest(unittest.TestCase):
             "强制措辞的预算为 -10",
         ):
             self.assertIn(scoring_detail, readme)
+
+        for config_detail in (
+            "模型与鉴权",
+            "价格与地区",
+            "推荐与评分",
+            "缓存与网络",
+            "https://steamcommunity.com/dev/apikey",
+            "五项正向权重",
+            "无需手工凑满 100",
+            "旧版平铺配置会在首次加载时自动迁移",
+        ):
+            self.assertIn(config_detail, readme)
 
         for implementation_detail in (
             "## 评分规则",
