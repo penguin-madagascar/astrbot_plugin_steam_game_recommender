@@ -5,10 +5,12 @@ import html
 import json
 import re
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from typing import Any
 
 import httpx
 
+from ..services.tag_normalizer import record_steam_tag_result_count
 from ..storage.models import GameCandidate, SteamOwnedGame, SteamSearchHit
 from ..storage.repository import SQLiteCacheRepository
 
@@ -18,6 +20,9 @@ STEAM_APP_REVIEWS_URL = "https://store.steampowered.com/appreviews/{appid}"
 STEAM_OWNED_GAMES_URL = "https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/"
 STEAM_STORE_BASE_URL = "https://store.steampowered.com/app"
 STEAM_POPULAR_TAGS_URL = "https://store.steampowered.com/tagdata/populartags/english"
+STEAM_STOREFRONT_SEARCH_URL = "https://store.steampowered.com/search/results"
+STOREFRONT_FRESH_TTL_HOURS = 24
+STOREFRONT_STALE_TTL_HOURS = 24 * 7
 
 STEAM_GENRE_TERMS = {
     "action": "action",
@@ -75,6 +80,13 @@ class SteamReviewSummary:
     recent_positive_ratio: float | None = None
 
 
+@dataclass(frozen=True)
+class SteamStorefrontPage:
+    hits: tuple[SteamSearchHit, ...]
+    total_count: int
+    start: int
+
+
 class SteamClient:
     """Steam Store public API data source for Steam-only recommendations."""
 
@@ -102,6 +114,7 @@ class SteamClient:
         tags: list[str] | None = None,
         page_size: int = 20,
         ordering: str = "-relevance",
+        language: str | None = None,
     ) -> list[GameCandidate]:
         hits = await self.search_game_refs(
             search=search,
@@ -110,6 +123,7 @@ class SteamClient:
             tags=tags,
             page_size=page_size,
             ordering=ordering,
+            language=language,
         )
         games: list[GameCandidate] = []
         for hit in hits:
@@ -129,6 +143,7 @@ class SteamClient:
         tags: list[str] | None = None,
         page_size: int = 10,
         ordering: str = "-relevance",
+        language: str | None = None,
     ) -> list[SteamSearchHit]:
         del ordering, platforms
         query = build_search_query(search, genres or [], tags or [])
@@ -137,7 +152,7 @@ class SteamClient:
             {
                 "term": query,
                 "cc": self.default_country,
-                "l": self.language,
+                "l": str(language or self.language).strip() or self.language,
             },
         )
         items = data.get("items") if isinstance(data, dict) else []
@@ -162,6 +177,48 @@ class SteamClient:
             if len(hits) >= result_limit:
                 break
         return hits
+
+    async def search_storefront_tag(
+        self,
+        tag_id: int,
+        page_size: int = 20,
+        start: int = 0,
+    ) -> SteamStorefrontPage:
+        resolved_tag_id = int(tag_id)
+        if resolved_tag_id <= 0:
+            raise ValueError("Steam tag ID must be positive.")
+        page = await self._get_storefront_page(
+            {
+                "ignore_preferences": 1,
+                "tags": resolved_tag_id,
+                "ndl": 1,
+                "l": "english",
+                "cc": self.default_country,
+                "start": max(int(start), 0),
+                "count": min(max(int(page_size), 1), 60),
+                "infinite": 1,
+            }
+        )
+        record_steam_tag_result_count(resolved_tag_id, page.total_count)
+        return page
+
+    async def browse_top_sellers(
+        self,
+        page_size: int = 60,
+        start: int = 0,
+    ) -> SteamStorefrontPage:
+        return await self._get_storefront_page(
+            {
+                "ignore_preferences": 1,
+                "filter": "topsellers",
+                "ndl": 1,
+                "l": "english",
+                "cc": self.default_country,
+                "start": max(int(start), 0),
+                "count": min(max(int(page_size), 1), 60),
+                "infinite": 1,
+            }
+        )
 
     async def get_game_detail(self, appid: int) -> GameCandidate:
         payload = await self._get_json(
@@ -280,6 +337,42 @@ class SteamClient:
         await self.cache.set_json(cache_key, data)
         return data
 
+    async def _get_storefront_page(self, params: dict[str, Any]) -> SteamStorefrontPage:
+        cache_key = self._cache_key(STEAM_STOREFRONT_SEARCH_URL, params)
+        fresh_key = f"{cache_key}:fresh"
+        stale_key = f"{cache_key}:stale"
+        fresh = await self.cache.get_json(fresh_key, STOREFRONT_FRESH_TTL_HOURS)
+        if fresh is not None:
+            try:
+                return parse_storefront_page(fresh)
+            except SteamApiError:
+                pass
+
+        error: SteamApiError
+        try:
+            response = await self.client.get(STEAM_STOREFRONT_SEARCH_URL, params=params)
+            response.raise_for_status()
+            payload = response.json()
+            page = parse_storefront_page(payload)
+        except httpx.HTTPError as exc:
+            error = SteamApiError(f"Steam 商店筛选请求失败：{exc}")
+        except ValueError as exc:
+            error = SteamApiError("Steam 商店筛选返回了无法解析的 JSON。")
+        except SteamApiError as exc:
+            error = exc
+        else:
+            await self.cache.set_json(fresh_key, payload)
+            await self.cache.set_json(stale_key, payload)
+            return page
+
+        stale = await self.cache.get_json(stale_key, STOREFRONT_STALE_TTL_HOURS)
+        if stale is not None:
+            try:
+                return parse_storefront_page(stale)
+            except SteamApiError:
+                pass
+        raise error
+
     async def _get_text(self, url: str, params: dict[str, Any]) -> str:
         cache_key = self._cache_key(url, params)
         cached = await self.cache.get_json(cache_key, self.cache_ttl_hours)
@@ -313,6 +406,87 @@ def build_search_query(search: str | None, genres: list[str], tags: list[str]) -
     ]
     query = " ".join(unique_texts(terms)).strip()
     return query or "popular"
+
+
+def parse_storefront_page(payload: Any) -> SteamStorefrontPage:
+    if not isinstance(payload, dict) or not payload.get("success"):
+        raise SteamApiError("Steam 商店筛选返回了无效状态。")
+    results_html = payload.get("results_html")
+    if not isinstance(results_html, str):
+        raise SteamApiError("Steam 商店筛选缺少结果 HTML。")
+    total_count = storefront_non_negative_int(payload.get("total_count"), "total_count")
+    start = storefront_non_negative_int(payload.get("start"), "start")
+    return SteamStorefrontPage(
+        hits=tuple(parse_storefront_results_html(results_html)),
+        total_count=total_count,
+        start=start,
+    )
+
+
+def storefront_non_negative_int(value: Any, field_name: str) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise SteamApiError(f"Steam 商店筛选字段 {field_name} 无效。") from exc
+    if number < 0:
+        raise SteamApiError(f"Steam 商店筛选字段 {field_name} 无效。")
+    return number
+
+
+def parse_storefront_results_html(value: str) -> list[SteamSearchHit]:
+    parser = _StorefrontResultParser()
+    parser.feed(value)
+    parser.close()
+    return parser.hits
+
+
+class _StorefrontResultParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.hits: list[SteamSearchHit] = []
+        self._seen_appids: set[int] = set()
+        self._appid: int | None = None
+        self._collect_title = False
+        self._title_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        if tag == "a":
+            classes = set(str(attributes.get("class") or "").split())
+            if "search_result_row" not in classes:
+                return
+            self._appid = optional_int(attributes.get("data-ds-appid"))
+            self._collect_title = False
+            self._title_parts = []
+            return
+        if tag == "span" and self._appid is not None:
+            classes = set(str(attributes.get("class") or "").split())
+            if "title" in classes:
+                self._collect_title = True
+
+    def handle_data(self, data: str) -> None:
+        if self._collect_title:
+            self._title_parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "span" and self._collect_title:
+            self._collect_title = False
+            return
+        if tag != "a" or self._appid is None:
+            return
+        title = html.unescape("".join(self._title_parts)).strip()
+        if title and self._appid not in self._seen_appids:
+            self.hits.append(
+                SteamSearchHit(
+                    appid=self._appid,
+                    title=title,
+                    store_url=f"{STEAM_STORE_BASE_URL}/{self._appid}/",
+                )
+            )
+            self._seen_appids.add(self._appid)
+        self._appid = None
+        self._collect_title = False
+        self._title_parts = []
 
 
 def parse_steam_game(appid: int, data: dict[str, Any]) -> GameCandidate:

@@ -142,6 +142,7 @@ TAG_ALIASES = {
 STEAM_TAG_ALIASES: dict[str, str] = {}
 STEAM_CANONICAL_TAGS: set[str] = set()
 STEAM_TAG_IDS: dict[str, int] = {}
+STEAM_TAG_RESULT_COUNTS: dict[str, int] = {}
 
 
 def register_steam_tag_aliases(tags: list[dict[str, Any]]) -> None:
@@ -184,6 +185,25 @@ def normalize_tag(value: str) -> str | None:
 def steam_tag_id_for(value: str) -> int | None:
     canonical = normalize_tag(value) or steam_tag_canonical_key(value)
     return STEAM_TAG_IDS.get(canonical)
+
+
+def steam_tag_for_id(tag_id: int) -> str | None:
+    expected = int(tag_id)
+    return next(
+        (canonical for canonical, registered_id in STEAM_TAG_IDS.items() if registered_id == expected),
+        None,
+    )
+
+
+def record_steam_tag_result_count(tag_id: int, total_count: int) -> None:
+    canonical = steam_tag_for_id(tag_id)
+    if canonical:
+        STEAM_TAG_RESULT_COUNTS[canonical] = max(int(total_count), 0)
+
+
+def steam_tag_result_count_for(value: str) -> int | None:
+    canonical = normalize_tag(value) or steam_tag_canonical_key(value)
+    return STEAM_TAG_RESULT_COUNTS.get(canonical)
 
 
 def canonical_tags_from_terms(values: list[str] | tuple[str, ...]) -> list[str]:
