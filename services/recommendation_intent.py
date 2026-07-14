@@ -3,8 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from ..storage.models import GamePreference
-from .tag_normalizer import canonical_tags_from_terms
+from ..storage.models import GameCandidate, GamePreference
+from .tag_normalizer import (
+    canonical_tags_from_terms,
+    steam_tag_result_count_for,
+)
 
 
 class IntentTagRole(str, Enum):
@@ -110,6 +113,60 @@ def build_recommendation_intent(preference: GamePreference) -> RecommendationInt
         references=(*positive_references, *negative_references),
         quality_intent=QualityIntent(preference.quality_intent),
         allow_unreleased=preference.allow_unreleased,
+    )
+
+
+def expand_intent_with_reference_tags(
+    intent: RecommendationIntent,
+    positive_reference_candidates: list[GameCandidate] | tuple[GameCandidate, ...],
+) -> RecommendationIntent:
+    tags_by_canonical = {tag.tag: tag for tag in intent.tags}
+    for reference in positive_reference_candidates:
+        source_tags = (
+            reference.ordered_tags
+            if reference.ordered_tags
+            else [*reference.tags, *reference.genres]
+        )
+        reference_tags = canonical_tags_from_terms(source_tags[:10])
+        anchor_pool = canonical_tags_from_terms(source_tags[:5])
+        counted = [
+            (tag, count)
+            for tag in anchor_pool
+            if (count := steam_tag_result_count_for(tag)) is not None
+        ]
+        if len(counted) >= 2:
+            selected = {tag for tag, _count in sorted(counted, key=lambda item: item[1])[:2]}
+            anchors = [tag for tag in anchor_pool if tag in selected]
+        else:
+            anchors = anchor_pool[:2]
+        anchor_weights = {
+            tag: weight for tag, weight in zip(anchors, (1.0, 0.8))
+        }
+
+        for position, tag in enumerate(reference_tags):
+            if tag in anchor_weights:
+                candidate = WeightedIntentTag(
+                    tag,
+                    IntentTagRole.ANCHOR,
+                    IntentTagSource.REFERENCE,
+                    anchor_weights[tag],
+                )
+            else:
+                candidate = WeightedIntentTag(
+                    tag,
+                    IntentTagRole.SUPPORTING,
+                    IntentTagSource.REFERENCE,
+                    0.5 * 0.85**position,
+                )
+            current = tags_by_canonical.get(tag)
+            if current is None or _tag_priority(candidate) > _tag_priority(current):
+                tags_by_canonical[tag] = candidate
+
+    return RecommendationIntent(
+        tags=tuple(tags_by_canonical.values()),
+        references=intent.references,
+        quality_intent=intent.quality_intent,
+        allow_unreleased=intent.allow_unreleased,
     )
 
 

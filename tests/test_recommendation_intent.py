@@ -12,8 +12,16 @@ from astrbot_plugin_steam_game_recommender.services.recommendation_intent import
     QualityIntent,
     ReferencePolarity,
     build_recommendation_intent,
+    expand_intent_with_reference_tags,
 )
-from astrbot_plugin_steam_game_recommender.storage.models import GamePreference
+from astrbot_plugin_steam_game_recommender.services.tag_normalizer import (
+    record_steam_tag_result_count,
+    register_steam_tag_aliases,
+)
+from astrbot_plugin_steam_game_recommender.storage.models import (
+    GameCandidate,
+    GamePreference,
+)
 
 
 class RecommendationIntentBuilderTest(unittest.TestCase):
@@ -124,6 +132,96 @@ class GamePreferenceIntentFieldsTest(unittest.TestCase):
         self.assertEqual(mainstream.quality_intent, "mainstream")
         self.assertEqual(unknown.quality_intent, "normal")
         self.assertFalse(mainstream.allow_unreleased)
+
+
+class ReferenceTagIntentExpansionTest(unittest.TestCase):
+    def test_selects_specific_cached_tags_and_preserves_reference_order(self) -> None:
+        tag_names = [
+            "Reference Broad",
+            "Reference Specific",
+            "Reference Narrow",
+            "Reference Middle",
+            "Reference Fifth",
+            "Reference Sixth",
+        ]
+        register_steam_tag_aliases(
+            [
+                {"tagid": index, "name": name}
+                for index, name in enumerate(tag_names, start=90_001)
+            ]
+        )
+        for tag_id, count in zip(range(90_001, 90_006), [5_000, 20, 40, 300, 900]):
+            record_steam_tag_result_count(tag_id, count)
+        intent = build_recommendation_intent(GamePreference())
+        reference = GameCandidate(
+            title="Reference",
+            ordered_tags=tag_names,
+        )
+
+        expanded = expand_intent_with_reference_tags(intent, [reference])
+
+        self.assertEqual(intent.tags, ())
+        self.assertEqual(
+            [tag.tag for tag in expanded.tags],
+            [name.lower().replace(" ", "_") for name in tag_names],
+        )
+        by_tag = {tag.tag: tag for tag in expanded.tags}
+        self.assertEqual(by_tag["reference_specific"].role, IntentTagRole.ANCHOR)
+        self.assertEqual(by_tag["reference_specific"].weight, 1.0)
+        self.assertEqual(by_tag["reference_narrow"].role, IntentTagRole.ANCHOR)
+        self.assertEqual(by_tag["reference_narrow"].weight, 0.8)
+        self.assertEqual(by_tag["reference_broad"].weight, 0.5)
+        self.assertAlmostEqual(by_tag["reference_middle"].weight, 0.5 * 0.85**3)
+        self.assertAlmostEqual(by_tag["reference_fifth"].weight, 0.5 * 0.85**4)
+        self.assertAlmostEqual(by_tag["reference_sixth"].weight, 0.5 * 0.85**5)
+        self.assertTrue(
+            all(tag.source is IntentTagSource.REFERENCE for tag in expanded.tags)
+        )
+
+    def test_falls_back_to_first_direct_tags_when_counts_are_missing(self) -> None:
+        intent = build_recommendation_intent(GamePreference())
+        reference = GameCandidate(
+            title="Reference",
+            tags=["Action", "RPG"],
+            genres=["Adventure"],
+        )
+
+        expanded = expand_intent_with_reference_tags(intent, [reference])
+
+        self.assertEqual(
+            [(tag.tag, tag.role, tag.weight) for tag in expanded.tags],
+            [
+                ("action", IntentTagRole.ANCHOR, 1.0),
+                ("rpg", IntentTagRole.ANCHOR, 0.8),
+                ("adventure", IntentTagRole.SUPPORTING, 0.5 * 0.85**2),
+            ],
+        )
+
+    def test_canonical_dedupe_never_downgrades_explicit_intent(self) -> None:
+        intent = build_recommendation_intent(
+            GamePreference(
+                required_tags=["Action"],
+                genres_dislike=["Horror"],
+            )
+        )
+        reference = GameCandidate(
+            title="Reference",
+            ordered_tags=["动作", "Action", "Horror", "RPG"],
+        )
+
+        expanded = expand_intent_with_reference_tags(intent, [reference])
+
+        self.assertEqual([tag.tag for tag in expanded.tags], ["action", "horror", "rpg"])
+        by_tag = {tag.tag: tag for tag in expanded.tags}
+        self.assertEqual(
+            (by_tag["action"].role, by_tag["action"].source, by_tag["action"].weight),
+            (IntentTagRole.REQUIRED, IntentTagSource.EXPLICIT, 1.0),
+        )
+        self.assertEqual(
+            (by_tag["horror"].role, by_tag["horror"].source, by_tag["horror"].weight),
+            (IntentTagRole.EXCLUDE, IntentTagSource.EXPLICIT, 1.0),
+        )
+        self.assertEqual(by_tag["rpg"].role, IntentTagRole.SUPPORTING)
 
 
 if __name__ == "__main__":
