@@ -127,7 +127,7 @@ def expand_intent_with_reference_tags(
             if reference.ordered_tags
             else [*reference.tags, *reference.genres]
         )
-        reference_tags = canonical_tags_from_terms(source_tags[:10])
+        reference_tags = canonical_tags_from_terms(source_tags)[:10]
         anchor_pool = canonical_tags_from_terms(source_tags[:5])
         counted = [
             (tag, count)

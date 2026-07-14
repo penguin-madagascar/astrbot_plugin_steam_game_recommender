@@ -223,6 +223,31 @@ class ReferenceTagIntentExpansionTest(unittest.TestCase):
         )
         self.assertEqual(by_tag["rpg"].role, IntentTagRole.SUPPORTING)
 
+    def test_supporting_limit_counts_canonical_tags_not_raw_values(self) -> None:
+        intent = build_recommendation_intent(GamePreference())
+        reference = GameCandidate(
+            title="Reference",
+            ordered_tags=[
+                "Action",
+                "动作",
+                "RPG",
+                "Adventure",
+                "Puzzle",
+                "Strategy",
+                "Simulation",
+                "Co-op",
+                "Multiplayer",
+                "Crafting",
+                "Building",
+                "Management",
+            ],
+        )
+
+        expanded = expand_intent_with_reference_tags(intent, [reference])
+
+        self.assertEqual(len(expanded.tags), 10)
+        self.assertEqual(expanded.tags[-1].tag, "building")
+
 
 if __name__ == "__main__":
     unittest.main()
