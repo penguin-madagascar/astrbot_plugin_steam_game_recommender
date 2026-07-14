@@ -146,7 +146,7 @@ class SteamIndexSnapshotTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ranked), 3)
         self.assertTrue(client.search_queries)
         self.assertLessEqual(len(client.search_queries), 8)
-        self.assertTrue(all(page_size == 10 for page_size in client.search_page_sizes))
+        self.assertTrue(all(page_size == 20 for page_size in client.search_page_sizes))
         self.assertEqual(len(client.detail_appids), len(set(client.detail_appids)))
         self.assertLessEqual(len(client.detail_appids), 60)
         self.assertLessEqual(client.max_active_searches, 6)
@@ -159,7 +159,7 @@ class SteamIndexSnapshotTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             all("refreshed_at" in record and "candidate" in record for record in written["entries"])
         )
-        self.assertTrue(written["search_coverage"])
+        self.assertEqual(written["search_coverage"], {})
 
     async def test_limits_each_round_to_at_most_sixty_new_appids(self) -> None:
         cache = MemoryCache({})
@@ -238,7 +238,7 @@ class SteamIndexSnapshotTest(unittest.IsolatedAsyncioTestCase):
             genres_like=["aaa", "co-op", "puzzle", "farming", "crafting", "building"]
         )
         terms = search_terms_for(preference, build_profile_from_preference(preference))
-        covered = {term.lower(): 999.0 for term in terms[:8]}
+        covered = {term.lower(): 999.0 for term in terms[:2]}
         cache = MemoryCache(
             {
                 "steam_index:v3": {
@@ -253,7 +253,7 @@ class SteamIndexSnapshotTest(unittest.IsolatedAsyncioTestCase):
 
         await service.refresh_entries(preference, [], target_pool=30)
 
-        self.assertTrue(set(client.search_queries) & set(terms[8:]))
+        self.assertTrue(set(client.search_queries) & set(terms[2:]))
 
     async def test_reference_only_query_expands_seed_tags_in_same_round(self) -> None:
         client = ReferenceExpansionSteamClient()

@@ -237,7 +237,7 @@ class SimilarityRankerTest(unittest.TestCase):
 
 
 class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
-    def test_aaa_request_uses_blockbuster_search_terms(self) -> None:
+    def test_aaa_marker_does_not_expand_to_blockbuster_title_terms(self) -> None:
         index_module = optional_import("astrbot_plugin_steam_game_recommender.services.steam_index")
         ranker = optional_import("astrbot_plugin_steam_game_recommender.services.similarity_ranker")
         preference = GamePreference(extra_tags=["aaa"])
@@ -247,11 +247,9 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
             ranker.build_profile_from_preference(preference),
         )
 
-        self.assertEqual(
-            terms[:5],
-            ["popular", "action adventure", "open world", "story rich", "rpg"],
-        )
-        self.assertNotIn("popular co-op", terms)
+        self.assertEqual(terms, ["popular co-op"])
+        self.assertNotIn("action adventure", terms)
+        self.assertNotIn("open world", terms)
 
     async def test_enrich_candidate_persists_description_mechanic_tags(self) -> None:
         index_module = optional_import("astrbot_plugin_steam_game_recommender.services.steam_index")

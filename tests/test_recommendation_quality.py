@@ -28,14 +28,13 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
                         ["Co-op", "Local Co-op", "Puzzle", "Adventure", "Split Screen"],
                     )
                 ],
-                "co op relaxing multiplayer": [
+                "co op": [
                     steam_game(
                         "Focused Co-op Puzzle",
                         ["Co-op", "Local Co-op", "Puzzle", "Adventure", "Casual"],
                     ),
                     steam_game("Generic Multiplayer", ["Multiplayer"]),
                 ],
-                "co op": [steam_game("Generic Co-op", ["Co-op", "Multiplayer"])],
                 "local coop": [steam_game("Local Co-op Game", ["Co-op", "Local Co-op"])],
                 "puzzle": [steam_game("Puzzle Game", ["Puzzle", "Singleplayer"])],
                 "adventure": [steam_game("Adventure Game", ["Adventure", "Singleplayer"])],
@@ -69,11 +68,11 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
                 "Dark Souls": [
                     steam_game("Dark Souls: Remastered", ["Soulslike", "Action", "RPG"])
                 ],
-                "soulslike action rpg": [
+                "soulslike": [
                     steam_game("Mortal Shell", ["Soulslike", "Action", "RPG"]),
                     steam_game("Generic Action", ["Action"]),
+                    steam_game("Salt and Sanctuary", ["Soulslike", "Action", "RPG"]),
                 ],
-                "soulslike": [steam_game("Salt and Sanctuary", ["Soulslike", "Action", "RPG"])],
                 "action": [steam_game("Action Only", ["Action"])],
                 "rpg": [steam_game("RPG Only", ["RPG"])],
             }
@@ -94,7 +93,8 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(titles[0], "Mortal Shell")
         self.assertNotIn("Dark Souls: Remastered", titles)
         self.assertTrue(any(call["search"] == "Dark Souls" for call in steam.calls))
-        self.assertTrue(any(call["search"] == "soulslike action rpg" for call in steam.calls))
+        self.assertTrue(any(call["search"] == "soulslike" for call in steam.calls))
+        self.assertFalse(any(call["search"] == "soulslike action rpg" for call in steam.calls))
 
     async def test_negative_reference_similarity_penalizes_without_excluding_similar_games(
         self,

@@ -56,6 +56,7 @@ from .services.retry_command import (
 )
 from .services.steam_index import (
     STEAM_INDEX_FALLBACK_WARNING,
+    STEAM_TAG_RECALL_DEGRADED_WARNING,
     SteamGameIndexService,
     has_supported_steam_platform,
     steam_only_scope_warning_for,
@@ -512,6 +513,10 @@ class SteamGameRecommenderPlugin(Star):
                     else None
                 ),
             )
+            if STEAM_TAG_RECALL_DEGRADED_WARNING in preference.parse_warnings:
+                degradation_reason = "steam_tag_recall"
+            elif STEAM_INDEX_FALLBACK_WARNING in preference.parse_warnings:
+                degradation_reason = "steam_index"
             ranked_games = [
                 game for game in ranked_games if is_confirmed_base_game(game)
             ]
