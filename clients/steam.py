@@ -142,7 +142,8 @@ class SteamClient:
         )
         items = data.get("items") if isinstance(data, dict) else []
         hits: list[SteamSearchHit] = []
-        for item in (items or [])[: min(max(page_size, 1), 40)]:
+        result_limit = min(max(page_size, 1), 40)
+        for item in items or []:
             if not isinstance(item, dict):
                 continue
             if str(item.get("type") or "").strip().lower() != "app":
@@ -158,6 +159,8 @@ class SteamClient:
                     store_url=f"{STEAM_STORE_BASE_URL}/{appid}/",
                 )
             )
+            if len(hits) >= result_limit:
+                break
         return hits
 
     async def get_game_detail(self, appid: int) -> GameCandidate:

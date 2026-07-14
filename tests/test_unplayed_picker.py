@@ -161,6 +161,65 @@ class UnplayedPickerTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(8, client.review_appids)
         self.assertNotIn(8, client.detail_appids)
 
+    async def test_any_played_edition_marks_the_whole_family_as_played(self) -> None:
+        from astrbot_plugin_steam_game_recommender.services.unplayed_picker import (
+            pick_random_unplayed_game,
+        )
+
+        family = [
+            SteamOwnedGame(appid=7, name="Control", playtime_forever=0),
+            SteamOwnedGame(
+                appid=8,
+                name="Control Ultimate Edition",
+                playtime_forever=120,
+            ),
+        ]
+        for owned_games in (
+            [*family, SteamOwnedGame(appid=9, name="Portal 2", playtime_forever=0)],
+            [
+                *reversed(family),
+                SteamOwnedGame(appid=9, name="Portal 2", playtime_forever=0),
+            ],
+        ):
+            with self.subTest(owned_appids=[game.appid for game in owned_games]):
+                client = FakeSteamClient(
+                    reviews={9: FakeReview(total_reviews=500, positive_ratio=0.9)}
+                )
+
+                result = await pick_random_unplayed_game(
+                    owned_games,
+                    client,
+                    rng=NoShuffleRandom(),
+                )
+
+                self.assertEqual(result.game.appid, 9)
+                self.assertEqual(client.review_appids, [9])
+
+    async def test_detail_failure_skips_candidate_and_checks_the_next_game(self) -> None:
+        from astrbot_plugin_steam_game_recommender.services.unplayed_picker import (
+            pick_random_unplayed_game,
+        )
+
+        client = FakeSteamClient(
+            reviews={
+                10: FakeReview(total_reviews=500, positive_ratio=0.9),
+                9: FakeReview(total_reviews=500, positive_ratio=0.9),
+            },
+            detail_failures={10},
+        )
+
+        result = await pick_random_unplayed_game(
+            [
+                SteamOwnedGame(appid=10, name="Unavailable Game", playtime_forever=0),
+                SteamOwnedGame(appid=9, name="Portal 2", playtime_forever=0),
+            ],
+            client,
+            rng=NoShuffleRandom(),
+        )
+
+        self.assertEqual(result.game.appid, 9)
+        self.assertEqual(client.detail_appids, [10, 9])
+
 
 class FakeReview:
     def __init__(self, total_reviews: int, positive_ratio: float | None) -> None:
@@ -174,9 +233,11 @@ class FakeSteamClient:
         self,
         reviews: dict[int, FakeReview],
         app_types: dict[int, str | None] | None = None,
+        detail_failures: set[int] | None = None,
     ) -> None:
         self.reviews = reviews
         self.app_types = app_types or {}
+        self.detail_failures = detail_failures or set()
         self.review_appids: list[int] = []
         self.detail_appids: list[int] = []
 
@@ -186,6 +247,8 @@ class FakeSteamClient:
 
     async def get_game_detail(self, appid: int) -> GameCandidate:
         self.detail_appids.append(appid)
+        if appid in self.detail_failures:
+            raise RuntimeError("detail unavailable")
         return GameCandidate(
             title=game_title(appid),
             appid=appid,
@@ -214,6 +277,7 @@ def game_title(appid: int) -> str:
         7: "Control",
         8: "Control Ultimate Edition",
         9: "Portal 2",
+        10: "Unavailable Game",
     }
     return names.get(appid, f"App {appid}")
 

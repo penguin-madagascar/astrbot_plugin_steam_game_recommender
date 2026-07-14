@@ -35,7 +35,7 @@ async def pick_random_unplayed_game(
     candidates = [
         game
         for game in deduplicate_owned_game_editions(owned_games)
-        if game.appid and game.playtime_forever <= 0
+        if game.appid
     ]
     if not candidates:
         raise UnplayedRecommendationError("Steam 游戏库中没有未游玩过的游戏。")
@@ -54,7 +54,10 @@ async def pick_random_unplayed_game(
         checked_count += 1
         if not review_passes(summary, min_count, min_ratio):
             continue
-        game = await steam_client.get_game_detail(owned_game.appid)
+        try:
+            game = await steam_client.get_game_detail(owned_game.appid)
+        except Exception:
+            continue
         if not is_confirmed_base_game(game):
             continue
         return UnplayedRecommendation(
@@ -72,16 +75,21 @@ async def pick_random_unplayed_game(
 def deduplicate_owned_game_editions(
     owned_games: list[SteamOwnedGame],
 ) -> list[SteamOwnedGame]:
-    selected: dict[str, SteamOwnedGame] = {}
+    families: dict[str, list[SteamOwnedGame]] = {}
     for owned_game in owned_games:
         title = owned_game.name or f"appid {owned_game.appid}"
-        family = game_family_key(title)
-        current = selected.get(family)
-        if current is None or (
-            is_edition_title(current.name or "") and not is_edition_title(title)
-        ):
-            selected[family] = owned_game
-    return list(selected.values())
+        families.setdefault(game_family_key(title), []).append(owned_game)
+
+    selected: list[SteamOwnedGame] = []
+    for family in families.values():
+        if any(game.playtime_forever > 0 for game in family):
+            continue
+        standard = next(
+            (game for game in family if not is_edition_title(game.name or "")),
+            None,
+        )
+        selected.append(standard or family[0])
+    return selected
 
 
 def review_passes(summary: Any, min_review_count: int, min_positive_ratio: float) -> bool:

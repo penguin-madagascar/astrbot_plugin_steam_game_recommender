@@ -49,6 +49,26 @@ class SteamClientTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([hit.appid for hit in hits], [123])
 
+    async def test_invalid_search_entities_do_not_consume_page_size(self) -> None:
+        http_client = FakeHttpClient(
+            {
+                "https://store.steampowered.com/api/storesearch/": {
+                    "items": [
+                        {"type": "sub", "id": 10, "name": "Package"},
+                        {"type": "bundle", "id": 20, "name": "Bundle"},
+                        {"type": "app", "id": 30, "name": "First Game"},
+                        {"type": "app", "id": 40, "name": "Second Game"},
+                        {"type": "app", "id": 50, "name": "Third Game"},
+                    ]
+                }
+            }
+        )
+        client = SteamClient(http_client, MemoryCache(), cache_ttl_hours=24)
+
+        hits = await client.search_game_refs(search="game", page_size=2)
+
+        self.assertEqual([hit.appid for hit in hits], [30, 40])
+
     async def test_search_games_parses_steam_details_and_uses_cache(self) -> None:
         cache = MemoryCache()
         http_client = FakeHttpClient(
