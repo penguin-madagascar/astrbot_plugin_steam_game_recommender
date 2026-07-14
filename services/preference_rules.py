@@ -265,8 +265,12 @@ def merge_text_preference(preference: GamePreference, text: str) -> GamePreferen
     data["preferred_languages"] = list(inferred.preferred_languages)
     data["required_languages"] = list(inferred.required_languages)
     data["budget_is_required"] = inferred.budget_is_required
-    data["quality_intent"] = inferred.quality_intent
-    data["allow_unreleased"] = inferred.allow_unreleased
+    data["quality_intent"] = (
+        "mainstream"
+        if "mainstream" in {preference.quality_intent, inferred.quality_intent}
+        else "normal"
+    )
+    data["allow_unreleased"] = preference.allow_unreleased or inferred.allow_unreleased
     if inferred.quality_intent == "mainstream":
         for field in ("required_tags", "genres_like", "extra_tags"):
             data[field] = remove_fabricated_mainstream_tags(data[field], text)

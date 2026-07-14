@@ -53,10 +53,12 @@ PREFERENCE_SCHEMA_HINT = """
 - extra_tags 放你从自然语言总结出的补充标签，例如“轻松”“本地合作”“剧情合作”“短流程”。
 - reference_games_like 只放用户提到的相似游戏名，不要把相似游戏扩写成推荐结果。
 - reference_search_terms 放参考游戏的 Steam 搜索友好标题候选，例如“黑暗之魂”对应 “Dark Souls”。
-- genres_dislike 放排除标签，例如恐怖、魂类、肉鸽、纯单人、pvp。
+- genres_dislike 只放用户明确排除的标签，例如恐怖、魂类、肉鸽、pvp；
+  明确说不要单机、不要单人或排除 singleplayer 时，才把 singleplayer 放入此字段。
 - 同一标签出现冲突时，以用户文本中最后一次明确表达的喜欢/排除极性为准。
 - reference_games_dislike 只放用户明确表示不想要类似体验的参考游戏名。
-- 单机、单人、singleplayer、single-player、纯单人统一写入 genres_like 的 singleplayer。
+- 单机、单人、singleplayer、single-player、纯单人在没有否定或排除措辞时，
+  统一写入 genres_like 的 singleplayer。
 - 用户说 3A、AAA、triple-A、大作、单机大作时，将 quality_intent 设为 "mainstream"；
   不要因此添加 action、adventure、rpg、story rich、open world 等标签，也不要编造具体游戏名。
 - 仅当用户明确请求未发售、即将发售、upcoming、coming-soon 游戏时，

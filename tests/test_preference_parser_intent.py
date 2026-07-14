@@ -40,6 +40,11 @@ class PreferenceParserIntentTest(unittest.TestCase):
         self.assertNotIn("genres_like 可包含 action、adventure、rpg", PREFERENCE_SCHEMA_HINT)
         self.assertNotIn("extra_tags 包含 aaa、story rich、open world", PREFERENCE_SCHEMA_HINT)
 
+    def test_schema_describes_singleplayer_tags_with_explicit_polarity(self) -> None:
+        self.assertNotIn("肉鸽、纯单人、pvp", PREFERENCE_SCHEMA_HINT)
+        self.assertIn("没有否定或排除措辞时", PREFERENCE_SCHEMA_HINT)
+        self.assertIn("明确说不要单机、不要单人或排除 singleplayer", PREFERENCE_SCHEMA_HINT)
+
     def test_llm_json_fields_are_normalized_by_game_preference(self) -> None:
         preference = parse_preference_json(
             '{"quality_intent":"MAINSTREAM","allow_unreleased":true}'

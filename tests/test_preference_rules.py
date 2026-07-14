@@ -363,6 +363,27 @@ class PreferenceRulesTest(unittest.TestCase):
         self.assertEqual(merged.extra_tags, [])
         self.assertEqual(merged.quality_intent, "mainstream")
 
+    def test_merge_preserves_validated_llm_intents_unknown_to_phrase_rules(self) -> None:
+        merged = merge_text_preference(
+            GamePreference(quality_intent="mainstream", allow_unreleased=True),
+            "推荐几款待发售的精品单人游戏",
+        )
+
+        self.assertEqual(merged.quality_intent, "mainstream")
+        self.assertTrue(merged.allow_unreleased)
+
+    def test_deterministic_positive_intents_override_llm_defaults(self) -> None:
+        merged = merge_text_preference(
+            GamePreference(quality_intent="normal", allow_unreleased=False),
+            "推荐即将发售的 AAA 游戏",
+        )
+        normal = merge_text_preference(GamePreference(), "推荐轻松解谜游戏")
+
+        self.assertEqual(merged.quality_intent, "mainstream")
+        self.assertTrue(merged.allow_unreleased)
+        self.assertEqual(normal.quality_intent, "normal")
+        self.assertFalse(normal.allow_unreleased)
+
     def test_infers_library_filter_mode_from_text(self) -> None:
         self.assertEqual(
             infer_preference_from_text("推荐几个合作游戏，排除已有").library_filter_mode,
