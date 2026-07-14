@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 import types
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 class FakeStar:
@@ -29,8 +31,10 @@ sys.modules.setdefault("astrbot.api.star", star_module)
 
 from astrbot_plugin_steam_game_recommender.services.preference_parser import (
     PREFERENCE_SCHEMA_HINT,
+    PreferenceParser,
     parse_preference_json,
 )  # noqa: E402
+from astrbot_plugin_steam_game_recommender.services import preference_parser as parser_module  # noqa: E402
 
 
 class PreferenceParserIntentTest(unittest.TestCase):
@@ -52,6 +56,81 @@ class PreferenceParserIntentTest(unittest.TestCase):
 
         self.assertEqual(preference.quality_intent, "mainstream")
         self.assertTrue(preference.allow_unreleased)
+
+
+class PreferenceParserDiagnosticsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_input_logs_the_empty_path(self) -> None:
+        parser = PreferenceParser(SimpleNamespace(), provider_id="provider/test")
+
+        with patch.object(parser_module.logger, "debug") as debug:
+            preference = await parser.parse_preference(object(), "  ")
+
+        self.assertIn("需求为空", preference.parse_warnings[0])
+        debug.assert_called_once_with(
+            "recommendation_parse event=parse_complete path=%s",
+            "empty",
+        )
+
+    async def test_success_logs_only_the_parse_path(self) -> None:
+        context = SimpleNamespace(
+            llm_generate=lambda **_kwargs: None,
+        )
+
+        async def generate(**_kwargs):
+            return SimpleNamespace(completion_text='{"genres_like":["puzzle"]}')
+
+        context.llm_generate = generate
+        parser = PreferenceParser(context, provider_id="provider/test")
+
+        with patch.object(parser_module.logger, "debug") as debug:
+            preference = await parser.parse_preference(object(), "想玩解谜游戏")
+
+        self.assertIn("puzzle", preference.genres_like)
+        debug.assert_called_once_with(
+            "recommendation_parse event=parse_complete path=%s",
+            "llm",
+        )
+
+    async def test_repaired_json_logs_the_repair_path(self) -> None:
+        responses = iter(
+            [
+                SimpleNamespace(completion_text="not json"),
+                SimpleNamespace(completion_text='{"genres_like":["puzzle"]}'),
+            ]
+        )
+
+        async def generate(**_kwargs):
+            return next(responses)
+
+        parser = PreferenceParser(
+            SimpleNamespace(llm_generate=generate),
+            provider_id="provider/test",
+        )
+        with patch.object(parser_module.logger, "debug") as debug:
+            preference = await parser.parse_preference(object(), "想玩解谜游戏")
+
+        self.assertIn("puzzle", preference.genres_like)
+        debug.assert_called_once_with(
+            "recommendation_parse event=parse_complete path=%s",
+            "llm_repair",
+        )
+
+    async def test_invalid_json_logs_the_keyword_fallback_path(self) -> None:
+        async def generate(**_kwargs):
+            return SimpleNamespace(completion_text="not json")
+
+        parser = PreferenceParser(
+            SimpleNamespace(llm_generate=generate),
+            provider_id="provider/test",
+        )
+        with patch.object(parser_module.logger, "debug") as debug:
+            preference = await parser.parse_preference(object(), "想玩解谜游戏")
+
+        self.assertTrue(any("关键词 fallback" in item for item in preference.parse_warnings))
+        debug.assert_called_once_with(
+            "recommendation_parse event=parse_complete path=%s",
+            "keyword_fallback",
+        )
 
 
 if __name__ == "__main__":

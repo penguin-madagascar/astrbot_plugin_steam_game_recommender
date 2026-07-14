@@ -108,6 +108,12 @@ class SteamTagRecallIntegrationTest(unittest.IsolatedAsyncioTestCase):
             preference.parse_warnings.count(STEAM_TAG_RECALL_DEGRADED_WARNING),
             1,
         )
+        self.assertTrue(
+            any(
+                "recommendation_recall event=recall_complete" in line
+                for line in logs.output
+            )
+        )
         self.assertTrue(any("degraded=True" in line for line in logs.output))
 
     async def test_missing_storefront_method_uses_text_and_marks_degraded(self) -> None:

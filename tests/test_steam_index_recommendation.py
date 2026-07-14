@@ -4,6 +4,7 @@ import importlib
 import importlib.util
 import unittest
 from typing import Any
+from unittest.mock import patch
 
 from astrbot_plugin_steam_game_recommender.storage.models import GameCandidate, GamePreference
 
@@ -114,6 +115,108 @@ class TagNormalizerTest(unittest.TestCase):
 
 
 class SimilarityRankerTest(unittest.TestCase):
+    def test_rank_entries_logs_allowlisted_ranking_diagnostics(self) -> None:
+        index_module = optional_import(
+            "astrbot_plugin_steam_game_recommender.services.steam_index"
+        )
+        game = steam_index_game(
+            "Diagnostic Puzzle",
+            tags=["Puzzle"],
+            review_total=1_000,
+            review_positive_ratio=0.9,
+        )
+
+        with self.assertLogs(index_module.logger.name, level="DEBUG") as logs:
+            ranked = index_module.rank_entries(
+                [game],
+                GamePreference(genres_like=["puzzle"]),
+            )
+
+        message = "\n".join(logs.output)
+        self.assertEqual(len(ranked), 1)
+        self.assertIn("recommendation_rank event=rank_complete", message)
+        self.assertIn("candidate_count=1", message)
+        self.assertIn("anchors=['puzzle']", message)
+        self.assertIn(f"'appid': {ranked[0].appid}", message)
+        self.assertIn("'tier': 'A'", message)
+        self.assertIn("'anchor_coverage':", message)
+        self.assertIn(
+            "'anchor_contributions': {'puzzle': "
+            "{'evidence': 0.65, 'contribution': 0.65}}",
+            message,
+        )
+        self.assertNotIn("Diagnostic Puzzle", message)
+
+    def test_rank_diagnostics_separate_required_tags_from_anchors(self) -> None:
+        index_module = optional_import(
+            "astrbot_plugin_steam_game_recommender.services.steam_index"
+        )
+        game = steam_index_game(
+            "Required Co-op",
+            tags=["Local Co-op"],
+        )
+
+        with self.assertLogs(index_module.logger.name, level="DEBUG") as logs:
+            ranked = index_module.rank_entries(
+                [game],
+                GamePreference(required_tags=["local_coop"]),
+            )
+
+        message = "\n".join(logs.output)
+        self.assertEqual(len(ranked), 1)
+        self.assertIn("required_tags=['local_coop']", message)
+        self.assertIn("anchors=[]", message)
+        self.assertIn("'tier': 'broad'", message)
+        self.assertIn("'anchor_contributions': {}", message)
+
+    def test_rank_diagnostics_report_each_anchor_contribution(self) -> None:
+        index_module = optional_import(
+            "astrbot_plugin_steam_game_recommender.services.steam_index"
+        )
+        game = steam_index_game(
+            "Partial Core Match",
+            tags=["Puzzle"],
+        )
+
+        with self.assertLogs(index_module.logger.name, level="DEBUG") as logs:
+            ranked = index_module.rank_entries(
+                [game],
+                GamePreference(genres_like=["puzzle", "strategy"]),
+            )
+
+        message = "\n".join(logs.output)
+        self.assertEqual(ranked[0].score_breakdown.relevance_tier, "B")
+        self.assertIn(
+            "'puzzle': {'evidence': 0.65, 'contribution': 0.325}",
+            message,
+        )
+        self.assertIn(
+            "'strategy': {'evidence': 0.0, 'contribution': 0.0}",
+            message,
+        )
+
+    def test_rank_diagnostics_are_not_built_when_debug_is_disabled(self) -> None:
+        index_module = optional_import(
+            "astrbot_plugin_steam_game_recommender.services.steam_index"
+        )
+        game = steam_index_game("No Debug Work", tags=["Puzzle"])
+
+        with (
+            patch.object(index_module.logger, "isEnabledFor", return_value=False),
+            patch.object(
+                index_module,
+                "build_candidate_tag_evidence",
+                side_effect=AssertionError("diagnostics should not be built"),
+                create=True,
+            ),
+        ):
+            ranked = index_module.rank_entries(
+                [game],
+                GamePreference(genres_like=["puzzle"]),
+            )
+
+        self.assertEqual(len(ranked), 1)
+
     def test_high_tag_overlap_beats_high_review_low_overlap(self) -> None:
         ranker = optional_import("astrbot_plugin_steam_game_recommender.services.similarity_ranker")
         profile = ranker.SteamTagProfile(

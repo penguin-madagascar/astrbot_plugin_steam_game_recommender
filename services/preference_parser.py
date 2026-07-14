@@ -76,23 +76,41 @@ class PreferenceParser:
     async def parse_preference(self, event: AstrMessageEvent, text: str) -> GamePreference:
         text = text.strip()
         if not text:
+            logger.debug(
+                "recommendation_parse event=parse_complete path=%s",
+                "empty",
+            )
             return GamePreference(parse_warnings=["需求为空，已使用默认偏好。"])
 
         try:
             raw = await self._llm_parse(event, text)
-            return merge_text_preference(parse_preference_json(raw), text)
+            preference = merge_text_preference(parse_preference_json(raw), text)
+            logger.debug(
+                "recommendation_parse event=parse_complete path=%s",
+                "llm",
+            )
+            return preference
         except Exception as exc:
             logger.warning(f"游戏推荐偏好解析失败，尝试修复 JSON：{exc}")
 
         try:
             fixed = await self._llm_repair(event, text)
-            return merge_text_preference(parse_preference_json(fixed), text)
+            preference = merge_text_preference(parse_preference_json(fixed), text)
+            logger.debug(
+                "recommendation_parse event=parse_complete path=%s",
+                "llm_repair",
+            )
+            return preference
         except Exception as exc:
             logger.warning(f"游戏推荐偏好 JSON 修复失败，使用关键词 fallback：{exc}")
 
         preference = keyword_fallback(text)
         preference.parse_warnings.append(
             "LLM 偏好解析失败，已使用关键词 fallback，结果可能不完整。"
+        )
+        logger.debug(
+            "recommendation_parse event=parse_complete path=%s",
+            "keyword_fallback",
         )
         return preference
 

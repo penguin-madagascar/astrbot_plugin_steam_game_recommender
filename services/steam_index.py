@@ -14,13 +14,16 @@ from ..storage.models import (
     ResolvedReferenceGame,
     SteamSearchHit,
 )
+from .candidate_tag_evidence import build_candidate_tag_evidence
 from .game_identity import (
     deduplicate_game_editions,
     game_family_key,
     is_confirmed_base_game,
 )
 from .recommendation_intent import (
+    IntentTagRole,
     QualityIntent,
+    RecommendationIntent,
     ReferencePolarity,
     ReferenceQuery,
     build_recommendation_intent,
@@ -304,8 +307,8 @@ class SteamGameIndexService:
             if record.candidate.appid in seed_appids
         ]
         logger.debug(
-            "Steam tag recall: tags=%s tagids=%s sources=%s verified=%d "
-            "degraded=%s",
+            "recommendation_recall event=recall_complete tags=%s tag_ids=%s "
+            "sources=%s verified_count=%d degraded=%s",
             [seed.tag for seed in seeds],
             [steam_tag_id_for(seed.tag) for seed in seeds],
             {
@@ -942,7 +945,7 @@ def rank_entries(
         reference_candidates=positives,
         negative_reference_candidates=negatives,
     )
-    return rank_steam_candidates(
+    ranked = rank_steam_candidates(
         entries,
         intent,
         profile_tag_weights=profile_tag_weights,
@@ -950,6 +953,70 @@ def rank_entries(
         negative_reference_candidates=negatives,
         retrieval_ranks=retrieval_ranks,
         language_profile=profile,
+    )
+    if logger.isEnabledFor(logging.DEBUG):
+        _log_ranking_diagnostics(intent, entries, ranked)
+    return ranked
+
+
+def _log_ranking_diagnostics(
+    intent: RecommendationIntent,
+    entries: list[GameCandidate],
+    ranked: list[RankedGame],
+) -> None:
+    required_tags = [
+        tag.tag for tag in intent.tags if tag.role is IntentTagRole.REQUIRED
+    ]
+    anchor_weights = {
+        tag.tag: tag.weight
+        for tag in intent.tags
+        if tag.role is IntentTagRole.ANCHOR
+    }
+    total_anchor_weight = sum(anchor_weights.values())
+    diagnostics = []
+    for game in ranked[:20]:
+        candidate_evidence = build_candidate_tag_evidence(game)
+        anchor_contributions = {
+            tag: {
+                "evidence": round(candidate_evidence.direct.get(tag, 0.0), 4),
+                "contribution": round(
+                    (
+                        weight
+                        * candidate_evidence.direct.get(tag, 0.0)
+                        / total_anchor_weight
+                    )
+                    if total_anchor_weight > 0.0
+                    else 0.0,
+                    4,
+                ),
+            }
+            for tag, weight in anchor_weights.items()
+        }
+        diagnostics.append(
+            {
+                "appid": game.appid,
+                "tier": game.score_breakdown.relevance_tier,
+                "anchor_coverage": round(game.score_breakdown.anchor_coverage, 4),
+                "anchor_contributions": anchor_contributions,
+                "supporting_similarity": round(
+                    game.score_breakdown.supporting_similarity,
+                    4,
+                ),
+                "semantic_score": round(game.score_breakdown.semantic_score, 4),
+                "quality_score": round(game.score_breakdown.quality_score, 4),
+                "layer_score": round(game.score_breakdown.layer_score, 4),
+                "retrieval_rank": game.score_breakdown.retrieval_rank,
+            }
+        )
+    logger.debug(
+        "recommendation_rank event=rank_complete candidate_count=%d "
+        "ranked_count=%d quality_intent=%s required_tags=%s anchors=%s results=%s",
+        len(entries),
+        len(ranked),
+        intent.quality_intent.value,
+        required_tags,
+        list(anchor_weights),
+        diagnostics,
     )
 
 
@@ -1074,10 +1141,10 @@ def log_deferred_reference_group(
     match: ReferenceMatch,
 ) -> None:
     logger.debug(
-        "Steam reference group: display_title=%r polarity=%s status=deferred "
-        "appid=%s confidence=%.3f",
-        reference.display_title,
+        "recommendation_reference event=resolution polarity=%s status=deferred "
+        "alias_count=%d appid=%s confidence=%.3f",
         reference_polarity(reference),
+        len(reference.aliases),
         match.hit.appid,
         match.confidence,
     )
@@ -1134,11 +1201,11 @@ def record_reference_group_resolution(
     if not succeeded:
         preference.parse_warnings.append(reference_warning(reference.display_title))
     logger.debug(
-        "Steam reference group: display_title=%r polarity=%s status=%s "
-        "appid=%s confidence=%.3f",
-        reference.display_title,
+        "recommendation_reference event=resolution polarity=%s status=%s "
+        "alias_count=%d appid=%s confidence=%.3f",
         polarity,
         "resolved" if succeeded else "unresolved",
+        len(reference.aliases),
         resolved.appid,
         resolved.confidence,
     )

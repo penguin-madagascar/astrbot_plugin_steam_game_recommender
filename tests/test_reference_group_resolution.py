@@ -73,8 +73,16 @@ class ReferenceGroupResolutionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reference.ordered_tags, ["souls-like", "action", "rpg"])
         self.assertEqual(reference.review_total, 12_345)
         self.assertIn("reference_query:like:黑暗之魂", reference.internal_source_markers)
-        self.assertTrue(any("黑暗之魂" in message for message in logs.output))
-        self.assertTrue(any("appid=10" in message for message in logs.output))
+        self.assertTrue(
+            any(
+                "recommendation_reference event=resolution" in message
+                and "alias_count=2" in message
+                and "appid=10" in message
+                for message in logs.output
+            )
+        )
+        self.assertFalse(any("黑暗之魂" in message for message in logs.output))
+        self.assertFalse(any("DARK SOULS" in message for message in logs.output))
 
         expected_calls = {
             (alias, language)
