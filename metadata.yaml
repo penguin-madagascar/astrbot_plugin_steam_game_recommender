@@ -3,7 +3,7 @@ display_name: Steam 游戏推荐助手
 desc: 基于 Steam 公开数据、连续百分比评分和精简可信理由推荐游戏，并可补充指定区域的价格与促销信息。
 short_desc: Steam-only 自然语言游戏推荐。
 author: jiangxingda
-version: 0.6.1
+version: 0.7.0
 repo: https://github.com/penguin-madagascar/astrbot_plugin_steam_game_recommender
 support_platforms:
   - aiocqhttp

@@ -71,7 +71,7 @@ from .storage.models import GamePreference, RankedGame, SteamAccountBinding, Ste
 from .storage.repository import SQLiteCacheRepository
 
 PLUGIN_NAME = "astrbot_plugin_steam_game_recommender"
-PLUGIN_VERSION = "0.6.1"
+PLUGIN_VERSION = "0.7.0"
 PLUGIN_DESCRIPTION = "基于 Steam 公开数据、连续评分和可信证据生成精简游戏推荐。"
 
 
