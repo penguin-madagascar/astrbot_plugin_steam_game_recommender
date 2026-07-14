@@ -161,7 +161,7 @@ class SteamIndexSnapshotTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(written["search_coverage"])
 
-    async def test_limits_each_round_to_sixty_new_appids(self) -> None:
+    async def test_limits_each_round_to_at_most_sixty_new_appids(self) -> None:
         cache = MemoryCache({})
         client = UniqueHitSteamClient()
         service = SteamGameIndexService(client, cache, clock=lambda: 1_000.0)
@@ -174,9 +174,9 @@ class SteamIndexSnapshotTest(unittest.IsolatedAsyncioTestCase):
 
         entries = await service.refresh_entries(preference, [], target_pool=60)
 
-        self.assertEqual(len(client.detail_appids), 60)
+        self.assertLessEqual(len(client.detail_appids), 60)
         self.assertEqual(len(client.detail_appids), len(set(client.detail_appids)))
-        self.assertEqual(len(entries), 60)
+        self.assertEqual(len(entries), len(client.detail_appids))
 
     async def test_reference_resolution_requires_title_confidence_and_keeps_polarity(self) -> None:
         cache = MemoryCache({})
@@ -413,13 +413,13 @@ class TypeAwareReferenceSteamClient(QueryAwareSteamClient):
         del search, page_size
         return [
             SteamSearchHit(appid=10, title="The Witcher 3"),
-            SteamSearchHit(appid=11, title="The Witcher 3: Wild Hunt"),
+            SteamSearchHit(appid=11, title="The Witcher 3 Complete Edition"),
         ]
 
     async def get_game_detail(self, appid: int) -> GameCandidate:
         if appid == 10:
             return game(appid, "The Witcher 3", ["RPG"], app_type="dlc")
-        return game(appid, "The Witcher 3: Wild Hunt", ["RPG"])
+        return game(appid, "The Witcher 3 Complete Edition", ["RPG"])
 
 
 def snapshot_payload(

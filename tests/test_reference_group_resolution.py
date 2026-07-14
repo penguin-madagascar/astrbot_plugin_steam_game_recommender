@@ -1,0 +1,423 @@
+from __future__ import annotations
+
+import unittest
+from types import SimpleNamespace
+from typing import Any
+
+from astrbot_plugin_steam_game_recommender.services.recommendation_intent import (
+    build_recommendation_intent,
+)
+from astrbot_plugin_steam_game_recommender.services.similarity_ranker import (
+    build_profile_from_preference,
+)
+from astrbot_plugin_steam_game_recommender.services.steam_index import (
+    SteamGameIndexService,
+    negative_reference_candidates,
+    reference_candidates,
+    references_are_resolved,
+    search_terms_for,
+)
+from astrbot_plugin_steam_game_recommender.storage.models import (
+    GameCandidate,
+    GamePreference,
+    SteamSearchHit,
+)
+
+
+class ReferenceGroupResolutionTest(unittest.IsolatedAsyncioTestCase):
+    async def test_resolves_localized_aliases_as_one_enriched_group(self) -> None:
+        preference = GamePreference(
+            reference_games_like=["黑暗之魂"],
+            reference_search_terms=["Dark Souls"],
+        )
+        client = FrozenReferenceSteamClient(
+            search_results={
+                ("黑暗之魂", "schinese"): [
+                    SteamSearchHit(appid=10, title="黑暗之魂：重制版")
+                ],
+                ("Dark Souls", "english"): [
+                    SteamSearchHit(
+                        appid=10,
+                        title="DARK SOULS: REMASTERED",
+                        store_url="https://store.steampowered.com/app/10/",
+                    )
+                ],
+            },
+            details={
+                10: game(10, "DARK SOULS: REMASTERED", ["Action", "RPG"]),
+            },
+            store_tags={10: ["Souls-like", "Action", "RPG"]},
+            review_totals={10: 12_345},
+        )
+        service = SteamGameIndexService(client, MemoryCache({}), clock=lambda: 1_000.0)
+
+        with self.assertLogs(
+            "astrbot_plugin_steam_game_recommender.services.steam_index",
+            level="DEBUG",
+        ) as logs:
+            entries = await service.refresh_entries(preference, [], target_pool=1)
+
+        self.assertEqual(len(preference.resolved_reference_games), 1)
+        resolved = preference.resolved_reference_games[0]
+        self.assertEqual(resolved.raw_text, "黑暗之魂")
+        self.assertEqual(resolved.canonical_title, "DARK SOULS: REMASTERED")
+        self.assertEqual(resolved.appid, 10)
+        self.assertEqual(resolved.source, "steam_alias_group")
+        self.assertEqual(resolved.polarity, "like")
+        self.assertGreaterEqual(resolved.confidence, 0.9)
+        self.assertEqual(preference.parse_warnings, [])
+        self.assertTrue(references_are_resolved(preference))
+
+        reference = reference_candidates(preference, entries)[0]
+        self.assertEqual(reference.appid, 10)
+        self.assertEqual(reference.ordered_tags, ["souls-like", "action", "rpg"])
+        self.assertEqual(reference.review_total, 12_345)
+        self.assertIn("reference_query:like:黑暗之魂", reference.internal_source_markers)
+        self.assertTrue(any("黑暗之魂" in message for message in logs.output))
+        self.assertTrue(any("appid=10" in message for message in logs.output))
+
+        expected_calls = {
+            (alias, language)
+            for alias in ("黑暗之魂", "Dark Souls")
+            for language in ("english", "schinese")
+        }
+        alias_calls = {
+            (call["search"], call["language"])
+            for call in client.search_calls
+            if call["search"] in {"黑暗之魂", "Dark Souls"}
+        }
+        self.assertEqual(alias_calls, expected_calls)
+        self.assertTrue(
+            all(
+                call["page_size"] == 20 and call["ordering"] == "-relevance"
+                for call in client.search_calls
+                if call["search"] in {"黑暗之魂", "Dark Souls"}
+            )
+        )
+        self.assertNotIn(
+            "黑暗之魂 Dark Souls",
+            [call["search"] for call in client.search_calls],
+        )
+
+    async def test_base_edition_beats_sequel(self) -> None:
+        preference = GamePreference(reference_games_like=["Portal"])
+        client = FrozenReferenceSteamClient(
+            search_results={
+                ("Portal", "english"): [
+                    SteamSearchHit(appid=20, title="Portal 2"),
+                    SteamSearchHit(appid=21, title="Portal Remastered"),
+                ]
+            },
+            details={21: game(21, "Portal Remastered", ["Puzzle"])},
+        )
+        service = SteamGameIndexService(client, MemoryCache({}), clock=lambda: 1_000.0)
+
+        await service.refresh_entries(preference, [], target_pool=1)
+
+        self.assertEqual(preference.resolved_reference_games[0].appid, 21)
+        self.assertEqual(client.detail_appids, [21])
+
+    async def test_exact_title_dlc_is_rejected_then_base_match_is_retried(self) -> None:
+        preference = GamePreference(reference_games_like=["Example Quest"])
+        client = FrozenReferenceSteamClient(
+            search_results={
+                ("Example Quest", "english"): [
+                    SteamSearchHit(appid=30, title="Example Quest"),
+                    SteamSearchHit(appid=31, title="Example Quest Complete Edition"),
+                ]
+            },
+            details={
+                30: game(30, "Example Quest", ["RPG"], app_type="dlc"),
+                31: game(31, "Example Quest Complete Edition", ["RPG"]),
+            },
+        )
+        service = SteamGameIndexService(client, MemoryCache({}), clock=lambda: 1_000.0)
+
+        entries = await service.refresh_entries(preference, [], target_pool=1)
+
+        self.assertEqual(preference.resolved_reference_games[0].appid, 31)
+        self.assertEqual(client.detail_appids, [30, 31])
+        self.assertEqual([item.appid for item in reference_candidates(preference, entries)], [31])
+
+    async def test_failed_exact_detail_is_removed_before_base_retry(self) -> None:
+        preference = GamePreference(reference_games_like=["Detail Retry"])
+        client = FrozenReferenceSteamClient(
+            search_results={
+                ("Detail Retry", "english"): [
+                    SteamSearchHit(appid=32, title="Detail Retry"),
+                    SteamSearchHit(appid=33, title="Detail Retry Definitive Edition"),
+                ]
+            },
+            details={
+                33: game(33, "Detail Retry Definitive Edition", ["Adventure"]),
+            },
+        )
+        service = SteamGameIndexService(client, MemoryCache({}), clock=lambda: 1_000.0)
+
+        await service.refresh_entries(preference, [], target_pool=1)
+
+        self.assertEqual(client.detail_appids, [32, 33])
+        self.assertEqual(preference.resolved_reference_games[0].appid, 33)
+
+    async def test_ambiguous_group_warns_once_across_repeated_refreshes(self) -> None:
+        preference = GamePreference(reference_games_like=["Twin Game"])
+        client = FrozenReferenceSteamClient(
+            search_results={
+                ("Twin Game", "english"): [
+                    SteamSearchHit(appid=40, title="Twin Game"),
+                    SteamSearchHit(appid=41, title="Twin Game"),
+                ]
+            },
+            details={},
+        )
+        service = SteamGameIndexService(client, MemoryCache({}), clock=lambda: 1_000.0)
+
+        with self.assertLogs(
+            "astrbot_plugin_steam_game_recommender.services.steam_index",
+            level="DEBUG",
+        ) as logs:
+            await service.refresh_entries(preference, [], target_pool=0)
+            await service.refresh_entries(preference, [], target_pool=0)
+
+        self.assertEqual(len(preference.resolved_reference_games), 1)
+        unresolved = preference.resolved_reference_games[0]
+        self.assertEqual(unresolved.raw_text, "Twin Game")
+        self.assertIsNone(unresolved.appid)
+        self.assertEqual(unresolved.source, "steam_alias_group")
+        self.assertEqual(
+            preference.parse_warnings,
+            ["参考游戏“Twin Game”未能可靠解析，未扩展其标签。"],
+        )
+        self.assertFalse(references_are_resolved(preference))
+        self.assertTrue(any("unresolved" in message for message in logs.output))
+
+    async def test_repeated_success_uses_cached_index_without_duplicates(self) -> None:
+        preference = GamePreference(reference_games_like=["Cached Seed"])
+        client = FrozenReferenceSteamClient(
+            search_results={
+                ("Cached Seed", "english"): [
+                    SteamSearchHit(appid=50, title="Cached Seed")
+                ]
+            },
+            details={50: game(50, "Cached Seed", ["Farming"])},
+        )
+        cache = MemoryCache({})
+        service = SteamGameIndexService(client, cache, clock=lambda: 1_000.0)
+
+        await service.refresh_entries(preference, [], target_pool=1)
+        first_alias_call_count = sum(
+            call["search"] == "Cached Seed" for call in client.search_calls
+        )
+        entries = await service.refresh_entries(preference, [], target_pool=1)
+
+        self.assertEqual(len(preference.resolved_reference_games), 1)
+        self.assertEqual(preference.resolved_reference_games[0].appid, 50)
+        self.assertEqual(len([entry for entry in entries if entry.appid == 50]), 1)
+        self.assertEqual(
+            sum(call["search"] == "Cached Seed" for call in client.search_calls),
+            first_alias_call_count,
+        )
+
+    async def test_positive_and_negative_groups_keep_polarity_and_appids(self) -> None:
+        preference = GamePreference(
+            reference_games_like=["Liked Seed"],
+            reference_games_dislike=["Avoided Seed"],
+        )
+        client = FrozenReferenceSteamClient(
+            search_results={
+                ("Liked Seed", "english"): [
+                    SteamSearchHit(appid=60, title="Liked Seed")
+                ],
+                ("Avoided Seed", "english"): [
+                    SteamSearchHit(appid=61, title="Avoided Seed")
+                ],
+            },
+            details={
+                60: game(60, "Liked Seed", ["Farming"]),
+                61: game(61, "Avoided Seed", ["Horror"]),
+            },
+        )
+        service = SteamGameIndexService(client, MemoryCache({}), clock=lambda: 1_000.0)
+
+        entries = await service.refresh_entries(preference, [], target_pool=2)
+
+        resolved = {
+            (item.raw_text, item.polarity): item.appid
+            for item in preference.resolved_reference_games
+        }
+        self.assertEqual(
+            resolved,
+            {("Liked Seed", "like"): 60, ("Avoided Seed", "dislike"): 61},
+        )
+        self.assertEqual([item.appid for item in reference_candidates(preference, entries)], [60])
+        self.assertEqual(
+            [item.appid for item in negative_reference_candidates(preference, entries)],
+            [61],
+        )
+        self.assertTrue(references_are_resolved(preference))
+
+    async def test_existing_confirmed_entry_resolves_without_search(self) -> None:
+        preference = GamePreference(
+            reference_games_like=["本地标题"],
+            reference_search_terms=["Existing Seed"],
+        )
+        client = FrozenReferenceSteamClient(search_results={}, details={})
+        service = SteamGameIndexService(client, MemoryCache({}), clock=lambda: 1_000.0)
+
+        entries = await service.refresh_entries(
+            preference,
+            [game(70, "Existing Seed", ["Strategy"])],
+            target_pool=0,
+        )
+
+        self.assertEqual(preference.resolved_reference_games[0].appid, 70)
+        self.assertEqual(preference.resolved_reference_games[0].raw_text, "本地标题")
+        self.assertEqual(client.search_calls, [])
+        self.assertEqual([item.appid for item in reference_candidates(preference, entries)], [70])
+
+    async def test_configured_english_locale_deduplicates_search_calls(self) -> None:
+        preference = GamePreference(reference_games_like=["One Locale"])
+        client = FrozenReferenceSteamClient(
+            search_results={
+                ("One Locale", "english"): [
+                    SteamSearchHit(appid=71, title="One Locale")
+                ]
+            },
+            details={71: game(71, "One Locale", ["Strategy"])},
+        )
+        client.language = "english"
+        service = SteamGameIndexService(client, MemoryCache({}), clock=lambda: 1_000.0)
+
+        await service.refresh_entries(preference, [], target_pool=1)
+
+        calls = [call for call in client.search_calls if call["search"] == "One Locale"]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["language"], "english")
+
+    def test_group_resolution_and_generic_terms_use_grouped_semantics(self) -> None:
+        preference = GamePreference(
+            reference_games_like=["本地标题"],
+            reference_search_terms=["English Alias"],
+        )
+        preference.resolved_reference_games = [
+            resolved_reference(
+                raw_text="本地标题",
+                canonical_title="English Alias",
+                appid=80,
+            )
+        ]
+
+        self.assertTrue(references_are_resolved(preference))
+        self.assertEqual(
+            search_terms_for(preference, build_profile_from_preference(preference)),
+            ["popular co-op"],
+        )
+        self.assertEqual(len(build_recommendation_intent(preference).references), 1)
+
+
+class MemoryCache:
+    def __init__(self, payloads: dict[str, Any]) -> None:
+        self.payloads = payloads
+
+    async def get_json(self, key: str, _ttl_hours: int) -> Any | None:
+        return self.payloads.get(key)
+
+    async def set_json(self, key: str, payload: Any) -> None:
+        self.payloads[key] = payload
+
+
+class FrozenReferenceSteamClient:
+    language = "schinese"
+
+    def __init__(
+        self,
+        search_results: dict[tuple[str, str], list[SteamSearchHit]],
+        details: dict[int, GameCandidate],
+        store_tags: dict[int, list[str]] | None = None,
+        review_totals: dict[int, int] | None = None,
+    ) -> None:
+        self.search_results = search_results
+        self.details = details
+        self.store_tags = store_tags or {}
+        self.review_totals = review_totals or {}
+        self.search_calls: list[dict[str, Any]] = []
+        self.detail_appids: list[int] = []
+
+    async def get_popular_tags(self) -> list[dict[str, Any]]:
+        return []
+
+    async def search_game_refs(
+        self,
+        search: str,
+        page_size: int,
+        ordering: str = "-relevance",
+        language: str | None = None,
+        **_kwargs: Any,
+    ) -> list[SteamSearchHit]:
+        resolved_language = language or self.language
+        self.search_calls.append(
+            {
+                "search": search,
+                "page_size": page_size,
+                "ordering": ordering,
+                "language": resolved_language,
+            }
+        )
+        return list(self.search_results.get((search, resolved_language), []))
+
+    async def get_game_detail(self, appid: int) -> GameCandidate:
+        self.detail_appids.append(appid)
+        return self.details[appid]
+
+    async def get_store_page_tags(self, appid: int) -> list[str]:
+        return list(self.store_tags.get(appid, []))
+
+    async def get_review_summary(self, appid: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            total_reviews=self.review_totals.get(appid, 500),
+            positive_ratio=0.8,
+            recent_positive_ratio=0.75,
+        )
+
+
+def game(
+    appid: int,
+    title: str,
+    tags: list[str],
+    app_type: str = "game",
+) -> GameCandidate:
+    return GameCandidate(
+        appid=appid,
+        title=title,
+        app_type=app_type,
+        platforms=["PC"],
+        genres=[],
+        tags=tags,
+        stores=["Steam"],
+        raw_url=f"https://store.steampowered.com/app/{appid}/",
+        review_total=100,
+        review_positive_ratio=0.7,
+        review_recent_ratio=0.7,
+    )
+
+
+def resolved_reference(
+    raw_text: str,
+    canonical_title: str,
+    appid: int,
+):
+    from astrbot_plugin_steam_game_recommender.storage.models import ResolvedReferenceGame
+
+    return ResolvedReferenceGame(
+        raw_text=raw_text,
+        normalized_title=raw_text,
+        canonical_title=canonical_title,
+        appid=appid,
+        confidence=1.0,
+        source="steam_alias_group",
+        polarity="like",
+    )
+
+
+if __name__ == "__main__":
+    unittest.main()

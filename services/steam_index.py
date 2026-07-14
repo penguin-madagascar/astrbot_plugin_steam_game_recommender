@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from difflib import SequenceMatcher
 from typing import Any, Callable, Protocol
 
 from ..storage.models import (
@@ -21,6 +19,12 @@ from .game_identity import (
     game_family_key,
     is_confirmed_base_game,
 )
+from .recommendation_intent import (
+    ReferencePolarity,
+    ReferenceQuery,
+    build_recommendation_intent,
+)
+from .reference_matching import ReferenceMatch, match_reference_query, title_key
 from .similarity_ranker import (
     SteamTagProfile,
     build_profile_from_preference,
@@ -208,45 +212,35 @@ class SteamGameIndexService:
 
         self._round_prefetched = {}
         coverage = dict(current.search_coverage)
-        markers: dict[int, list[tuple[str, str]]] = {}
         seen_hits: set[int] = set()
         enrichment_limit = min(
             STEAM_INDEX_MAX_NEW_APPIDS_PER_ROUND,
             max(int(target_pool), 0),
         )
-        enriched_count = 0
+        enriched_count = await self._resolve_reference_groups(
+            preference,
+            records,
+            now,
+        )
         searched_queries: list[str] = []
 
-        pending_references: list[str] = []
-        for query in reference_terms_for(preference):
-            polarity = reference_polarity_for(query, preference) or "like"
-            existing_hit = best_reference_hit(
-                query,
-                [
-                    SteamSearchHit(
-                        appid=int(record.candidate.appid),
-                        title=record.candidate.title,
-                        store_url=record.candidate.raw_url,
-                    )
-                    for record in records.values()
-                    if record.candidate.appid is not None
-                ],
-            )
-            if existing_hit is not None:
-                record_reference_resolution(preference, query, [existing_hit], polarity)
-                markers.setdefault(existing_hit.appid, []).append((query, polarity))
-            else:
-                pending_references.append(query)
-
-        initial_profile = build_profile_from_preference(preference)
-        if pending_references:
-            initial_queries = pending_references[:STEAM_INDEX_MAX_SEARCHES_PER_ROUND]
-        else:
+        candidates = [record.candidate for record in records.values()]
+        initial_profile = build_profile_from_preference(
+            preference,
+            reference_candidates=reference_candidates(preference, candidates),
+            negative_reference_candidates=negative_reference_candidates(
+                preference,
+                candidates,
+            ),
+        )
+        if enriched_count < enrichment_limit:
             initial_queries = [
                 query
                 for query in search_terms_for(preference, initial_profile)
                 if not query_is_covered(query, coverage, now, self.ttl_hours)
             ][:STEAM_INDEX_MAX_SEARCHES_PER_ROUND]
+        else:
+            initial_queries = []
 
         async def process_searches(queries: list[str]) -> None:
             nonlocal enriched_count
@@ -254,19 +248,11 @@ class SteamGameIndexService:
                 return
             searched_queries.extend(queries)
             results = await self._search_queries(queries)
-            selected_hits: list[SteamSearchHit] = []
-            other_hits: list[SteamSearchHit] = []
-            reference_results: list[tuple[str, str, list[SteamSearchHit]]] = []
+            observed_hits: list[SteamSearchHit] = []
             for query, hits, succeeded in results:
                 if succeeded:
                     coverage[normalize_text(query)] = now
-                polarity = reference_polarity_for(query, preference)
-                if polarity:
-                    selected = best_reference_hit(query, hits)
-                    if selected is not None:
-                        selected_hits.append(selected)
-                    reference_results.append((query, polarity, hits))
-                other_hits.extend(hits)
+                observed_hits.extend(hits)
 
             existing_appids = {
                 int(record.candidate.appid)
@@ -274,7 +260,7 @@ class SteamGameIndexService:
                 if record.candidate.appid is not None
             }
             new_hits: list[SteamSearchHit] = []
-            for hit in [*selected_hits, *other_hits]:
+            for hit in observed_hits:
                 if hit.appid in seen_hits or hit.appid in existing_appids:
                     continue
                 seen_hits.add(hit.appid)
@@ -285,42 +271,7 @@ class SteamGameIndexService:
             for candidate in enriched:
                 records[entry_key(candidate)] = SteamIndexEntry(candidate, now)
 
-            confirmed_appids = {
-                int(record.candidate.appid)
-                for record in records.values()
-                if record.candidate.appid is not None
-                and is_confirmed_base_game(record.candidate)
-            }
-            for query, polarity, hits in reference_results:
-                confirmed_hits = [hit for hit in hits if hit.appid in confirmed_appids]
-                selected = record_reference_resolution(
-                    preference,
-                    query,
-                    confirmed_hits,
-                    polarity,
-                )
-                if selected is not None:
-                    markers.setdefault(selected.appid, []).append((query, polarity))
-
-            for key, record in list(records.items()):
-                candidate = record.candidate
-                if candidate.appid is None or int(candidate.appid) not in markers:
-                    continue
-                marked = candidate
-                for query, polarity in markers[int(candidate.appid)]:
-                    marked = mark_reference_query(marked, query, polarity)
-                records[key] = SteamIndexEntry(marked, record.refreshed_at)
-
         await process_searches(initial_queries)
-
-        for key, record in list(records.items()):
-            candidate = record.candidate
-            if candidate.appid is None or int(candidate.appid) not in markers:
-                continue
-            marked = candidate
-            for query, polarity in markers[int(candidate.appid)]:
-                marked = mark_reference_query(marked, query, polarity)
-            records[key] = SteamIndexEntry(marked, record.refreshed_at)
 
         remaining_searches = STEAM_INDEX_MAX_SEARCHES_PER_ROUND - len(searched_queries)
         if remaining_searches > 0 and enriched_count < enrichment_limit:
@@ -363,6 +314,125 @@ class SteamGameIndexService:
         )
         return [record.candidate for record in refreshed_snapshot.entries]
 
+    async def _resolve_reference_groups(
+        self,
+        preference: GamePreference,
+        records: dict[str, SteamIndexEntry],
+        now: float,
+    ) -> int:
+        enriched_count = 0
+        for reference in build_recommendation_intent(preference).references:
+            records_by_appid = {
+                int(record.candidate.appid): record
+                for record in records.values()
+                if record.candidate.appid is not None
+            }
+            existing_hits = [
+                SteamSearchHit(
+                    appid=appid,
+                    title=record.candidate.title,
+                    store_url=record.candidate.raw_url,
+                )
+                for appid, record in records_by_appid.items()
+            ]
+            match = match_reference_query(reference, existing_hits)
+            candidate = (
+                records_by_appid[match.hit.appid].candidate if match is not None else None
+            )
+            refreshed_at = (
+                records_by_appid[match.hit.appid].refreshed_at
+                if match is not None
+                else now
+            )
+
+            if match is None:
+                observed_hits = await self._search_reference_group(reference)
+                match, candidate = await self._select_reference_candidate(
+                    reference,
+                    observed_hits,
+                )
+                if candidate is not None:
+                    enriched_count += 1
+                    refreshed_at = now
+
+            polarity = reference_polarity(reference)
+            if match is not None and candidate is not None:
+                candidate = mark_reference_query(
+                    candidate,
+                    reference.display_title,
+                    polarity,
+                )
+                records[entry_key(candidate)] = SteamIndexEntry(candidate, refreshed_at)
+            record_reference_group_resolution(
+                preference,
+                reference,
+                match,
+                candidate,
+            )
+        return enriched_count
+
+    async def _search_reference_group(
+        self,
+        reference: ReferenceQuery,
+    ) -> list[SteamSearchHit]:
+        locale = str(getattr(self.steam_client, "language", "english") or "english")
+        languages = dedupe_texts(["english", locale])
+        requests = [
+            (alias, language)
+            for alias in dedupe_texts(list(reference.aliases))
+            for language in languages
+        ]
+        semaphore = asyncio.Semaphore(STEAM_HTTP_CONCURRENCY)
+
+        async def search_one(alias: str, language: str) -> list[SteamSearchHit]:
+            async with semaphore:
+                try:
+                    return await self._search_refs(
+                        alias,
+                        page_size=20,
+                        language=language,
+                    )
+                except Exception:
+                    return []
+
+        results = await asyncio.gather(
+            *(search_one(alias, language) for alias, language in requests)
+        )
+        return [hit for hits in results for hit in hits]
+
+    async def _select_reference_candidate(
+        self,
+        reference: ReferenceQuery,
+        hits: list[SteamSearchHit],
+    ) -> tuple[ReferenceMatch | None, GameCandidate | None]:
+        remaining = list(hits)
+        while match := match_reference_query(reference, remaining):
+            candidate = await self._load_reference_candidate(match.hit.appid)
+            if candidate is not None:
+                return match, candidate
+            remaining = [hit for hit in remaining if hit.appid != match.hit.appid]
+        return None, None
+
+    async def _load_reference_candidate(self, appid: int) -> GameCandidate | None:
+        detail_getter = getattr(self.steam_client, "get_game_detail", None)
+        candidate = self._round_prefetched.get(appid)
+        if detail_getter:
+            try:
+                candidate = await detail_getter(appid)
+            except Exception:
+                return None
+        if (
+            candidate is None
+            or candidate.appid is None
+            or int(candidate.appid) != int(appid)
+            or not is_confirmed_base_game(candidate)
+        ):
+            return None
+        try:
+            return await self.enrich_candidate(candidate)
+        except Exception:
+            return None
+
     async def _search_queries(
         self,
         queries: list[str],
@@ -378,13 +448,24 @@ class SteamGameIndexService:
 
         return list(await asyncio.gather(*(search_one(query) for query in queries)))
 
-    async def _search_refs(self, query: str) -> list[SteamSearchHit]:
+    async def _search_refs(
+        self,
+        query: str,
+        page_size: int | None = None,
+        language: str | None = None,
+    ) -> list[SteamSearchHit]:
+        resolved_page_size = self.page_size if page_size is None else int(page_size)
         search_refs = getattr(self.steam_client, "search_game_refs", None)
         if search_refs:
+            kwargs: dict[str, Any] = {
+                "search": query,
+                "page_size": resolved_page_size,
+                "ordering": "-relevance",
+            }
+            if language is not None:
+                kwargs["language"] = language
             results = await search_refs(
-                search=query,
-                page_size=self.page_size,
-                ordering="-relevance",
+                **kwargs,
             )
             return [validate_search_hit(hit) for hit in results]
 
@@ -393,8 +474,9 @@ class SteamGameIndexService:
             return []
         candidates = await search_games(
             search=query,
-            page_size=self.page_size,
+            page_size=resolved_page_size,
             ordering="-relevance",
+            language=language,
         )
         hits: list[SteamSearchHit] = []
         for candidate in candidates:
@@ -565,25 +647,17 @@ def matching_reference_candidates(
     polarity: str,
     resolved: list[ResolvedReferenceGame] | None = None,
 ) -> list[GameCandidate]:
+    del titles
     resolved_appids = {
         int(item.appid)
         for item in resolved or []
         if item.polarity == polarity
         if item.appid is not None and item.confidence >= REFERENCE_MATCH_THRESHOLD
     }
-    references = [title for title in titles if title]
     return [
         entry
         for entry in entries
-        if (entry.appid is not None and int(entry.appid) in resolved_appids)
-        or (
-            not resolved_appids
-            and any(
-                title_match_confidence(reference, entry.title) >= REFERENCE_MATCH_THRESHOLD
-                or game_family_key(reference) == game_family_key(entry.title)
-                for reference in references
-            )
-        )
+        if entry.appid is not None and int(entry.appid) in resolved_appids
     ]
 
 
@@ -591,9 +665,6 @@ def search_terms_for(preference: GamePreference, profile: SteamTagProfile) -> li
     terms: list[str] = []
     if has_aaa_intent(preference):
         terms.extend(AAA_SEARCH_TERMS)
-    terms.extend(preference.reference_games_like[:3])
-    terms.extend(preference.reference_search_terms[:3])
-    terms.extend(preference.reference_games_dislike[:3])
     include = [tag.replace("_", " ") for tag in profile.include_tags[:6]]
     if include:
         terms.append(" ".join(include[:3]))
@@ -611,80 +682,79 @@ def has_aaa_intent(preference: GamePreference) -> bool:
     return bool(normalized & AAA_INTENT_MARKERS)
 
 
-def reference_terms_for(preference: GamePreference) -> list[str]:
-    return dedupe_texts(
-        [
-            *preference.reference_games_like,
-            *preference.reference_search_terms,
-            *preference.reference_games_dislike,
-        ]
-    )
+def reference_polarity(reference: ReferenceQuery) -> str:
+    return "dislike" if reference.polarity is ReferencePolarity.NEGATIVE else "like"
 
 
-def reference_polarity_for(query: str, preference: GamePreference) -> str | None:
-    key = normalize_text(query)
-    disliked = {normalize_text(title) for title in preference.reference_games_dislike}
-    if key in disliked:
-        return "dislike"
-    liked = {
-        normalize_text(title)
-        for title in [*preference.reference_games_like, *preference.reference_search_terms]
-    }
-    return "like" if key in liked else None
+def reference_warning(display_title: str) -> str:
+    return f"参考游戏“{display_title}”未能可靠解析，未扩展其标签。"
 
 
-def record_reference_resolution(
+def record_reference_group_resolution(
     preference: GamePreference,
-    query: str,
-    hits: list[SteamSearchHit],
-    polarity: str,
-) -> SteamSearchHit | None:
-    hit = best_reference_hit(query, hits)
-    confidence = title_match_confidence(query, hit.title) if hit else 0.0
-    resolved = ResolvedReferenceGame(
-        raw_text=query,
-        normalized_title=normalize_title_key(query),
-        canonical_title=hit.title if hit else "",
-        appid=hit.appid if hit else None,
-        store_url=hit.store_url if hit else None,
-        confidence=confidence,
-        source="steam_search",
-        polarity=polarity,
-        stores=["steam"] if hit else [],
-    )
+    reference: ReferenceQuery,
+    match: ReferenceMatch | None,
+    candidate: GameCandidate | None,
+) -> None:
+    polarity = reference_polarity(reference)
+    alias_keys = {normalize_text(alias) for alias in reference.aliases}
     preference.resolved_reference_games = [
         item
         for item in preference.resolved_reference_games
         if not (
-            normalize_text(item.raw_text) == normalize_text(query) and item.polarity == polarity
+            item.polarity == polarity and normalize_text(item.raw_text) in alias_keys
         )
     ]
-    preference.resolved_reference_games.append(resolved)
-    if confidence >= REFERENCE_MATCH_THRESHOLD:
-        return hit
-    warning = f"参考游戏“{query}”未能可靠解析，未扩展其标签。"
-    if warning not in preference.parse_warnings:
-        preference.parse_warnings.append(warning)
-    return None
+    warning_keys = {
+        normalize_text(reference_warning(alias)) for alias in reference.aliases
+    }
+    preference.parse_warnings = [
+        warning
+        for warning in preference.parse_warnings
+        if normalize_text(warning) not in warning_keys
+    ]
 
-
-def best_reference_hit(query: str, hits: list[SteamSearchHit]) -> SteamSearchHit | None:
-    if not hits:
-        return None
-    hit, confidence = max(
-        (
-            (hit, title_match_confidence(query, hit.title))
-            for hit in hits[:STEAM_INDEX_SEARCH_RESULTS_PER_TERM]
+    succeeded = match is not None and candidate is not None
+    resolved = ResolvedReferenceGame(
+        raw_text=reference.display_title,
+        normalized_title=title_key(reference.display_title),
+        canonical_title=candidate.title if succeeded else "",
+        appid=(
+            int(candidate.appid)
+            if succeeded and candidate.appid is not None
+            else None
         ),
-        key=lambda item: item[1],
+        store_url=(candidate.raw_url or match.hit.store_url) if succeeded else None,
+        confidence=match.confidence if succeeded else 0.0,
+        source="steam_alias_group",
+        polarity=polarity,
+        genres=candidate.genres if succeeded else [],
+        tags=(
+            dedupe_texts([*candidate.ordered_tags, *candidate.tags])
+            if succeeded
+            else []
+        ),
+        platforms=candidate.platforms if succeeded else [],
+        stores=candidate.stores if succeeded else [],
     )
-    return hit if confidence >= REFERENCE_MATCH_THRESHOLD else None
+    preference.resolved_reference_games.append(resolved)
+    if not succeeded:
+        preference.parse_warnings.append(reference_warning(reference.display_title))
+    logger.debug(
+        "Steam reference group: display_title=%r polarity=%s status=%s "
+        "appid=%s confidence=%.3f",
+        reference.display_title,
+        polarity,
+        "resolved" if succeeded else "unresolved",
+        resolved.appid,
+        resolved.confidence,
+    )
 
 
 def references_are_resolved(preference: GamePreference) -> bool:
     expected = {
-        (normalize_text(query), reference_polarity_for(query, preference) or "like")
-        for query in reference_terms_for(preference)
+        (normalize_text(reference.display_title), reference_polarity(reference))
+        for reference in build_recommendation_intent(preference).references
     }
     if not expected:
         return True
@@ -694,23 +764,6 @@ def references_are_resolved(preference: GamePreference) -> bool:
         if item.appid is not None and item.confidence >= REFERENCE_MATCH_THRESHOLD
     }
     return expected <= resolved
-
-
-def title_match_confidence(query: str, candidate_title: str) -> float:
-    expected = normalize_title_key(query)
-    actual = normalize_title_key(candidate_title)
-    if not expected or not actual:
-        return 0.0
-    if expected == actual:
-        return 1.0
-    if actual.startswith(expected) or expected.startswith(actual):
-        coverage = min(len(expected), len(actual)) / max(len(expected), len(actual))
-        return min(0.65 + coverage * 0.35, 0.99)
-    return SequenceMatcher(None, expected, actual).ratio()
-
-
-def normalize_title_key(value: str) -> str:
-    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(value or "").lower())
 
 
 def query_is_covered(
