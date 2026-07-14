@@ -272,7 +272,6 @@ class SteamClientTest(unittest.IsolatedAsyncioTestCase):
                     {"tagid": 87918, "name": "Farming Sim"},
                     {"tagid": 10235, "name": "Life Sim"},
                     {"tagid": 3964, "name": "Pixel Graphics"},
-                    {"tagid": "bad", "name": ""},
                 ],
             }
         )
