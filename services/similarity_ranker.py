@@ -7,12 +7,18 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..storage.models import (
+    CompanyPreference,
     GameCandidate,
     GamePreference,
     RankedGame,
     RecommendationEvidence,
     ScoreBreakdown,
     split_language_list,
+)
+from .company_preferences import (
+    CompanyMatchStatus,
+    company_match_status,
+    company_preference_adjustment,
 )
 from .candidate_tag_evidence import (
     CandidateTagEvidence,
@@ -71,6 +77,7 @@ class SteamTagProfile:
     reference_appids_dislike: list[int] = field(default_factory=list)
     positive_reference_candidates: list[GameCandidate] = field(default_factory=list)
     negative_reference_candidates: list[GameCandidate] = field(default_factory=list)
+    company_preferences: list[CompanyPreference] = field(default_factory=list)
 
 
 def build_profile_from_preference(
@@ -78,7 +85,7 @@ def build_profile_from_preference(
     reference_candidates: list[GameCandidate] | None = None,
     negative_reference_candidates: list[GameCandidate] | None = None,
 ) -> SteamTagProfile:
-    include = canonical_tags_from_terms([*preference.genres_like, *preference.extra_tags])
+    include = canonical_tags_from_terms(preference.genres_like)
     required = canonical_tags_from_terms(preference.required_tags)
     exclude = canonical_tags_from_terms(preference.genres_dislike)
 
@@ -114,6 +121,7 @@ def build_profile_from_preference(
         ],
         positive_reference_candidates=list(reference_candidates or []),
         negative_reference_candidates=list(negative_reference_candidates or []),
+        company_preferences=list(preference.company_preferences),
     )
 
 
@@ -214,6 +222,11 @@ def rank_steam_candidates(
             retrieval_ranks,
         )
         language_adjustment = language_preference_adjustment(candidate, profile)
+        company_preferences = list(getattr(profile, "company_preferences", []))
+        company_adjustment = company_preference_adjustment(
+            candidate,
+            company_preferences,
+        )
         breakdown = ScoreBreakdown(
             relevance_tier=tier.value,
             anchor_coverage=anchor_value,
@@ -233,6 +246,7 @@ def rank_steam_candidates(
             negative_reference_penalty=min(negative_value * 25.0, 20.0),
             unknown_constraints_penalty=0.0,
             language_adjustment=language_adjustment,
+            company_adjustment=company_adjustment,
         )
         explanation = build_anchor_tier_evidence(
             candidate=candidate,
@@ -245,6 +259,7 @@ def rank_steam_candidates(
             library_tags=library_tags,
             has_positive_references=bool(positive_references),
         )
+        append_company_evidence(explanation, candidate, company_preferences)
         ranked.append(
             RankedGame.from_candidate(
                 mark_index_source(candidate),
@@ -558,6 +573,33 @@ def append_language_evidence(
                     important=language in required,
                 )
             )
+
+
+def append_company_evidence(
+    evidence: list[RecommendationEvidence],
+    candidate: GameCandidate,
+    preferences: list[CompanyPreference],
+) -> None:
+    for index, preference in enumerate(preferences):
+        status = company_match_status(candidate, preference)
+        if status is CompanyMatchStatus.MATCH:
+            sentiment = "positive"
+            suffix = "已由 Steam 开发商/发行商字段精确匹配"
+        elif status is CompanyMatchStatus.UNKNOWN:
+            sentiment = "uncertain"
+            suffix = "缺少可核验的 Steam 公司字段"
+        else:
+            sentiment = "negative"
+            suffix = "未在 Steam 开发商/发行商字段中匹配"
+        evidence.append(
+            evidence_item(
+                f"company_preference:{index}:{status.value}",
+                "preference",
+                sentiment,
+                f"公司偏好“{preference.display_name}”{suffix}",
+                important=status is CompanyMatchStatus.UNKNOWN,
+            )
+        )
 
 
 def evidence_item(

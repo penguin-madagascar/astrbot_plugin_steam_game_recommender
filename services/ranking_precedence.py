@@ -26,6 +26,7 @@ def effective_score(
         base
         + float(getattr(breakdown, "language_adjustment", 0.0) or 0.0)
         + float(getattr(breakdown, "budget_adjustment", 0.0) or 0.0)
+        + float(getattr(breakdown, "company_adjustment", 0.0) or 0.0)
     )
     return min(max(value, 0.0), 100.0)
 

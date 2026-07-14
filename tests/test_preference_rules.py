@@ -297,6 +297,11 @@ class PreferenceRulesTest(unittest.TestCase):
 
         self.assertEqual(merged.result_count, 3)
 
+    def test_extracts_english_result_quantity(self) -> None:
+        preference = infer_preference_from_text("Please recommend 3 games with puzzles")
+
+        self.assertEqual(preference.result_count, 3)
+
     def test_reference_title_extraction_is_generic(self) -> None:
         self.assertEqual(
             extract_reference_games("想找类似星露谷物语的多人种田经营游戏"),

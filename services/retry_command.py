@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from ..storage.models import GamePreference
+from .company_preferences import merge_retry_company_preferences
 from .preference_rules import extract_budget
 from .recommendation_memory import (
     PreferencePatch,
@@ -205,6 +206,29 @@ def merge_retry_preferences(
             data.get(field_name) or [],
             list(getattr(supplement, field_name)),
         )
+    for field_name, identity_key in (
+        (
+            "derived_intent_tags",
+            lambda payload: (str(payload.get("tag") or "").strip().casefold(),),
+        ),
+        (
+            "soft_features",
+            lambda payload: (
+                str(payload.get("constraint_id") or "").strip().casefold(),
+            ),
+        ),
+    ):
+        data[field_name] = merge_structured_preferences(
+            data.get(field_name) or [],
+            list(getattr(supplement, field_name)),
+            identity_key=identity_key,
+            limit=3,
+        )
+    data["company_preferences"] = merge_retry_company_preferences(
+        base.company_preferences,
+        supplement.company_preferences,
+        limit=3,
+    )
     if supplement.platforms:
         data["platforms"] = list(supplement.platforms)
     if supplement.budget is not None:
@@ -235,6 +259,55 @@ def merge_text(left: list[str], right: list[str]) -> list[str]:
         if text and text.lower() not in seen:
             result.append(text)
             seen.add(text.lower())
+    return result
+
+
+def merge_structured_preferences(
+    left: list[Any],
+    right: list[Any],
+    *,
+    identity_key: Callable[[dict[str, Any]], tuple[str, ...]],
+    limit: int,
+) -> list[dict[str, Any]]:
+    resolved_limit = max(int(limit), 0)
+    if resolved_limit == 0:
+        return []
+    result: list[dict[str, Any]] = []
+    identities: list[tuple[str, ...]] = []
+    position_by_identity: dict[tuple[str, ...], int] = {}
+    for value in left:
+        payload = dict(value) if isinstance(value, dict) else dump_model(value)
+        identity = identity_key(payload)
+        if not identity or not all(identity) or identity in position_by_identity:
+            continue
+        position_by_identity[identity] = len(result)
+        result.append(payload)
+        identities.append(identity)
+        if len(result) >= resolved_limit:
+            break
+    protected: set[tuple[str, ...]] = set()
+    for value in right:
+        payload = dict(value) if isinstance(value, dict) else dump_model(value)
+        identity = identity_key(payload)
+        if not identity or not all(identity):
+            continue
+        protected.add(identity)
+        position = position_by_identity.get(identity)
+        if position is not None:
+            result[position] = payload
+            continue
+        position_by_identity[identity] = len(result)
+        result.append(payload)
+        identities.append(identity)
+    for position in range(len(result) - 1, -1, -1):
+        if len(result) <= resolved_limit:
+            break
+        if identities[position] in protected:
+            continue
+        result.pop(position)
+        identities.pop(position)
+    if len(result) > resolved_limit:
+        result = result[-resolved_limit:]
     return result
 
 

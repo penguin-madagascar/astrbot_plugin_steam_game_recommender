@@ -3,15 +3,23 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
+from itertools import islice
 
 from ..storage.models import GameCandidate, GamePreference
-from .tag_normalizer import canonical_tags_from_terms
+from .tag_normalizer import (
+    ASCII_CANONICAL_TAG_PATTERN,
+    canonical_tag_from_vocabulary,
+    canonical_steam_tag_name,
+    canonical_tags_from_terms,
+    static_canonical_tags,
+)
 
 
 class IntentTagRole(str, Enum):
     REQUIRED = "required"
     ANCHOR = "anchor"
     SUPPORTING = "supporting"
+    RECALL_ONLY = "recall_only"
     EXCLUDE = "exclude"
 
 
@@ -70,6 +78,7 @@ class RecommendationIntent:
 
 
 _ROLE_PRIORITY = {
+    IntentTagRole.RECALL_ONLY: 0,
     IntentTagRole.SUPPORTING: 1,
     IntentTagRole.ANCHOR: 2,
     IntentTagRole.REQUIRED: 3,
@@ -81,19 +90,61 @@ _SOURCE_PRIORITY = {
     IntentTagSource.REFERENCE: 3,
     IntentTagSource.EXPLICIT: 4,
 }
+_FEATURE_ROLE_PRIORITY = {"required": 0, "core": 1, "optional": 2}
+MAX_PROXY_TAGS_PER_FEATURE = 2
 
 
-def build_recommendation_intent(preference: GamePreference) -> RecommendationIntent:
+def build_recommendation_intent(
+    preference: GamePreference,
+    *,
+    known_tags: set[str] | frozenset[str] | None = None,
+    known_tag_aliases: Mapping[str, str] | None = None,
+) -> RecommendationIntent:
+    vocabulary = frozenset(known_tags) if known_tags is not None else static_canonical_tags()
     tags_by_canonical: dict[str, WeightedIntentTag] = {}
     groups = (
         (preference.required_tags, IntentTagRole.REQUIRED, IntentTagSource.EXPLICIT, 1.0),
         (preference.genres_like, IntentTagRole.ANCHOR, IntentTagSource.EXPLICIT, 1.0),
-        (preference.extra_tags, IntentTagRole.SUPPORTING, IntentTagSource.DERIVED, 0.35),
         (preference.genres_dislike, IntentTagRole.EXCLUDE, IntentTagSource.EXPLICIT, 1.0),
     )
     for values, role, source, weight in groups:
-        for tag in canonical_tags_from_terms(values):
+        for tag in canonical_explicit_terms(
+            values,
+            vocabulary,
+            allow_unknown=known_tags is None,
+            aliases=known_tag_aliases,
+        ):
             candidate = WeightedIntentTag(tag, role, source, weight)
+            current = tags_by_canonical.get(tag)
+            if current is None or _tag_priority(candidate) > _tag_priority(current):
+                tags_by_canonical[tag] = candidate
+
+    for derived in preference.derived_intent_tags:
+        if derived.tag not in vocabulary:
+            continue
+        candidate = WeightedIntentTag(
+            derived.tag,
+            IntentTagRole.SUPPORTING,
+            IntentTagSource.DERIVED,
+            0.25,
+        )
+        current = tags_by_canonical.get(derived.tag)
+        if current is None or _tag_priority(candidate) > _tag_priority(current):
+            tags_by_canonical[derived.tag] = candidate
+
+    ordered_features = sorted(
+        enumerate(preference.soft_features),
+        key=lambda item: (_FEATURE_ROLE_PRIORITY[item[1].role], item[0]),
+    )
+    for _position, feature in ordered_features:
+        valid_proxy_tags = (tag for tag in feature.proxy_tags if tag in vocabulary)
+        for tag in islice(valid_proxy_tags, MAX_PROXY_TAGS_PER_FEATURE):
+            candidate = WeightedIntentTag(
+                tag,
+                IntentTagRole.RECALL_ONLY,
+                IntentTagSource.DERIVED,
+                0.25,
+            )
             current = tags_by_canonical.get(tag)
             if current is None or _tag_priority(candidate) > _tag_priority(current):
                 tags_by_canonical[tag] = candidate
@@ -108,7 +159,7 @@ def build_recommendation_intent(preference: GamePreference) -> RecommendationInt
     if preference.mood:
         derived_groups.append([preference.mood])
     for values in derived_groups:
-        for tag in canonical_tags_from_terms(values):
+        for tag in canonical_terms_from_vocabulary(values, vocabulary):
             candidate = WeightedIntentTag(
                 tag,
                 IntentTagRole.SUPPORTING,
@@ -227,3 +278,36 @@ def _unique_aliases(values: list[str]) -> tuple[str, ...]:
             result.append(value)
             seen.add(key)
     return tuple(result)
+
+
+def canonical_terms_from_vocabulary(
+    values: list[str] | tuple[str, ...],
+    vocabulary: frozenset[str],
+) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        canonical = canonical_tag_from_vocabulary(value, vocabulary)
+        if canonical and canonical not in result:
+            result.append(canonical)
+    return result
+
+
+def canonical_explicit_terms(
+    values: list[str] | tuple[str, ...],
+    vocabulary: frozenset[str],
+    *,
+    allow_unknown: bool,
+    aliases: Mapping[str, str] | None = None,
+) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        canonical = canonical_tag_from_vocabulary(value, vocabulary, aliases)
+        if canonical is None and allow_unknown:
+            canonical = canonical_steam_tag_name(value)
+            if not ASCII_CANONICAL_TAG_PATTERN.fullmatch(canonical):
+                continue
+        if canonical is None:
+            continue
+        if canonical not in result:
+            result.append(canonical)
+    return result

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Mapping
 from typing import Any
 
 from ..storage.models import GameCandidate
@@ -198,6 +199,28 @@ def canonical_steam_tag_name(value: str) -> str:
 
 def canonical_tags() -> set[str]:
     return set(TAG_ALIASES.values()) | STEAM_CANONICAL_TAGS
+
+
+def static_canonical_tags() -> frozenset[str]:
+    return frozenset(TAG_ALIASES.values())
+
+
+def canonical_tag_from_vocabulary(
+    value: str,
+    known_tags: set[str] | frozenset[str],
+    aliases: Mapping[str, str] | None = None,
+) -> str | None:
+    key = normalize_key(value)
+    if not key:
+        return None
+    localized_alias = aliases.get(key) if aliases is not None else None
+    if localized_alias in known_tags:
+        return localized_alias
+    alias = TAG_ALIASES.get(key)
+    if alias in known_tags:
+        return alias
+    canonical = steam_tag_canonical_key(value)
+    return canonical if canonical in known_tags else None
 
 
 def normalize_tag(value: str) -> str | None:

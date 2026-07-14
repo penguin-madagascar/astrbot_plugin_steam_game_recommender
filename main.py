@@ -22,6 +22,7 @@ from .services.account_binding import (
 from .services.explanation_builder import (
     generate_recommendation_reasons,
     generate_unplayed_reason,
+    resolve_provider_id,
 )
 from .services.formatter import format_recommendation_messages_with_llm
 from .services.game_identity import is_confirmed_base_game
@@ -53,6 +54,11 @@ from .services.retry_command import (
     merge_retry_preferences,
     parse_preference_patch,
     parse_retry_request,
+)
+from .services.semantic_feature_verifier import (
+    FeatureVerificationNotice,
+    SemanticFeatureVerifier,
+    verify_ranked_features,
 )
 from .services.steam_index import (
     STEAM_INDEX_FALLBACK_WARNING,
@@ -90,6 +96,7 @@ class RecommendationRun:
     preference: GamePreference
     result_limit: int
     raw_query: str
+    semantic_feature_notices: tuple[FeatureVerificationNotice, ...] = ()
 
 
 @register(
@@ -179,18 +186,21 @@ class SteamGameRecommenderPlugin(Star):
             )
             return
 
+        semantic_feature_notices: list[FeatureVerificationNotice] = []
         try:
             retry_request = parse_retry_request(raw_text)
             if retry_request.is_retry:
                 messages = await self._retry_recommendation_messages(
                     event,
                     retry_request.supplement,
+                    semantic_feature_notices=semantic_feature_notices,
                 )
             else:
                 prepared = await self._prepare_recommendation(event, raw_text)
                 run = await self._run_recommendation(event, prepared)
                 await self._save_recent_recommendation(event, run)
                 messages = run.messages
+                semantic_feature_notices.extend(run.semantic_feature_notices)
         except SteamApiError as exc:
             logger.warning(f"Steam game recommendation failed: {exc}")
             yield event.plain_result(f"Steam 查询失败：{exc}")
@@ -203,6 +213,8 @@ class SteamGameRecommenderPlugin(Star):
             yield event.plain_result(f"游戏推荐失败：{exc}")
             return
 
+        for notice in semantic_feature_notices:
+            yield event.plain_result(notice.message)
         yield self._recommendation_result(event, messages)
 
     @filter.command(
@@ -211,8 +223,13 @@ class SteamGameRecommenderPlugin(Star):
         desc="基于最近一次游戏推荐换一批候选。",
     )
     async def retry_recommend_games(self, event: AstrMessageEvent, query: GreedyStr):
+        semantic_feature_notices: list[FeatureVerificationNotice] = []
         try:
-            messages = await self._retry_recommendation_messages(event, str(query).strip())
+            messages = await self._retry_recommendation_messages(
+                event,
+                str(query).strip(),
+                semantic_feature_notices=semantic_feature_notices,
+            )
         except SteamApiError as exc:
             logger.warning(f"Steam retry recommendation failed: {exc}")
             yield event.plain_result(f"Steam 查询失败：{exc}")
@@ -225,6 +242,8 @@ class SteamGameRecommenderPlugin(Star):
             yield event.plain_result(f"重新推荐失败：{exc}")
             return
 
+        for notice in semantic_feature_notices:
+            yield event.plain_result(notice.message)
         yield self._recommendation_result(event, messages)
 
     @filter.command(
@@ -476,6 +495,8 @@ class SteamGameRecommenderPlugin(Star):
         retrieved_count = 0
         filtered_count = 0
         degradation_reason = "none"
+        semantic_feature_notices: tuple[FeatureVerificationNotice, ...] = ()
+        semantic_feature_candidate_count = 0
         if has_supported_steam_platform(preference):
             candidate_pool_size = min(60, max(30, result_limit * 6))
             owned_games = await self._owned_games_for_recommendation(
@@ -515,6 +536,35 @@ class SteamGameRecommenderPlugin(Star):
                 )
             filtered_count = max(retrieved_count - len(ranked_games), 0)
             finish_phase("library_filter")
+            if preference.soft_features:
+                resolved_provider_id = await resolve_provider_id(
+                    self.context,
+                    event,
+                    self.provider_id,
+                )
+                verifier = (
+                    SemanticFeatureVerifier(
+                        self.context,
+                        self.cache,
+                        provider_id=resolved_provider_id,
+                        locale=str(
+                            getattr(self.steam_client, "language", "schinese")
+                            or "schinese"
+                        ),
+                    )
+                    if resolved_provider_id
+                    else None
+                )
+                semantic_outcome = await verify_ranked_features(
+                    ranked_games,
+                    preference.soft_features,
+                    verifier,
+                    quality_intent=preference.quality_intent,
+                )
+                ranked_games = list(semantic_outcome.games)
+                semantic_feature_notices = semantic_outcome.notices
+                semantic_feature_candidate_count = semantic_outcome.candidate_count
+                finish_phase("semantic_features")
             if preference.budget is None:
                 ranked_games = ranked_games[:result_limit]
             ranked_games = await self.price_bridge.enrich_ranked_games(
@@ -533,17 +583,22 @@ class SteamGameRecommenderPlugin(Star):
         logger.debug(
             "Game recommendation pipeline: elapsed_ms=%.1f candidates=%d "
             "filtered=%d selected=%d refill_pool=%d degradation=%s "
+            "semantic_candidates=%d semantic_notices=%s "
             "profile_ms=%.1f recall_rank_ms=%.1f "
-            "library_filter_ms=%.1f final_selection_ms=%.1f reasons_ms=%.1f",
+            "library_filter_ms=%.1f semantic_features_ms=%.1f "
+            "final_selection_ms=%.1f reasons_ms=%.1f",
             (time.perf_counter() - started_at) * 1000,
             retrieved_count,
             filtered_count,
             len(ranked_games),
             max(retrieved_count - result_limit, 0),
             degradation_reason,
+            semantic_feature_candidate_count,
+            ",".join(notice.code for notice in semantic_feature_notices) or "none",
             phase_times.get("profile", 0.0),
             phase_times.get("recall_rank", 0.0),
             phase_times.get("library_filter", 0.0),
+            phase_times.get("semantic_features", 0.0),
             phase_times.get("final_selection", 0.0),
             phase_times.get("reasons", 0.0),
         )
@@ -554,7 +609,14 @@ class SteamGameRecommenderPlugin(Star):
             preference,
             ranked_games,
             limit=result_limit,
-            fallback_provider_id=self.fallback_provider_id,
+            fallback_provider_id=(
+                ""
+                if any(
+                    feature.role in {"required", "core"}
+                    for feature in preference.soft_features
+                )
+                else self.fallback_provider_id
+            ),
             raw_query=prepared.raw_query,
         )
         return RecommendationRun(
@@ -563,12 +625,14 @@ class SteamGameRecommenderPlugin(Star):
             preference=preference,
             result_limit=result_limit,
             raw_query=prepared.raw_query,
+            semantic_feature_notices=semantic_feature_notices,
         )
 
     async def _retry_recommendation_messages(
         self,
         event: AstrMessageEvent,
         supplement: str = "",
+        semantic_feature_notices: list[FeatureVerificationNotice] | None = None,
     ) -> list[str]:
         chat_platform, chat_user_id = chat_identity_from_event(event)
         memory = await load_recommendation_memory(
@@ -632,6 +696,8 @@ class SteamGameRecommenderPlugin(Star):
             run,
             patch if supplement else None,
         )
+        if semantic_feature_notices is not None:
+            semantic_feature_notices.extend(run.semantic_feature_notices)
         return run.messages
 
     async def _save_recent_recommendation(

@@ -162,9 +162,9 @@ class SteamOnlyPreferenceTest(unittest.TestCase):
         profile = build_profile_from_preference(preference)
 
         self.assertIn("co_op", profile.include_tags)
-        self.assertIn("local_coop", profile.include_tags)
-        self.assertIn("puzzle", profile.include_tags)
-        self.assertIn("relaxing", profile.include_tags)
+        self.assertNotIn("local_coop", profile.include_tags)
+        self.assertNotIn("puzzle", profile.include_tags)
+        self.assertNotIn("relaxing", profile.include_tags)
         self.assertIn("horror", profile.exclude_tags)
 
     def test_non_steam_platforms_are_reported_as_out_of_scope(self) -> None:

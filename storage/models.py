@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import BaseModel, Field, validator
+
+COMPANY_ALIAS_LIMIT = 5
 
 LANGUAGE_ALIASES = {
     "chinese": "schinese",
@@ -106,6 +108,59 @@ def split_display_list(value: Any) -> list[str]:
     return normalized
 
 
+def split_company_list(value: Any) -> list[str]:
+    values = value if isinstance(value, (list, tuple, set)) else [value]
+    result: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        text = re.sub(r"\s+", " ", str(raw or "")).strip()
+        key = text.casefold()
+        if text and key not in seen:
+            result.append(text)
+            seen.add(key)
+    return result
+
+
+def _validated_model_list(
+    value: Any,
+    model_type: type[BaseModel],
+    *,
+    limit: int,
+    key: str | None = None,
+    identity_key: Callable[[BaseModel], Any] | None = None,
+) -> list[BaseModel]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    result: list[BaseModel] = []
+    seen: set[Any] = set()
+    for raw in value:
+        try:
+            validator = getattr(model_type, "model_validate", None)
+            item = validator(raw) if validator else model_type.parse_obj(raw)
+        except (TypeError, ValueError):
+            continue
+        raw_identity = (
+            identity_key(item)
+            if identity_key is not None
+            else getattr(item, str(key or ""), "")
+        )
+        if isinstance(raw_identity, (tuple, list)):
+            identity = tuple(
+                str(part or "").strip().casefold() for part in raw_identity
+            )
+            valid_identity = bool(identity) and all(identity)
+        else:
+            identity = str(raw_identity or "").strip().casefold()
+            valid_identity = bool(identity)
+        if not valid_identity or identity in seen:
+            continue
+        result.append(item)
+        seen.add(identity)
+        if len(result) >= max(int(limit), 0):
+            break
+    return result
+
+
 def normalize_platform(value: str) -> str:
     text = value.strip().lower()
     if not text:
@@ -150,11 +205,146 @@ class ExplicitTagEvidence(BaseModel):
         extra = "ignore"
 
 
+class DerivedIntentTag(BaseModel):
+    tag: str
+    source_span: str
+    weight: float = Field(default=0.25, exclude=True)
+
+    @validator("tag", pre=True)
+    def _known_canonical_tag(cls, value: Any) -> str:
+        from ..services.tag_normalizer import (
+            ASCII_CANONICAL_TAG_PATTERN,
+            canonical_steam_tag_name,
+        )
+
+        canonical = canonical_steam_tag_name(str(value or "").strip())
+        if not ASCII_CANONICAL_TAG_PATTERN.fullmatch(canonical):
+            raise ValueError("derived intent tag is not canonical")
+        return canonical
+
+    @validator("source_span", pre=True)
+    def _required_source_span(cls, value: Any) -> str:
+        span = str(value or "")
+        if not span.strip():
+            raise ValueError("derived intent tag requires a source span")
+        return span
+
+    @validator("weight", pre=True, always=True)
+    def _fixed_weight(cls, _value: Any) -> float:
+        return 0.25
+
+    class Config:
+        extra = "ignore"
+
+
+class SoftFeature(BaseModel):
+    constraint_id: str
+    source_span: str
+    normalized_text: str
+    role: str = "optional"
+    polarity: str = "positive"
+    proxy_tags: list[str] = Field(default_factory=list)
+
+    @validator("constraint_id", "normalized_text", pre=True)
+    def _required_text(cls, value: Any) -> str:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not text:
+            raise ValueError("soft feature text fields must not be empty")
+        return text
+
+    @validator("source_span", pre=True)
+    def _verbatim_source_span(cls, value: Any) -> str:
+        span = str(value or "")
+        if not span.strip():
+            raise ValueError("soft feature requires a source span")
+        return span
+
+    @validator("role", pre=True)
+    def _valid_role(cls, value: Any) -> str:
+        role = str(value or "").strip().lower()
+        if role not in {"required", "core", "optional"}:
+            raise ValueError("invalid soft feature role")
+        return role
+
+    @validator("polarity", pre=True)
+    def _valid_polarity(cls, value: Any) -> str:
+        polarity = str(value or "").strip().lower()
+        if polarity not in {"positive", "negative"}:
+            raise ValueError("invalid soft feature polarity")
+        return polarity
+
+    @validator("proxy_tags", pre=True)
+    def _known_proxy_tags(cls, value: Any) -> list[str]:
+        from ..services.tag_normalizer import (
+            ASCII_CANONICAL_TAG_PATTERN,
+            canonical_steam_tag_name,
+        )
+
+        result: list[str] = []
+        for raw in split_text_list(value):
+            canonical = canonical_steam_tag_name(raw)
+            if (
+                ASCII_CANONICAL_TAG_PATTERN.fullmatch(canonical)
+                and canonical not in result
+            ):
+                result.append(canonical)
+        return result
+
+    class Config:
+        extra = "ignore"
+
+
+class CompanyPreference(BaseModel):
+    display_name: str
+    aliases: list[str] = Field(default_factory=list)
+    role: str = "either"
+    strength: str = "preferred"
+    source_span: str
+
+    @validator("display_name", pre=True)
+    def _required_display_text(cls, value: Any) -> str:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not text:
+            raise ValueError("company preference text must not be empty")
+        return text
+
+    @validator("source_span", pre=True)
+    def _verbatim_company_span(cls, value: Any) -> str:
+        span = str(value or "")
+        if not span.strip():
+            raise ValueError("company preference requires a source span")
+        return span
+
+    @validator("aliases", pre=True)
+    def _normalize_aliases(cls, value: Any) -> list[str]:
+        return split_display_list(value)[:COMPANY_ALIAS_LIMIT]
+
+    @validator("role", pre=True)
+    def _valid_company_role(cls, value: Any) -> str:
+        role = str(value or "").strip().lower()
+        if role not in {"developer", "publisher", "either"}:
+            raise ValueError("invalid company preference role")
+        return role
+
+    @validator("strength", pre=True)
+    def _valid_company_strength(cls, value: Any) -> str:
+        strength = str(value or "").strip().lower()
+        if strength not in {"preferred", "strong"}:
+            raise ValueError("invalid company preference strength")
+        return strength
+
+    class Config:
+        extra = "ignore"
+
+
 class GamePreference(BaseModel):
     platforms: list[str] = Field(default_factory=list)
     required_tags: list[str] = Field(default_factory=list)
     genres_like: list[str] = Field(default_factory=list)
     extra_tags: list[str] = Field(default_factory=list)
+    derived_intent_tags: list[DerivedIntentTag] = Field(default_factory=list)
+    soft_features: list[SoftFeature] = Field(default_factory=list)
+    company_preferences: list[CompanyPreference] = Field(default_factory=list)
     explicit_tag_evidence: list[ExplicitTagEvidence] = Field(
         default_factory=list,
         exclude=True,
@@ -202,6 +392,20 @@ class GamePreference(BaseModel):
     @validator("reference_games_like", "reference_games_dislike", pre=True)
     def _normalize_reference_titles(cls, value: Any) -> list[str]:
         return split_display_list(value)
+
+    @validator("derived_intent_tags", pre=True)
+    def _validated_derived_tags(cls, value: Any) -> list[DerivedIntentTag]:
+        return _validated_model_list(value, DerivedIntentTag, limit=3, key="tag")
+
+    @validator("soft_features", pre=True)
+    def _validated_soft_features(cls, value: Any) -> list[SoftFeature]:
+        return _validated_model_list(value, SoftFeature, limit=3, key="constraint_id")
+
+    @validator("company_preferences", pre=True)
+    def _validated_company_preferences(cls, value: Any) -> list[CompanyPreference]:
+        from ..services.company_preferences import merge_company_preferences
+
+        return merge_company_preferences(value or [], limit=3)
 
     @validator("library_filter_mode", pre=True)
     def _normalize_library_filter_mode(cls, value: Any) -> str | None:
@@ -370,6 +574,8 @@ class GameCandidate(BaseModel):
     platforms: list[str] = Field(default_factory=list)
     genres: list[str] = Field(default_factory=list)
     genre_ids: list[int] = Field(default_factory=list)
+    categories: list[str] = Field(default_factory=list)
+    category_ids: list[int] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     ordered_tags: list[str] = Field(default_factory=list)
     inferred_tags: list[str] = Field(default_factory=list)
@@ -386,11 +592,19 @@ class GameCandidate(BaseModel):
     supported_languages: list[str] = Field(default_factory=list)
     language_data_available: bool = False
     internal_source_markers: list[str] = Field(default_factory=list)
+    developers: list[str] = Field(default_factory=list)
+    publishers: list[str] = Field(default_factory=list)
+    developer_data_available: bool = False
+    publisher_data_available: bool = False
+    company_data_available: bool = False
+    short_description: str | None = None
+    detailed_description: str | None = None
     description: str | None = None
 
     @validator(
         "platforms",
         "genres",
+        "categories",
         "tags",
         "ordered_tags",
         "inferred_tags",
@@ -400,8 +614,8 @@ class GameCandidate(BaseModel):
     def _normalize_lists(cls, value: Any) -> list[str]:
         return split_text_list(value)
 
-    @validator("genre_ids", pre=True)
-    def _normalize_genre_ids(cls, value: Any) -> list[int]:
+    @validator("genre_ids", "category_ids", pre=True)
+    def _normalize_metadata_ids(cls, value: Any) -> list[int]:
         if not isinstance(value, (list, tuple)):
             return []
         result: list[int] = []
@@ -419,6 +633,15 @@ class GameCandidate(BaseModel):
     @validator("internal_source_markers", pre=True)
     def _normalize_internal_markers(cls, value: Any) -> list[str]:
         return split_display_list(value)
+
+    @validator("developers", "publishers", pre=True)
+    def _normalize_companies(cls, value: Any) -> list[str]:
+        return split_company_list(value)
+
+    @validator("short_description", "detailed_description", "description", pre=True)
+    def _normalize_descriptions(cls, value: Any) -> str | None:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        return text or None
 
     @validator("supported_languages", pre=True)
     def _normalize_supported_languages(cls, value: Any) -> list[str]:
@@ -478,6 +701,7 @@ class ScoreBreakdown(BaseModel):
     unknown_constraints_penalty: float = 0.0
     language_adjustment: float = 0.0
     budget_adjustment: float = 0.0
+    company_adjustment: float = 0.0
 
     @validator(
         "anchor_coverage",
@@ -555,6 +779,14 @@ class ScoreBreakdown(BaseModel):
         except (TypeError, ValueError):
             number = 0.0
         return min(max(number, -10.0), 5.0)
+
+    @validator("company_adjustment", pre=True)
+    def _normalize_company_adjustment(cls, value: Any) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = 0.0
+        return min(max(number, -10.0), 0.0)
 
     class Config:
         extra = "ignore"

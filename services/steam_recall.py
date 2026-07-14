@@ -47,6 +47,7 @@ class RecallSource:
     candidates: tuple[GameCandidate, ...]
     weight: float
     component_tags: tuple[str, ...] = ()
+    candidate_ranks: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source_id", str(self.source_id).strip())
@@ -63,6 +64,10 @@ class RecallSource:
             "component_tags",
             tuple(dict.fromkeys(str(tag).strip() for tag in self.component_tags if tag)),
         )
+        ranks = tuple(int(rank) for rank in self.candidate_ranks)
+        if ranks and (len(ranks) != len(self.candidates) or any(rank <= 0 for rank in ranks)):
+            raise ValueError("candidate ranks must align with candidates and be positive")
+        object.__setattr__(self, "candidate_ranks", ranks)
 
 
 CandidateSource: TypeAlias = RecallSource | LegacyCandidateSource
@@ -204,7 +209,11 @@ def select_recall_seeds(
 
     selected: list[RecallSeed] = []
     seen: set[str] = set()
-    for role in (IntentTagRole.REQUIRED, IntentTagRole.ANCHOR):
+    for role in (
+        IntentTagRole.REQUIRED,
+        IntentTagRole.ANCHOR,
+        IntentTagRole.RECALL_ONLY,
+    ):
         for intent_tag in intent.tags:
             if intent_tag.role is not role or intent_tag.tag in seen:
                 continue
@@ -252,7 +261,8 @@ def merge_candidate_sources(
     first_seen: dict[int, tuple[int, int]] = {}
     for source_index, source in enumerate(prepared):
         seen_in_source: set[int] = set()
-        for source_rank, candidate in enumerate(source.candidates, start=1):
+        ranks = source.candidate_ranks or tuple(range(1, len(source.candidates) + 1))
+        for candidate, source_rank in zip(source.candidates, ranks):
             appid = int(candidate.appid or 0)
             if appid <= 0 or appid in seen_in_source:
                 continue
@@ -354,6 +364,7 @@ def _prepare_sources(
                 candidates=tuple(islice(source.candidates, max(source_limit, 0))),
                 weight=source.weight,
                 component_tags=source.component_tags,
+                candidate_ranks=source.candidate_ranks[: max(source_limit, 0)],
             )
         )
     return prepared
@@ -365,6 +376,7 @@ def _default_source_weight(source_kind: str) -> float:
         "intersection": 1.3,
         "tag": 1.0,
         "tag_text": 1.0,
+        "company": 1.0,
         "top_seller": 0.5,
         "index": 0.35,
     }.get(source_kind, 1.0)

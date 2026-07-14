@@ -288,6 +288,32 @@ class SteamClient:
             }
         )
 
+    async def search_storefront_company(
+        self,
+        term: str,
+        role: str,
+        page_size: int = 20,
+        start: int = 0,
+    ) -> SteamStorefrontPage:
+        resolved_term = str(term or "").strip()
+        resolved_role = str(role or "").strip().lower()
+        if not resolved_term:
+            raise ValueError("Steam storefront company must not be empty.")
+        if resolved_role not in {"developer", "publisher"}:
+            raise ValueError("Steam storefront company role is invalid.")
+        return await self._get_storefront_page(
+            {
+                "ignore_preferences": 1,
+                resolved_role: resolved_term,
+                "ndl": 1,
+                "l": "english",
+                "cc": self.default_country,
+                "start": max(int(start), 0),
+                "count": min(max(int(page_size), 1), 20),
+                "infinite": 1,
+            }
+        )
+
     async def browse_top_sellers(
         self,
         page_size: int = 60,
@@ -998,6 +1024,15 @@ def parse_steam_game(appid: int, data: dict[str, Any]) -> GameCandidate:
     genres = description_list(data.get("genres"))
     genre_ids = id_list(data.get("genres"))
     categories = description_list(data.get("categories"))
+    category_ids = id_list(data.get("categories"))
+    developer_data_available = isinstance(data.get("developers"), list)
+    publisher_data_available = isinstance(data.get("publishers"), list)
+    developers = text_list(data.get("developers"))
+    publishers = text_list(data.get("publishers"))
+    short_description = clean_html_text(data.get("short_description"))
+    detailed_description = clean_html_text(
+        data.get("detailed_description") or data.get("about_the_game")
+    )
     languages = parse_languages(data.get("supported_languages"))
     metacritic = data.get("metacritic") if isinstance(data.get("metacritic"), dict) else {}
     release = data.get("release_date") if isinstance(data.get("release_date"), dict) else {}
@@ -1009,6 +1044,8 @@ def parse_steam_game(appid: int, data: dict[str, Any]) -> GameCandidate:
         platforms=parse_platforms(data.get("platforms")),
         genres=genres,
         genre_ids=genre_ids,
+        categories=categories,
+        category_ids=category_ids,
         tags=categories,
         metacritic=optional_int(metacritic.get("score")),
         released=release_date,
@@ -1019,7 +1056,14 @@ def parse_steam_game(appid: int, data: dict[str, Any]) -> GameCandidate:
         supported_languages=languages,
         language_data_available=bool(languages),
         internal_source_markers=["steam_appdetails"],
-        description=clean_html_text(data.get("short_description") or data.get("about_the_game")),
+        developers=developers,
+        publishers=publishers,
+        developer_data_available=developer_data_available,
+        publisher_data_available=publisher_data_available,
+        company_data_available=(developer_data_available or publisher_data_available),
+        short_description=short_description or None,
+        detailed_description=detailed_description or None,
+        description=short_description or detailed_description or None,
     )
 
 
@@ -1044,6 +1088,12 @@ def description_list(value: Any) -> list[str]:
         if isinstance(item, dict) and item.get("description"):
             descriptions.append(str(item["description"]))
     return unique_texts(descriptions)
+
+
+def text_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return unique_texts([str(item) for item in value if isinstance(item, str)])
 
 
 def id_list(value: Any) -> list[int]:

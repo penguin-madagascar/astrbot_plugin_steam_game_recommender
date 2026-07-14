@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 import types
 import unittest
+import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -51,14 +53,20 @@ try:
     from astrbot_plugin_steam_game_recommender import main as main_module
     from astrbot_plugin_steam_game_recommender.main import (
         PreparedRecommendation,
+        RecommendationRun,
         SteamGameRecommenderPlugin,
     )
     from astrbot_plugin_steam_game_recommender.services.played_filter import LibraryFilterModeError
     from astrbot_plugin_steam_game_recommender.services.steam_index import STEAM_ONLY_SCOPE_WARNING
+    from astrbot_plugin_steam_game_recommender.services.semantic_feature_verifier import (
+        FeatureVerificationNotice,
+        verdict_cache_key,
+    )
     from astrbot_plugin_steam_game_recommender.storage.models import (
         GameCandidate,
         GamePreference,
         RankedGame,
+        ScoreBreakdown,
         SteamAccountBinding,
         SteamOwnedGame,
     )
@@ -329,10 +337,255 @@ class RecommendationPipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([game.title for game in run.ranked_games], ["Base Game"])
 
 
+class SemanticFeatureMainPipelineTest(unittest.IsolatedAsyncioTestCase):
+    async def test_current_session_provider_verifies_top_twenty_and_keys_cache(self) -> None:
+        feature = {
+            "constraint_id": "branching",
+            "source_span": "必须有分支剧情",
+            "normalized_text": "branching story",
+            "role": "core",
+            "polarity": "positive",
+        }
+        preference = GamePreference(
+            platforms=["steam"],
+            soft_features=[feature],
+            result_count=5,
+        )
+        games = [semantic_ranked_game(appid) for appid in range(1, 22)]
+        context = SemanticLlmContext(
+            provider_id="provider/session-model",
+            response={
+                "verdicts": [
+                    {
+                        "appid": appid,
+                        "constraint_id": "branching",
+                        "polarity": "positive",
+                        "status": "satisfied",
+                        "evidence_quote": f"Game {appid}",
+                    }
+                    for appid in range(1, 21)
+                ]
+            },
+        )
+        cache = SemanticMemoryCache()
+        plugin = semantic_pipeline_plugin(context, cache, games)
+        prepared = PreparedRecommendation(
+            raw_query="必须有分支剧情",
+            preference=preference,
+            result_limit=30,
+        )
+
+        async def identity_reasons(_context, _event, _provider_id, ranked_games):
+            return ranked_games
+
+        with (
+            patch.object(main_module, "generate_recommendation_reasons", identity_reasons),
+            patch.object(main_module.logger, "debug") as debug_log,
+        ):
+            run = await plugin._run_recommendation(FakeEvent(), prepared)
+
+        self.assertEqual(context.provider_requests, ["qq:test"])
+        self.assertEqual(len(context.calls), 1)
+        payload = json.loads(context.calls[0]["prompt"].split("INPUT=", 1)[1])
+        self.assertEqual(
+            [candidate["appid"] for candidate in payload["candidates"]],
+            list(range(1, 21)),
+        )
+        self.assertEqual([game.appid for game in run.ranked_games], list(range(1, 21)))
+        self.assertEqual(run.semantic_feature_notices, ())
+        self.assertEqual(preference.parse_warnings, [])
+        expected_keys = {
+            verdict_cache_key(
+                preference.soft_features[0],
+                game,
+                provider_id="provider/session-model",
+                locale="schinese",
+            )
+            for game in games[:20]
+        }
+        self.assertEqual({key for key, _payload in cache.writes}, expected_keys)
+        log_args = debug_log.call_args.args
+        rendered_log = log_args[0] % log_args[1:]
+        self.assertIn("semantic_candidates=20", rendered_log)
+        self.assertIn("semantic_notices=none", rendered_log)
+        self.assertIn("semantic_features_ms=", rendered_log)
+
+    async def test_contract_failure_is_request_local_and_core_returns_no_games(self) -> None:
+        preference = GamePreference(
+            platforms=["steam"],
+            soft_features=[
+                {
+                    "constraint_id": "branching",
+                    "source_span": "必须有分支剧情",
+                    "normalized_text": "branching story",
+                    "role": "core",
+                    "polarity": "positive",
+                }
+            ],
+        )
+        context = SemanticLlmContext(
+            provider_id="provider/session-model",
+            response={"verdicts": []},
+        )
+        cache = SemanticMemoryCache()
+        plugin = semantic_pipeline_plugin(context, cache, [semantic_ranked_game(1)])
+        plugin.fallback_provider_id = "provider/fallback"
+        prepared = PreparedRecommendation("分支剧情", preference, 5)
+
+        async def identity_reasons(_context, _event, _provider_id, ranked_games):
+            return ranked_games
+
+        with (
+            patch.object(main_module, "generate_recommendation_reasons", identity_reasons),
+            patch.object(main_module.logger, "debug") as debug_log,
+        ):
+            run = await plugin._run_recommendation(FakeEvent(), prepared)
+
+        self.assertEqual(run.ranked_games, [])
+        self.assertEqual(
+            [notice.code for notice in run.semantic_feature_notices],
+            ["semantic_feature_contract_failure"],
+        )
+        self.assertEqual(preference.parse_warnings, [])
+        self.assertEqual(cache.writes, [])
+        self.assertEqual(len(context.calls), 1)
+        self.assertNotIn("LLM 兜底建议", run.messages[0])
+        log_args = debug_log.call_args.args
+        rendered_log = log_args[0] % log_args[1:]
+        self.assertIn("semantic_candidates=1", rendered_log)
+        self.assertIn(
+            "semantic_notices=semantic_feature_contract_failure",
+            rendered_log,
+        )
+
+    async def test_notice_is_sent_as_independent_first_message(self) -> None:
+        plugin = object.__new__(SteamGameRecommenderPlugin)
+        preference = GamePreference()
+        run = RecommendationRun(
+            messages=["recommendations"],
+            ranked_games=[],
+            preference=preference,
+            result_limit=5,
+            raw_query="query",
+            semantic_feature_notices=(
+                FeatureVerificationNotice("semantic_feature_contract_failure", "notice"),
+            ),
+        )
+        saved: list[RecommendationRun] = []
+
+        async def prepare(_event, _query):
+            return PreparedRecommendation("query", preference, 5)
+
+        async def execute(_event, _prepared):
+            return run
+
+        async def save(_event, completed):
+            saved.append(completed)
+
+        plugin._prepare_recommendation = prepare
+        plugin._run_recommendation = execute
+        plugin._save_recent_recommendation = save
+        event = PlainResultEvent()
+
+        results = [item async for item in plugin.recommend_games(event, "query")]
+
+        self.assertEqual(results, [("plain", "notice"), ("plain", "recommendations")])
+        self.assertEqual(saved, [run])
+        self.assertEqual(preference.parse_warnings, [])
+
+
 class FakeEvent:
     unified_msg_origin = "qq:test"
     sender_id = "test"
     platform = "qq"
+
+
+class PlainResultEvent(FakeEvent):
+    def plain_result(self, text: str):
+        return ("plain", text)
+
+
+class SemanticMemoryCache:
+    def __init__(self) -> None:
+        self.payloads: dict[str, object] = {}
+        self.writes: list[tuple[str, object]] = []
+
+    async def get_json(self, key: str, _ttl_hours: int):
+        return self.payloads.get(key)
+
+    async def set_json(self, key: str, payload: object) -> None:
+        self.payloads[key] = payload
+        self.writes.append((key, payload))
+
+
+class SemanticLlmContext:
+    def __init__(self, *, provider_id: str, response: dict) -> None:
+        self.provider_id = provider_id
+        self.response = response
+        self.calls: list[dict] = []
+        self.provider_requests: list[str] = []
+
+    async def get_current_chat_provider_id(self, *, umo):
+        self.provider_requests.append(umo)
+        return self.provider_id
+
+    async def llm_generate(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(completion_text=json.dumps(self.response, ensure_ascii=False))
+
+
+class StaticSemanticSteamIndex:
+    def __init__(self, games: list[RankedGame]) -> None:
+        self.games = games
+
+    async def recommend(self, _preference, **_kwargs):
+        return list(self.games)
+
+
+def semantic_ranked_game(appid: int) -> RankedGame:
+    return RankedGame.from_candidate(
+        GameCandidate(
+            appid=appid,
+            title=f"Game {appid}",
+            app_type="game",
+            short_description="A story with branching choices.",
+        ),
+        80 - appid,
+        ScoreBreakdown(
+            relevance_tier="broad",
+            semantic_score=0.5,
+            quality_score=0.5,
+            layer_score=0.5,
+            positive_score=50,
+            retrieval_rank=appid,
+        ),
+        [],
+    )
+
+
+def semantic_pipeline_plugin(
+    context: SemanticLlmContext,
+    cache: SemanticMemoryCache,
+    games: list[RankedGame],
+) -> SteamGameRecommenderPlugin:
+    plugin = object.__new__(SteamGameRecommenderPlugin)
+    plugin.fallback_provider_id = ""
+    plugin.provider_id = ""
+    plugin.context = context
+    plugin.cache = cache
+    plugin.steam_client = SimpleNamespace(language="schinese")
+    plugin.steam_index = StaticSemanticSteamIndex(games)
+    plugin.price_bridge = IdentityPriceBridge()
+
+    async def no_owned_games(_event, required):
+        return []
+
+    async def no_profile(_event, _owned_games):
+        return {}
+
+    plugin._owned_games_for_recommendation = no_owned_games
+    plugin._user_profile_tag_weights = no_profile
+    return plugin
 
 
 class FakeLlmResponse:

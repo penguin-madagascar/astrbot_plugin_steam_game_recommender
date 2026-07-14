@@ -509,9 +509,7 @@ class RecallPipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.tag_calls, [(1, 40), (2, 40), (3, 40)])
         self.assertEqual(client.text_calls, [])
 
-    async def test_intersection_scans_past_three_unknown_single_source_anchors(
-        self,
-    ) -> None:
+    async def test_loaded_vocabulary_skips_unknown_anchors_before_seed_selection(self) -> None:
         client = PipelineClient(tag_ids={"Known One": 11, "Known Two": 12})
         service = SteamGameIndexService(client, ServiceMemoryCache())
 
@@ -529,15 +527,8 @@ class RecallPipelineTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(client.intersection_calls, [((11, 12), 40)])
-        self.assertEqual(client.tag_calls, [])
-        self.assertEqual(
-            client.text_calls,
-            [
-                ("unknown one", 40),
-                ("unknown two", 40),
-                ("unknown three", 40),
-            ],
-        )
+        self.assertEqual(client.tag_calls, [(11, 40), (12, 40)])
+        self.assertEqual(client.text_calls, [])
 
     async def test_topsellers_are_gated_to_mainstream_or_no_anchor_queries(self) -> None:
         anchored_client = PipelineClient(tag_ids={"Puzzle": 1})

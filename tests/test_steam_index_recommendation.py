@@ -329,17 +329,20 @@ class SimilarityRankerTest(unittest.TestCase):
         self.assertIn("crafting", profile.include_tags)
         self.assertIn("relaxing", profile.include_tags)
 
-    def test_aaa_profile_prioritizes_broad_blockbuster_matches(self) -> None:
+    def test_compatibility_profile_uses_only_explicit_genre_anchors(self) -> None:
         ranker = optional_import("astrbot_plugin_steam_game_recommender.services.similarity_ranker")
         profile = ranker.build_profile_from_preference(
             GamePreference(
-                extra_tags=["aaa", "open world", "story rich"],
                 genres_like=["action", "adventure", "rpg"],
+                derived_intent_tags=[
+                    {"tag": "open_world", "source_span": "open world"},
+                    {"tag": "story_rich", "source_span": "story rich"},
+                ],
+                quality_intent="mainstream",
             )
         )
 
-        self.assertIn("open_world", profile.include_tags)
-        self.assertIn("story_rich", profile.include_tags)
+        self.assertEqual(profile.include_tags, ["action", "adventure", "rpg"])
 
         ranked = ranker.rank_steam_candidates(
             [
@@ -361,8 +364,41 @@ class SimilarityRankerTest(unittest.TestCase):
 
         self.assertEqual(
             [game.title for game in ranked],
-            ["Focused AAA Adventure", "High Review Generic Action"],
+            ["High Review Generic Action", "Focused AAA Adventure"],
         )
+
+    def test_globally_registered_derived_tag_cannot_become_profile_anchor(self) -> None:
+        normalizer = optional_import(
+            "astrbot_plugin_steam_game_recommender.services.tag_normalizer"
+        )
+        ranker = optional_import(
+            "astrbot_plugin_steam_game_recommender.services.similarity_ranker"
+        )
+        normalizer.register_canonical_tag_keys(["polluted_profile_tag"])
+        profile = ranker.build_profile_from_preference(
+            GamePreference(
+                genres_like=["puzzle"],
+                derived_intent_tags=[
+                    {
+                        "tag": "polluted_profile_tag",
+                        "source_span": "invented mechanic",
+                    }
+                ],
+            )
+        )
+
+        ranked = ranker.rank_steam_candidates(
+            [
+                steam_index_game("Explicit Puzzle", tags=["puzzle"]),
+                steam_index_game("Polluted Only", tags=["polluted_profile_tag"]),
+            ],
+            profile,
+        )
+
+        self.assertEqual(profile.include_tags, ["puzzle"])
+        self.assertEqual(ranked[0].title, "Explicit Puzzle")
+        self.assertEqual(ranked[0].score_breakdown.relevance_tier, "A")
+        self.assertEqual(ranked[1].score_breakdown.relevance_tier, "C")
 
 
 class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
@@ -492,7 +528,7 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
         )
 
         ranked = await service.recommend(
-            GamePreference(extra_tags=["农场模拟", "放松", "多人"]),
+            GamePreference(genres_like=["农场模拟", "放松", "多人"]),
             limit=2,
         )
 

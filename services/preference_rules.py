@@ -5,6 +5,7 @@ import unicodedata
 from dataclasses import dataclass
 
 from ..storage.models import GamePreference
+from .company_preferences import normalize_company_name
 from .played_filter import detect_library_filter_mode
 from .tag_normalizer import (
     canonical_tag_occurrences,
@@ -101,6 +102,56 @@ HARD_REQUIREMENT_MARKERS = (
     "required ",
     "need ",
 )
+
+PLATFORM_SPAN_PATTERN = re.compile(
+    r"(?<![0-9A-Za-z])(?:Steam|PC|Windows|Switch|Nintendo|任天堂|"
+    r"PlayStation|PS[45]?|Xbox|电脑)(?![0-9A-Za-z])",
+    flags=re.I,
+)
+COMPANY_ENTITY_AFTER_SPAN_PATTERN = re.compile(
+    r"^\s*(?:的\s*)?(?:开发商|发行商|开发|发行|公司|工作室|"
+    r"studios?\b|interactive\b|entertainment\b|developer\b|"
+    r"publisher\b|company\b|corporation\b)",
+    flags=re.I,
+)
+COMPANY_ENTITY_BEFORE_SPAN_PATTERN = re.compile(
+    r"(?:(?:开发商|发行商|开发公司|发行公司|开发方|发行方|"
+    r"developer\b|publisher\b|company\b)\s*(?:是|为|:|：|=)?|"
+    r"(?:developed|published)\s+by)\s*$",
+    flags=re.I,
+)
+RESULT_QUANTITY_PATTERN = re.compile(
+    r"(?P<count>\d+|十|[一二两三四五六七八九])\s*"
+    r"(?:个|款|部|(?:games?|results?|titles?)\b)",
+    flags=re.I,
+)
+BUDGET_CURRENCY_PATTERN = (
+    r"美元|美金|usd|日元|日币|jpy|円|欧元|eur|英镑|gbp|港币|hkd|"
+    r"台币|新台币|twd|韩元|krw|人民币|rmb|cny|元|块"
+)
+BUDGET_PATTERNS = tuple(
+    re.compile(pattern, flags=re.I)
+    for pattern in (
+        rf"(?:预算|价格|价位|budget|price)\s*"
+        rf"(?:(?:改为|改成|调整到|设为|到|为|是|约|最多|不超过|不得超过|"
+        rf"不能超过|低于|小于|必须|一定要|只接受|务必|must|be|required|to|"
+        rf"under|below|at\s+most|less\s+than|only|accept)\s*)*"
+        rf"(?P<symbol>[$€£¥￥]?)\s*(?P<amount>\d+(?:\.\d+)?)\s*"
+        rf"(?P<currency>{BUDGET_CURRENCY_PATTERN})?",
+        r"(?P<symbol>[$€£¥￥])\s*(?P<amount>\d+(?:\.\d+)?)",
+        rf"(?P<amount>\d+(?:\.\d+)?)\s*"
+        rf"(?P<currency>{BUDGET_CURRENCY_PATTERN})"
+        rf"\s*(?:以内|以下|左右|上下)?",
+    )
+)
+QUALITY_COMPANY_IDENTITIES = {
+    "3a",
+    "aaa",
+    "blockbuster",
+    "mainstream",
+    "triple a",
+    "大作",
+}
 
 
 @dataclass(frozen=True)
@@ -338,6 +389,49 @@ def merge_text_preference(preference: GamePreference, text: str) -> GamePreferen
         else "normal"
     )
     data["allow_unreleased"] = preference.allow_unreleased or inferred.allow_unreleased
+    companies = validated_company_preferences(preference, text)
+    company_reference_titles = [
+        value
+        for company in companies
+        for value in (company.source_span, company.display_name)
+    ]
+    for field_name in (
+        "reference_games_like",
+        "reference_search_terms",
+        "reference_games_dislike",
+    ):
+        data[field_name] = remove_reference_titles(
+            data[field_name],
+            company_reference_titles,
+        )
+    merged_reference_spans = [
+        *data["reference_games_like"],
+        *data["reference_search_terms"],
+        *data["reference_games_dislike"],
+    ]
+    company_spans = merge_lists(
+        [company.source_span for company in companies],
+        contextual_raw_company_spans(preference, text),
+    )
+    blocked_semantic_spans = semantic_blocked_ranges(
+        preference,
+        text,
+        company_spans=company_spans,
+        reference_spans=merged_reference_spans,
+    )
+    data["company_preferences"] = companies
+    data["derived_intent_tags"] = [
+        item
+        for item in preference.derived_intent_tags
+        if exact_span_outside_ranges(item.source_span, text, blocked_semantic_spans)
+        and not company_span_has_entity_context(item.source_span, text)
+    ][:3]
+    data["soft_features"] = [
+        item
+        for item in preference.soft_features
+        if exact_span_outside_ranges(item.source_span, text, blocked_semantic_spans)
+        and not company_span_has_entity_context(item.source_span, text)
+    ][:3]
     explicit_tags = {
         tag for tag, polarity in tag_polarities.items() if polarity == "positive"
     }
@@ -859,29 +953,31 @@ def expand_related_extra_tags(tags: list[str]) -> list[str]:
 
 
 def extract_result_count(text: str) -> int | None:
-    count_match = re.search(r"(\d+)\s*(?:个|款|部)", text.lower())
+    count_match = RESULT_QUANTITY_PATTERN.search(text)
     if not count_match:
         return None
-    return min(max(int(count_match.group(1)), 1), 10)
+    raw_count = count_match.group("count")
+    chinese_counts = {
+        "一": 1,
+        "二": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+        "十": 10,
+    }
+    count = int(raw_count) if raw_count.isdigit() else chinese_counts[raw_count]
+    return min(max(count, 1), 10)
 
 
 def extract_budget(text: str) -> tuple[float | None, str | None, bool]:
-    currency_pattern = (
-        r"美元|美金|usd|日元|日币|jpy|円|欧元|eur|英镑|gbp|港币|hkd|"
-        r"台币|新台币|twd|韩元|krw|人民币|rmb|cny|元|块"
+    match = next(
+        (result for pattern in BUDGET_PATTERNS if (result := pattern.search(text))),
+        None,
     )
-    patterns = (
-        rf"(?:预算|价格|价位|budget|price)\s*"
-        rf"(?:(?:改为|改成|调整到|设为|到|为|是|约|最多|不超过|不得超过|"
-        rf"不能超过|低于|小于|必须|一定要|只接受|务必|must|be|required|to|"
-        rf"under|below|at\s+most|less\s+than|only|accept)\s*)*"
-        rf"(?P<symbol>[$€£¥￥]?)\s*(?P<amount>\d+(?:\.\d+)?)\s*"
-        rf"(?P<currency>{currency_pattern})?",
-        r"(?P<symbol>[$€£])\s*(?P<amount>\d+(?:\.\d+)?)",
-        rf"(?P<amount>\d+(?:\.\d+)?)\s*(?P<currency>{currency_pattern})"
-        rf"\s*(?:以内|以下|左右|上下)?",
-    )
-    match = next((result for pattern in patterns if (result := re.search(pattern, text))), None)
     if match is None:
         return None, None, False
     amount = float(match.group("amount"))
@@ -971,3 +1067,175 @@ def merge_platforms(llm_platforms: list[str], text_platforms: list[str]) -> list
 def dump_preference(preference: GamePreference) -> dict:
     dumper = getattr(preference, "model_dump", None)
     return dumper() if dumper else preference.dict()
+
+
+def validated_company_preferences(
+    preference: GamePreference,
+    text: str,
+    *,
+    reference_spans: list[str] | None = None,
+) -> list:
+    blocked = semantic_blocked_ranges(
+        preference,
+        text,
+        company_spans=[],
+        block_platforms=False,
+        reference_spans=reference_spans,
+    )
+    result = []
+    for company in preference.company_preferences:
+        source_span = company.source_span
+        source_identity = normalize_company_name(source_span)
+        if (
+            not source_identity
+            or is_quality_company_identity(source_span)
+            or is_quality_company_identity(company.display_name)
+            or not platform_company_span_is_grounded(source_span, text)
+            or normalize_company_name(company.display_name) != source_identity
+            or not exact_span_outside_ranges(source_span, text, blocked)
+        ):
+            continue
+        result.append(company)
+        if len(result) >= 3:
+            break
+    return result
+
+
+def is_quality_company_identity(value: str) -> bool:
+    return (
+        has_aaa_intent(value)
+        or normalize_company_name(value) in QUALITY_COMPANY_IDENTITIES
+    )
+
+
+def contextual_raw_company_spans(
+    preference: GamePreference,
+    text: str,
+) -> list[str]:
+    return merge_lists(
+        [],
+        [
+            company.source_span
+            for company in preference.company_preferences
+            if company_span_has_entity_context(company.source_span, text)
+        ],
+    )
+
+
+def company_span_has_entity_context(source_span: str, text: str) -> bool:
+    for start, end in exact_span_occurrences(source_span, text):
+        if COMPANY_ENTITY_AFTER_SPAN_PATTERN.search(text[end:]):
+            return True
+        if COMPANY_ENTITY_BEFORE_SPAN_PATTERN.search(text[:start]):
+            return True
+    return False
+
+
+def platform_company_span_is_grounded(source_span: str, text: str) -> bool:
+    if not PLATFORM_SPAN_PATTERN.search(source_span):
+        return True
+    return company_span_has_entity_context(source_span, text)
+
+
+def semantic_blocked_ranges(
+    preference: GamePreference,
+    text: str,
+    *,
+    company_spans: list[str],
+    block_platforms: bool = True,
+    reference_spans: list[str] | None = None,
+) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    references = reference_spans or [
+        *preference.reference_games_like,
+        *preference.reference_search_terms,
+        *preference.reference_games_dislike,
+    ]
+    for value in references:
+        ranges.extend(reference_span_occurrences(value, text))
+    for value in company_spans:
+        ranges.extend(exact_span_occurrences(value, text))
+
+    ranges.extend(budget_span_occurrences(text))
+    ranges.extend(result_quantity_span_occurrences(text))
+    if block_platforms:
+        ranges.extend(
+            (match.start(), match.end()) for match in PLATFORM_SPAN_PATTERN.finditer(text)
+        )
+    return sorted(set(ranges))
+
+
+def budget_span_occurrences(text: str) -> list[tuple[int, int]]:
+    return sorted(
+        {
+            (match.start(), match.end())
+            for pattern in BUDGET_PATTERNS
+            for match in pattern.finditer(text)
+        }
+    )
+
+
+def result_quantity_span_occurrences(text: str) -> list[tuple[int, int]]:
+    return [
+        (match.start(), match.end())
+        for match in RESULT_QUANTITY_PATTERN.finditer(text)
+    ]
+
+
+def exact_span_outside_ranges(
+    span: str,
+    text: str,
+    blocked: list[tuple[int, int]],
+) -> bool:
+    return any(
+        not any(start < blocked_end and end > blocked_start for blocked_start, blocked_end in blocked)
+        for start, end in exact_span_occurrences(span, text)
+    )
+
+
+def exact_span_occurrences(span: str, text: str) -> list[tuple[int, int]]:
+    needle = str(span or "")
+    if not needle:
+        return []
+    occurrences: list[tuple[int, int]] = []
+    offset = 0
+    while True:
+        start = text.find(needle, offset)
+        if start < 0:
+            return occurrences
+        occurrences.append((start, start + len(needle)))
+        offset = start + 1
+
+
+def reference_span_occurrences(span: str, text: str) -> list[tuple[int, int]]:
+    result: list[tuple[int, int]] = []
+    markers = (
+        "类似",
+        "像是",
+        "像",
+        "接近",
+        "参考",
+        "喜欢",
+        "偏爱",
+        "钟爱",
+        "不要",
+        "别",
+        "不想要",
+        "不喜欢",
+        "排除",
+        "避免",
+        "讨厌",
+        "like",
+        "similar to",
+        "not like",
+        "unlike",
+        "avoid",
+        "dislike",
+    )
+    for start, end in exact_span_occurrences(span, text):
+        bracketed = start > 0 and end < len(text) and text[start - 1] == "《" and text[end] == "》"
+        left = text[max(start - 16, 0) : start].casefold().rstrip()
+        introduced = any(left.endswith(marker) for marker in markers)
+        if bracketed or introduced:
+            result.append((start, end))
+    return result

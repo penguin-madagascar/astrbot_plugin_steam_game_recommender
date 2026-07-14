@@ -5,7 +5,13 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from ..storage.models import GameCandidate
-from .tag_normalizer import canonical_tags_from_terms, extract_description_terms, normalize_tag
+from .tag_normalizer import (
+    ASCII_CANONICAL_TAG_PATTERN,
+    canonical_steam_tag_name,
+    canonical_tags_from_terms,
+    extract_description_terms,
+    normalize_tag,
+)
 
 REQUIRED_DIRECT_STRENGTH = 0.65
 INFERRED_STRENGTH = 0.25
@@ -32,12 +38,13 @@ class CandidateTagEvidence:
 def build_candidate_tag_evidence(candidate: GameCandidate) -> CandidateTagEvidence:
     direct: dict[str, float] = {}
     for position, raw_tag in enumerate(candidate.ordered_tags):
-        tag = normalize_tag(raw_tag)
+        tag = canonical_direct_tag(raw_tag)
         if tag:
             _record_strength(direct, tag, max(0.4, 1.0 - 0.06 * position))
 
-    for tag in canonical_tags_from_terms([*candidate.genres, *candidate.tags]):
-        _record_strength(direct, tag, GENRE_TAG_STRENGTH)
+    for raw_tag in [*candidate.genres, *candidate.tags]:
+        if tag := canonical_direct_tag(raw_tag):
+            _record_strength(direct, tag, GENRE_TAG_STRENGTH)
 
     _add_coop_implications(direct)
     supporting = dict(direct)
@@ -56,7 +63,7 @@ def required_tag_is_satisfied(
     evidence: CandidateTagEvidence,
     required_tag: str,
 ) -> bool:
-    tag = normalize_tag(required_tag)
+    tag = canonical_direct_tag(required_tag)
     return bool(tag and evidence.direct.get(tag, 0.0) >= REQUIRED_DIRECT_STRENGTH)
 
 
@@ -71,7 +78,7 @@ def excluded_tag_is_hit(
     evidence: CandidateTagEvidence,
     excluded_tag: str,
 ) -> bool:
-    tag = normalize_tag(excluded_tag)
+    tag = canonical_direct_tag(excluded_tag)
     return bool(tag and evidence.direct.get(tag, 0.0) > 0.0)
 
 
@@ -84,6 +91,11 @@ def matches_excluded_tags(
 
 def _record_strength(strengths: dict[str, float], tag: str, strength: float) -> None:
     strengths[tag] = max(strengths.get(tag, 0.0), strength)
+
+
+def canonical_direct_tag(value: str) -> str | None:
+    canonical = normalize_tag(value) or canonical_steam_tag_name(value)
+    return canonical if ASCII_CANONICAL_TAG_PATTERN.fullmatch(canonical) else None
 
 
 def _add_coop_implications(strengths: dict[str, float]) -> None:

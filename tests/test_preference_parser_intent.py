@@ -53,6 +53,16 @@ class PreferenceParserIntentTest(unittest.TestCase):
         self.assertIn("没有否定或排除措辞时", PREFERENCE_SCHEMA_HINT)
         self.assertIn("明确说不要单机、不要单人或排除 singleplayer", PREFERENCE_SCHEMA_HINT)
 
+    def test_schema_explains_semantic_and_company_contracts(self) -> None:
+        for field in (
+            '"derived_intent_tags": []',
+            '"soft_features": []',
+            '"company_preferences": []',
+        ):
+            self.assertIn(field, PREFERENCE_SCHEMA_HINT)
+        self.assertIn("proxy_tags 只用于召回", PREFERENCE_SCHEMA_HINT)
+        self.assertIn("不得因为 3A、AAA、大作", PREFERENCE_SCHEMA_HINT)
+
     def test_llm_json_fields_are_normalized_by_game_preference(self) -> None:
         preference = parse_preference_json(
             '{"quality_intent":"MAINSTREAM","allow_unreleased":true}'

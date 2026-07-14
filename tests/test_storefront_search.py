@@ -219,6 +219,34 @@ class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("tags", http_client.last_params)
         self.assertNotIn("sort_by", http_client.last_params)
 
+    async def test_company_search_uses_exact_role_filter_and_caps_each_alias_at_twenty(self) -> None:
+        for role in ("developer", "publisher"):
+            with self.subTest(role=role):
+                http_client = FakeHttpClient(storefront_payload())
+                client = SteamClient(
+                    http_client,
+                    MemoryCache(),
+                    default_country="JP",
+                )
+
+                await client.search_storefront_company(
+                    "Acme Games",
+                    role,
+                    page_size=99,
+                    start=-5,
+                )
+
+                self.assertEqual(http_client.last_params[role], "Acme Games")
+                self.assertNotIn(
+                    "publisher" if role == "developer" else "developer",
+                    http_client.last_params,
+                )
+                self.assertEqual(http_client.last_params["count"], 20)
+                self.assertEqual(http_client.last_params["start"], 0)
+                self.assertEqual(http_client.last_params["cc"], "JP")
+                self.assertNotIn("term", http_client.last_params)
+                self.assertNotIn("sort_by", http_client.last_params)
+
     async def test_invalid_contract_raises_without_stale_cache(self) -> None:
         client = SteamClient(FakeHttpClient({"success": 1}), MemoryCache())
 

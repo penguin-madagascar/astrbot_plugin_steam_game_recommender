@@ -13,11 +13,18 @@ import httpx
 
 from ..clients.steam import SteamApiError
 from ..storage.models import (
+    COMPANY_ALIAS_LIMIT,
+    CompanyPreference,
     GameCandidate,
     GamePreference,
     RankedGame,
     ResolvedReferenceGame,
     SteamSearchHit,
+)
+from .company_preferences import (
+    CompanyMatchStatus,
+    company_match_status,
+    matches_company_preference,
 )
 from .candidate_tag_evidence import build_candidate_tag_evidence
 from .game_identity import (
@@ -27,6 +34,7 @@ from .game_identity import (
 )
 from .recommendation_intent import (
     IntentTagRole,
+    IntentTagSource,
     QualityIntent,
     RecommendationIntent,
     ReferencePolarity,
@@ -48,6 +56,7 @@ from .steam_recall import (
     RecallSourceHealth,
     RecallSourceStatus,
     RecallUnavailableError,
+    RRF_K,
     merge_candidate_sources,
     select_recall_seeds,
 )
@@ -55,15 +64,16 @@ from .tag_normalizer import (
     canonical_steam_tag_name,
     canonical_tags_from_terms,
     extract_description_terms,
+    normalize_key,
     normalize_tag,
-    register_canonical_tag_keys,
     register_steam_tag_aliases,
+    static_canonical_tags,
 )
 
 logger = logging.getLogger(__name__)
 
 STEAM_INDEX_CACHE_KEY = "steam_index"
-STEAM_INDEX_SCHEMA_VERSION = 2
+STEAM_INDEX_SCHEMA_VERSION = 3
 STEAM_INDEX_LEGACY_CACHE_KEYS = ("steam_index:v4", "steam_index:v3")
 STEAM_INDEX_MAX_ENTRIES = 3_000
 STEAM_INDEX_MAX_SEARCH_TERMS = 256
@@ -176,6 +186,7 @@ class SteamGameIndexService:
         ] = {}
         self._steam_tag_ids: dict[str, int] = {}
         self._canonical_tag_by_id: dict[int, str] = {}
+        self._steam_tag_aliases: dict[str, str] = {}
         self._tag_aliases_lock = asyncio.Lock()
         self._tag_aliases_task: asyncio.Task[bool] | None = None
         self._snapshot_lock = asyncio.Lock()
@@ -204,16 +215,15 @@ class SteamGameIndexService:
 
         await self.bootstrap()
         await self.ensure_steam_tag_aliases()
-        request_tags = register_canonical_tag_keys(
-            [
-                *preference.required_tags,
-                *preference.genres_like,
-                *preference.extra_tags,
-                *preference.genres_dislike,
-            ]
+        request_intent = self._build_request_intent(preference)
+        request_tags = [tag.tag for tag in request_intent.tags]
+        filtered_explicit_tag = self._has_filtered_explicit_tag(
+            preference,
+            request_intent,
         )
-        if request_tags and any(
-            self._usable_steam_tag_id_for(tag) is None for tag in request_tags
+        if filtered_explicit_tag or (
+            request_tags
+            and any(self._usable_steam_tag_id_for(tag) is None for tag in request_tags)
         ):
             if STEAM_TAG_RECALL_DEGRADED_WARNING not in preference.parse_warnings:
                 preference.parse_warnings.append(STEAM_TAG_RECALL_DEGRADED_WARNING)
@@ -284,17 +294,20 @@ class SteamGameIndexService:
 
         record_candidates = [record.candidate for record in records.values()]
         positive_references = reference_candidates(preference, record_candidates)
-        initial_intent = build_recommendation_intent(preference)
+        initial_intent = self._build_request_intent(preference)
         has_positive_reference_query = any(
             reference.polarity is ReferencePolarity.POSITIVE
             for reference in initial_intent.references
         )
-        has_non_reference_positive_signal = any(
+        has_non_reference_positive_signal = bool(
+            preference.company_preferences
+        ) or any(
             intent_tag.role
             in {
                 IntentTagRole.REQUIRED,
                 IntentTagRole.ANCHOR,
                 IntentTagRole.SUPPORTING,
+                IntentTagRole.RECALL_ONLY,
             }
             for intent_tag in initial_intent.tags
         )
@@ -358,6 +371,19 @@ class SteamGameIndexService:
         if intersection_fetch is not None:
             source_fetches.append(intersection_fetch)
         source_fetches.extend(weighted_tag_fetches)
+        company_fetches = list(
+            await asyncio.gather(
+                *(
+                    self._fetch_company_source(company, source_index=index)
+                    for index, company in enumerate(preference.company_preferences)
+                )
+            )
+        )
+        source_fetches.extend(company_fetches)
+        company_preferences_by_source = {
+            fetch.source.source_id: company
+            for fetch, company in zip(company_fetches, preference.company_preferences)
+        }
 
         has_anchor = any(
             intent_tag.role is IntentTagRole.ANCHOR
@@ -379,15 +405,7 @@ class SteamGameIndexService:
         filtered_fetches = [
             replace(
                 fetch,
-                source=replace(
-                    fetch.source,
-                    candidates=tuple(
-                        candidate
-                        for candidate in fetch.source.candidates
-                        if candidate.appid is not None
-                        and int(candidate.appid) not in excluded
-                    ),
-                ),
+                source=filter_recall_source(fetch.source, excluded),
             )
             for fetch in source_fetches
         ]
@@ -435,10 +453,16 @@ class SteamGameIndexService:
             degraded=degraded,
             health=RecallHealth(sources=source_health),
         )
+        company_validation_kwargs = (
+            {"company_preferences_by_source": company_preferences_by_source}
+            if company_preferences_by_source
+            else {}
+        )
         first_batch = await self._validate_recall_hits(
             merged.hits[:60],
             records,
             prefetched,
+            **company_validation_kwargs,
         )
         verified_hits = list(first_batch.hits)
         first_eligible = self._eligible_recall_count(
@@ -451,20 +475,42 @@ class SteamGameIndexService:
         validation_attempts = first_batch.attempts
         transient_failures = first_batch.transient_failures
         contract_failures = first_batch.contract_failures
+        company_source_ids = set(company_preferences_by_source)
+        available_company_hits = sum(
+            any(source.source_id in company_source_ids for source in hit.source_hits)
+            for hit in merged.hits
+        )
+        company_target = min(
+            max(int(requested_limit), 0),
+            available_company_hits,
+        )
+        verified_company_hits = sum(
+            any(source.source_id in company_source_ids for source in hit.source_hits)
+            for hit in verified_hits
+        )
         if (
-            first_eligible < 2 * max(int(requested_limit), 0)
+            (
+                first_eligible < 2 * max(int(requested_limit), 0)
+                or verified_company_hits < company_target
+            )
             and len(merged.hits) > 60
         ):
             second_batch = await self._validate_recall_hits(
                 merged.hits[60:100],
                 records,
                 prefetched,
+                **company_validation_kwargs,
             )
             verified_hits.extend(second_batch.hits)
             validation_attempts += second_batch.attempts
             transient_failures += second_batch.transient_failures
             contract_failures += second_batch.contract_failures
 
+        verified_hits.sort(key=lambda hit: (-hit.rrf_score, hit.retrieval_rank))
+        verified_hits = [
+            replace(hit, retrieval_rank=rank)
+            for rank, hit in enumerate(verified_hits, start=1)
+        ]
         eligible = self._eligible_recall_count(
             verified_hits,
             preference,
@@ -609,6 +655,30 @@ class SteamGameIndexService:
             total_count=len(candidates),
         )
 
+    def _build_request_intent(self, preference: GamePreference) -> RecommendationIntent:
+        if not self._steam_tag_aliases_are_usable_stale():
+            return build_recommendation_intent(preference)
+        vocabulary = frozenset({*static_canonical_tags(), *self._steam_tag_ids})
+        return build_recommendation_intent(
+            preference,
+            known_tags=vocabulary,
+            known_tag_aliases=self._steam_tag_aliases,
+        )
+
+    def _has_filtered_explicit_tag(
+        self,
+        preference: GamePreference,
+        request_intent: RecommendationIntent,
+    ) -> bool:
+        if not self._steam_tag_aliases_are_usable_stale():
+            return False
+        accepted = {item.tag for item in request_intent.tags}
+        cold_intent = build_recommendation_intent(preference)
+        return any(
+            item.source == IntentTagSource.EXPLICIT and item.tag not in accepted
+            for item in cold_intent.tags
+        )
+
     async def _prefetch_reference_tag_sources(
         self,
         references: list[GameCandidate],
@@ -710,6 +780,89 @@ class SteamGameIndexService:
     ) -> Any:
         async with self._steam_semaphore:
             return await search_storefront(tag_id, page_size=page_size)
+
+    async def _fetch_company_source(
+        self,
+        preference: CompanyPreference,
+        *,
+        source_index: int,
+    ) -> RecallSourceFetch:
+        source_id = f"company:{int(source_index)}"
+        search = getattr(self.steam_client, "search_storefront_company", None)
+        if search is None:
+            return failed_source_fetch(
+                source_id,
+                "company",
+                None,
+                1.0,
+                RuntimeError("Steam storefront company search is unavailable."),
+            )
+        aliases = dedupe_texts(
+            [preference.display_name, *preference.aliases]
+        )[:COMPANY_ALIAS_LIMIT]
+        roles = (
+            ("developer", "publisher")
+            if preference.role == "either"
+            else (preference.role,)
+        )
+        requests = [(alias, role) for alias in aliases for role in roles]
+
+        async def search_one(alias: str, role: str) -> Any:
+            async with self._steam_semaphore:
+                return await search(alias, role, page_size=20)
+
+        results = await asyncio.gather(
+            *(search_one(alias, role) for alias, role in requests),
+            return_exceptions=True,
+        )
+        pages = [item for item in results if not isinstance(item, BaseException)]
+        failures = [item for item in results if isinstance(item, BaseException)]
+        if not pages:
+            error = failures[0] if failures else RuntimeError("company search returned no result")
+            return failed_source_fetch(source_id, "company", None, 1.0, error)
+
+        by_appid: dict[int, tuple[GameCandidate, int, tuple[int, int]]] = {}
+        for request_index, page in enumerate(pages):
+            for rank, hit in enumerate(page.hits[:20], start=1):
+                candidate = self._candidate_from_storefront_hit(hit)
+                appid = int(candidate.appid or 0)
+                if appid <= 0:
+                    continue
+                current = by_appid.get(appid)
+                if current is None:
+                    by_appid[appid] = (candidate, rank, (request_index, rank))
+                else:
+                    merged = merge_recall_candidate_evidence(current[0], candidate)
+                    best_rank = min(current[1], rank)
+                    best_seen = (
+                        (request_index, rank)
+                        if rank < current[1]
+                        else min(current[2], (request_index, rank))
+                        if rank == current[1]
+                        else current[2]
+                    )
+                    by_appid[appid] = (
+                        merged,
+                        best_rank,
+                        best_seen,
+                    )
+        ordered = sorted(
+            by_appid.values(),
+            key=lambda item: (item[1], item[2], int(item[0].appid or 0)),
+        )
+        source = RecallSource(
+            source_id=source_id,
+            source_kind="company",
+            source_tag=None,
+            candidates=tuple(item[0] for item in ordered),
+            weight=1.0,
+            candidate_ranks=tuple(item[1] for item in ordered),
+        )
+        return successful_source_fetch(
+            source,
+            stale=bool(failures) or any(bool(getattr(page, "stale", False)) for page in pages),
+            total_count=max((int(getattr(page, "total_count", 0)) for page in pages), default=0),
+        )
 
     async def _fetch_top_sellers(
         self,
@@ -955,7 +1108,10 @@ class SteamGameIndexService:
         hits: tuple[CandidateHit, ...],
         records: dict[str, SteamIndexEntry],
         prefetched: dict[int, GameCandidate],
+        *,
+        company_preferences_by_source: Mapping[str, CompanyPreference] | None = None,
     ) -> RecallValidationBatch:
+        company_preferences_by_source = company_preferences_by_source or {}
         existing = {
             int(record.candidate.appid): record.candidate
             for record in records.values()
@@ -973,23 +1129,67 @@ class SteamGameIndexService:
         ) -> tuple[CandidateHit | None, RecallSourceStatus | None]:
             appid = int(hit.candidate.appid or 0)
             candidate = existing.get(appid)
+            company_hits = [
+                source
+                for source in hit.source_hits
+                if source.source_id in company_preferences_by_source
+            ]
+            force_company_refresh = bool(company_hits) and (
+                candidate is None
+                or "steam_appdetails" not in candidate.internal_source_markers
+                or any(
+                    company_match_status(
+                        candidate,
+                        company_preferences_by_source[source.source_id],
+                    )
+                    is CompanyMatchStatus.UNKNOWN
+                    for source in company_hits
+                )
+            )
+            if force_company_refresh:
+                candidate = None
             if candidate is None:
                 try:
                     candidate = await self._fetch_candidate(
                         appid,
                         prefetched,
-                        bypass_cache=appid in legacy_appids,
+                        bypass_cache=appid in legacy_appids or force_company_refresh,
                     )
                 except Exception as exc:
                     return None, failure_status(exc)
             if candidate is None or not is_confirmed_base_game(candidate):
                 return None, None
+            retained_sources = tuple(
+                source
+                for source in hit.source_hits
+                if source.source_id not in company_preferences_by_source
+                or matches_company_preference(
+                    candidate,
+                    company_preferences_by_source[source.source_id],
+                )
+            )
+            if not retained_sources:
+                return None, None
+            removed_company_contribution = sum(
+                source.source_weight / (RRF_K + source.source_rank)
+                for source in hit.source_hits
+                if source not in retained_sources and source.source_kind == "company"
+            )
             candidate = merge_recall_candidate_evidence(candidate, hit.candidate)
-            return replace(hit, candidate=candidate), None
+            return (
+                replace(
+                    hit,
+                    candidate=candidate,
+                    source_hits=retained_sources,
+                    rrf_score=max(hit.rrf_score - removed_company_contribution, 0.0),
+                ),
+                None,
+            )
 
         validated = await asyncio.gather(*(validate(hit) for hit in hits))
+        valid_hits = [hit for hit, _failure in validated if hit is not None]
         return RecallValidationBatch(
-            hits=tuple(hit for hit, _failure in validated if hit is not None),
+            hits=tuple(valid_hits),
             attempts=len(hits),
             transient_failures=sum(
                 failure is RecallSourceStatus.TRANSIENT_FAILURE
@@ -1099,6 +1299,7 @@ class SteamGameIndexService:
         if english is None:
             self._steam_tag_ids.clear()
             self._canonical_tag_by_id.clear()
+            self._steam_tag_aliases.clear()
             return
 
         canonical_by_id: dict[int, str] = {}
@@ -1126,6 +1327,11 @@ class SteamGameIndexService:
                 tags.append({**item, "canonical": canonical})
 
         register_steam_tag_aliases(tags, register_ids=False)
+        self._steam_tag_aliases = {
+            normalize_key(str(item.get("name") or "")): str(item["canonical"])
+            for item in tags
+            if normalize_key(str(item.get("name") or ""))
+        }
         self._steam_tag_ids = {
             canonical: tag_id for tag_id, canonical in canonical_by_id.items()
         }
@@ -1156,7 +1362,11 @@ class SteamGameIndexService:
     def _usable_steam_tag_id_for(self, tag: str) -> int | None:
         if not self._steam_tag_aliases_are_usable_stale():
             return None
-        canonical = normalize_tag(tag) or canonical_steam_tag_name(tag)
+        canonical = (
+            self._steam_tag_aliases.get(normalize_key(tag))
+            or normalize_tag(tag)
+            or canonical_steam_tag_name(tag)
+        )
         return self._steam_tag_ids.get(canonical)
 
     def _expire_tag_vocabulary(self) -> None:
@@ -1401,7 +1611,7 @@ class SteamGameIndexService:
         new_appid_budget: int,
         prefetched: dict[int, GameCandidate],
     ) -> int:
-        references = build_recommendation_intent(preference).references
+        references = self._build_request_intent(preference).references
         available_appids = {
             int(record.candidate.appid)
             for record in records.values()
@@ -2448,7 +2658,7 @@ def is_previous_snapshot_payload(payload: Any) -> bool:
     return (
         isinstance(payload, dict)
         and type(payload.get("schema_version")) is int
-        and payload.get("schema_version") == 1
+        and payload.get("schema_version") in {1, 2}
     )
 
 
@@ -2544,6 +2754,27 @@ def candidate_from_search_hit(hit: SteamSearchHit) -> GameCandidate:
         title=hit.title,
         appid=hit.appid,
         raw_url=hit.store_url,
+    )
+
+
+def filter_recall_source(
+    source: RecallSource,
+    excluded_appids: set[int],
+) -> RecallSource:
+    ranks = source.candidate_ranks or tuple(range(1, len(source.candidates) + 1))
+    retained = [
+        (candidate, rank)
+        for candidate, rank in zip(source.candidates, ranks)
+        if candidate.appid is not None and int(candidate.appid) not in excluded_appids
+    ]
+    return replace(
+        source,
+        candidates=tuple(candidate for candidate, _rank in retained),
+        candidate_ranks=(
+            tuple(rank for _candidate, rank in retained)
+            if source.candidate_ranks
+            else ()
+        ),
     )
 
 

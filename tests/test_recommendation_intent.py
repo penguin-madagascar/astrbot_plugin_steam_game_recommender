@@ -35,7 +35,7 @@ class RecommendationIntentBuilderTest(unittest.TestCase):
             self.assertEqual(by_tag[canonical].source, IntentTagSource.DERIVED)
             self.assertEqual(by_tag[canonical].weight, 0.35)
 
-    def test_builds_weighted_roles_and_deduplicates_canonical_tags(self) -> None:
+    def test_builds_weighted_roles_and_ignores_unverified_extra_tags(self) -> None:
         intent = build_recommendation_intent(
             GamePreference(
                 required_tags=["本地合作"],
@@ -52,7 +52,6 @@ class RecommendationIntentBuilderTest(unittest.TestCase):
             [
                 ("local_coop", IntentTagRole.REQUIRED, IntentTagSource.EXPLICIT, 1.0),
                 ("puzzle", IntentTagRole.ANCHOR, IntentTagSource.EXPLICIT, 1.0),
-                ("story_rich", IntentTagRole.SUPPORTING, IntentTagSource.DERIVED, 0.35),
                 ("horror", IntentTagRole.EXCLUDE, IntentTagSource.EXPLICIT, 1.0),
             ],
         )

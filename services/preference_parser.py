@@ -24,6 +24,9 @@ PREFERENCE_SCHEMA_HINT = """
   "genres_like": [],
   "extra_tags": [],
   "explicit_tag_evidence": [],
+  "derived_intent_tags": [],
+  "soft_features": [],
+  "company_preferences": [],
   "genres_dislike": [],
   "reference_games_like": [],
   "reference_search_terms": [],
@@ -51,7 +54,18 @@ PREFERENCE_SCHEMA_HINT = """
 - budget_is_required 只在预算所在语句使用“必须”“一定要”“只接受”
   或 must、required 等强制措辞时设为 true，否则为 false。
 - genres_like 放用户明确说出的类型/玩法标签。
-- extra_tags 放你从自然语言总结出的补充标签，例如“轻松”“本地合作”“剧情合作”“短流程”。
+- extra_tags 保持为空数组，不得把未验证的自由文本总结成可计分标签。
+- derived_intent_tags 最多 3 项，每项为
+  {"tag":"Steam 规范标签","source_span":"用户原文连续片段"}；只能使用已知 Steam
+  标签词表，并且必须有原文支持，不得自由创造标签。
+- soft_features 最多 3 项，每项包含 constraint_id、source_span、normalized_text、
+  role、polarity、proxy_tags。role 只能是 required/core/optional，polarity 只能是
+  positive/negative；source_span 必须逐字复制原文。proxy_tags 只用于召回，不得作为支持证据计分。
+- company_preferences 最多 3 项，每项包含 display_name、aliases、role、strength、
+  source_span；只抽取用户明确点名的公司。role 只能是 developer/publisher/either，
+  strength 只能是 preferred/strong；display_name 必须对应 source_span 中的实体，
+  aliases 只能填写该实体的官方英文名、本地化名或法律后缀变体，不得编造；
+  “只要某公司”仍是软偏好。
 - 如果把用户原文中的玩法短语翻译为不同语言的规范标签，必须在 explicit_tag_evidence
   中写入 {"target":"genres_like","tag":"规范标签","span":"原文最短连续片段"}；
   target 只能是 required_tags、genres_like、extra_tags 或 genres_dislike，并且必须与标签所在字段一致。
@@ -67,6 +81,7 @@ PREFERENCE_SCHEMA_HINT = """
   统一写入 genres_like 的 singleplayer。
 - 用户说 3A、AAA、triple-A、大作、单机大作时，将 quality_intent 设为 "mainstream"；
   不要因此添加 action、adventure、rpg、story rich、open world 等标签，也不要编造具体游戏名。
+  不得因为 3A、AAA、大作推断公司，也不得使用任何公司白名单。
 - 仅当用户明确请求未发售、即将发售、upcoming、coming-soon 游戏时，
   将 allow_unreleased 设为 true；否则设为 false。
 - library_filter_mode 只在用户明确要求时填写：排除已有/exclude-owned 为 "exclude_owned"；
