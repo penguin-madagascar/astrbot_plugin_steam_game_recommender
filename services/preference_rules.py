@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import re
+import unicodedata
+from dataclasses import dataclass
 
 from ..storage.models import GamePreference
 from .played_filter import detect_library_filter_mode
-from .tag_normalizer import canonical_tags_from_terms
+from .tag_normalizer import (
+    canonical_tag_occurrences,
+    canonical_tags_from_terms,
+    normalize_tag,
+    normalized_alias_occurrences,
+    steam_tag_canonical_key,
+)
 
 SOULSLIKE_TERMS = (
     "魂like",
@@ -95,9 +103,28 @@ HARD_REQUIREMENT_MARKERS = (
 )
 
 
-def infer_preference_from_text(text: str) -> GamePreference:
-    lower = text.lower()
-    tag_polarities = detect_tag_polarities(text)
+@dataclass(frozen=True)
+class TagPolarityEvent:
+    start: int
+    end: int
+    tag: str
+    polarity: str
+
+
+def infer_preference_from_text(
+    text: str,
+    *,
+    reference_titles: list[str] | None = None,
+) -> GamePreference:
+    reference_like = extract_reference_games(text)
+    reference_dislike = extract_disliked_reference_games(text)
+    reference_like = remove_reference_titles(reference_like, reference_dislike)
+    intent_text = mask_reference_titles(
+        text,
+        [*reference_like, *reference_dislike, *(reference_titles or [])],
+    )
+    lower = intent_text.lower()
+    tag_polarities = detect_tag_polarities(intent_text)
     positive_only_tags = [
         tag
         for tag, polarity in tag_polarities.items()
@@ -168,9 +195,6 @@ def infer_preference_from_text(text: str) -> GamePreference:
     elif any(word in lower for word in ("高难", "困难", "挑战")):
         difficulty = "hard"
 
-    reference_like = extract_reference_games(text)
-    reference_dislike = extract_disliked_reference_games(text)
-    reference_like = remove_reference_titles(reference_like, reference_dislike)
     extra_tags = keyword_hits(
         lower,
         {
@@ -185,12 +209,12 @@ def infer_preference_from_text(text: str) -> GamePreference:
     extra_tags = expand_related_extra_tags(extra_tags)
     genres_like = remove_terms_matching_tags(genres_like, set(negative_tags))
     extra_tags = remove_terms_matching_tags(extra_tags, set(negative_tags))
-    library_filter_mode = detect_library_filter_mode(text)
+    library_filter_mode = detect_library_filter_mode(intent_text)
 
-    preferred_languages, required_languages = extract_language_preferences(text)
+    preferred_languages, required_languages = extract_language_preferences(intent_text)
     return GamePreference(
         platforms=platforms,
-        required_tags=extract_required_tags(text, tag_polarities),
+        required_tags=extract_required_tags(intent_text, tag_polarities),
         genres_like=genres_like,
         extra_tags=extra_tags,
         genres_dislike=genres_dislike,
@@ -213,8 +237,53 @@ def infer_preference_from_text(text: str) -> GamePreference:
 
 
 def merge_text_preference(preference: GamePreference, text: str) -> GamePreference:
-    inferred = infer_preference_from_text(text)
-    tag_polarities = detect_tag_polarities(text)
+    preference_reference_like = clean_reference_titles(
+        preference.reference_games_like
+    )
+    preference_reference_dislike = clean_reference_titles(
+        preference.reference_games_dislike
+    )
+    inferred = infer_preference_from_text(
+        text,
+        reference_titles=[
+            *preference_reference_like,
+            *preference.reference_search_terms,
+            *preference_reference_dislike,
+        ],
+    )
+    reference_titles = [
+        *preference_reference_like,
+        *preference.reference_search_terms,
+        *preference_reference_dislike,
+        *inferred.reference_games_like,
+        *inferred.reference_search_terms,
+        *inferred.reference_games_dislike,
+    ]
+    intent_text = mask_reference_titles(text, reference_titles)
+    evidence_tags, evidence_events = validated_explicit_tag_evidence(
+        preference,
+        text,
+        reference_titles=reference_titles,
+    )
+    lexical_tags, lexical_events = validated_same_language_tag_evidence(
+        preference,
+        intent_text,
+    )
+    tag_polarities = final_tag_polarities(
+        [
+            *tag_polarity_events(intent_text),
+            *evidence_events,
+            *lexical_events,
+        ]
+    )
+    evidenced_tags = {
+        event.tag for event in [*evidence_events, *lexical_events]
+    }
+    corrected_negative_tags = {
+        tag
+        for tag in evidenced_tags
+        if tag_polarities.get(tag) == "negative"
+    }
     positive_tags = {tag for tag, polarity in tag_polarities.items() if polarity == "positive"}
     negative_tags = {tag for tag, polarity in tag_polarities.items() if polarity == "negative"}
     data = dump_preference(preference)
@@ -236,20 +305,23 @@ def merge_text_preference(preference: GamePreference, text: str) -> GamePreferen
     )
     data["reference_games_like"] = merge_lists(
         remove_reference_titles(
-            preference.reference_games_like,
+            preference_reference_like,
             inferred.reference_games_dislike,
         ),
         inferred.reference_games_like,
     )
     data["reference_games_dislike"] = merge_lists(
         remove_reference_titles(
-            preference.reference_games_dislike,
+            preference_reference_dislike,
             inferred.reference_games_like,
         ),
         inferred.reference_games_dislike,
     )
     data["reference_search_terms"] = merge_lists(
-        preference.reference_search_terms,
+        merge_lists(
+            preference.reference_search_terms,
+            search_terms_from_reference_titles(preference_reference_like),
+        ),
         inferred.reference_search_terms,
     )
     data["parse_warnings"] = merge_lists(
@@ -266,9 +338,58 @@ def merge_text_preference(preference: GamePreference, text: str) -> GamePreferen
         else "normal"
     )
     data["allow_unreleased"] = preference.allow_unreleased or inferred.allow_unreleased
+    explicit_tags = {
+        tag for tag, polarity in tag_polarities.items() if polarity == "positive"
+    }
+    inferred_required = set(canonical_tags_from_terms(inferred.required_tags))
+    inferred_genres = set(canonical_tags_from_terms(inferred.genres_like))
+    inferred_extra = set(canonical_tags_from_terms(inferred.extra_tags))
+    required, unverified_required = partition_verified_tags(
+        data["required_tags"],
+        inferred_required
+        | evidence_tags["required_tags"]
+        | lexical_tags["required_tags"],
+        blocked_tags=corrected_negative_tags,
+    )
+    genres, unverified_genres = partition_verified_tags(
+        data["genres_like"],
+        explicit_tags
+        | inferred_genres
+        | evidence_tags["genres_like"]
+        | lexical_tags["genres_like"],
+        blocked_tags=corrected_negative_tags,
+    )
+    verified_extra, _unverified_extra = partition_verified_tags(
+        data["extra_tags"],
+        explicit_tags
+        | inferred_extra
+        | evidence_tags["extra_tags"]
+        | lexical_tags["extra_tags"],
+        blocked_tags=corrected_negative_tags,
+    )
+    inferred_dislikes = set(canonical_tags_from_terms(inferred.genres_dislike))
+    verified_dislikes, _unverified_dislikes = partition_verified_tags(
+        data["genres_dislike"],
+        (
+            inferred_dislikes
+            | evidence_tags["genres_dislike"]
+            | lexical_tags["genres_dislike"]
+        )
+        & negative_tags,
+    )
+    data["required_tags"] = required
+    data["genres_like"] = genres
+    data["genres_dislike"] = merge_lists(
+        verified_dislikes,
+        sorted(corrected_negative_tags),
+    )
     if inferred.quality_intent == "mainstream":
-        for field in ("required_tags", "genres_like", "extra_tags"):
-            data[field] = remove_fabricated_mainstream_tags(data[field], text)
+        data["extra_tags"] = verified_extra
+    else:
+        data["extra_tags"] = merge_lists(
+            remove_quality_tags(data["extra_tags"]),
+            [*unverified_required, *unverified_genres],
+        )
     for field in ("players", "budget", "difficulty", "mood"):
         if getattr(preference, field) in (None, "", []):
             data[field] = getattr(inferred, field)
@@ -344,11 +465,40 @@ def clean_reference_title(value: str | None) -> str:
             "同类",
             "风格",
         )
-        if suffix.startswith(descriptive_prefixes) or suffix.endswith(
-            REFERENCE_DESCRIPTION_SUFFIXES
+        if (
+            suffix.startswith(descriptive_prefixes)
+            or suffix.endswith(REFERENCE_DESCRIPTION_SUFFIXES)
+            or has_aaa_intent(suffix)
         ):
             text = title.strip()
     return text[:80]
+
+
+def clean_reference_titles(values: list[str]) -> list[str]:
+    return merge_lists(
+        [],
+        [title for value in values if (title := clean_reference_title(value))],
+    )
+
+
+def mask_reference_titles(text: str, titles: list[str]) -> str:
+    masked = str(text or "")
+    unique_titles = sorted(
+        {title.strip() for title in titles if title and title.strip()},
+        key=len,
+        reverse=True,
+    )
+    for title in unique_titles:
+        pattern = r"\s+".join(re.escape(part) for part in title.split())
+        if not pattern:
+            continue
+        masked = re.sub(
+            pattern,
+            lambda match: " " * len(match.group(0)),
+            masked,
+            flags=re.I,
+        )
+    return masked
 
 
 def is_probable_reference_title(value: str) -> bool:
@@ -368,13 +518,17 @@ def has_negative_reference_prefix(text: str, start: int) -> bool:
 
 
 def detect_tag_polarities(text: str) -> dict[str, str]:
-    lower = text.lower()
+    return final_tag_polarities(tag_polarity_events(text))
+
+
+def tag_polarity_events(text: str) -> list[TagPolarityEvent]:
+    lower = unicodedata.normalize("NFKC", str(text or "")).casefold()
     lower = re.sub(
         r"排除\s*已有|exclude[-_ ]owned",
         lambda match: " " * len(match.group(0)),
         lower,
     )
-    events: list[tuple[int, int, str, str]] = []
+    events: list[TagPolarityEvent] = []
     for tag, terms in TAG_INTENT_TERMS.items():
         for term in terms:
             for match in re.finditer(re.escape(term.lower()), lower):
@@ -383,11 +537,19 @@ def detect_tag_polarities(text: str) -> dict[str, str]:
                     if is_negative_context(lower, match.start(), match.end())
                     else "positive"
                 )
-                events.append((match.start(), match.end(), tag, polarity))
+                events.append(
+                    TagPolarityEvent(match.start(), match.end(), tag, polarity)
+                )
+    for tag, start, end in canonical_tag_occurrences(lower):
+        polarity = "negative" if is_negative_context(lower, start, end) else "positive"
+        events.append(TagPolarityEvent(start, end, tag, polarity))
+    return events
 
+
+def final_tag_polarities(events: list[TagPolarityEvent]) -> dict[str, str]:
     polarities: dict[str, str] = {}
-    for _start, _end, tag, polarity in sorted(events, key=lambda item: (item[0], item[1])):
-        polarities[tag] = polarity
+    for event in sorted(events, key=lambda item: (item.start, item.end)):
+        polarities[event.tag] = event.polarity
     return polarities
 
 
@@ -513,26 +675,180 @@ def has_unreleased_intent(text: str) -> bool:
     return False
 
 
-def remove_fabricated_mainstream_tags(values: list[str], text: str) -> list[str]:
-    explicit_terms = {
-        "action": ("动作", "action"),
-        "adventure": ("冒险", "adventure"),
-        "rpg": ("角色扮演", "rpg"),
-        "story_rich": ("剧情丰富", "剧情向", "story rich"),
-        "open_world": ("开放世界", "open world"),
-    }
-    lower = text.lower()
-    retained: list[str] = []
+QUALITY_TAG_KEYS = {
+    "3a",
+    "aaa",
+    "blockbuster",
+    "high_quality",
+    "mainstream",
+    "quality",
+    "triple_a",
+}
+
+
+def is_quality_only_tag(value: str) -> bool:
+    return has_aaa_intent(value) or steam_tag_canonical_key(value) in QUALITY_TAG_KEYS
+
+
+def partition_verified_tags(
+    values: list[str],
+    allowed_tags: set[str],
+    *,
+    blocked_tags: set[str] | None = None,
+) -> tuple[list[str], list[str]]:
+    verified: list[str] = []
+    unverified: list[str] = []
+    blocked = blocked_tags or set()
     for value in values:
-        canonical = canonical_tags_from_terms([value])
-        tag = canonical[0] if canonical else value.strip().lower().replace(" ", "_")
-        if tag == "aaa":
+        if is_quality_only_tag(value):
             continue
-        terms = explicit_terms.get(tag)
-        if terms and not any(term in lower for term in terms):
+        canonical = canonical_tag_key(value)
+        if canonical in blocked:
             continue
-        retained.append(value)
-    return retained
+        if canonical in allowed_tags:
+            verified.append(value)
+        else:
+            unverified.append(value)
+    return verified, unverified
+
+
+def remove_quality_tags(values: list[str]) -> list[str]:
+    return [value for value in values if not is_quality_only_tag(value)]
+
+
+CANONICAL_TAG_PATTERN = re.compile(r"[a-z0-9]+(?:_[a-z0-9]+)*")
+EVIDENCE_TARGETS = (
+    "required_tags",
+    "genres_like",
+    "extra_tags",
+    "genres_dislike",
+)
+
+
+def canonical_tag_key(value: str) -> str | None:
+    if canonical := normalize_tag(value):
+        return canonical
+    fallback = steam_tag_canonical_key(value)
+    return fallback if CANONICAL_TAG_PATTERN.fullmatch(fallback) else None
+
+
+def validated_explicit_tag_evidence(
+    preference: GamePreference,
+    text: str,
+    *,
+    reference_titles: list[str] | None = None,
+) -> tuple[dict[str, set[str]], list[TagPolarityEvent]]:
+    allowed = {target: set() for target in EVIDENCE_TARGETS}
+    events: list[TagPolarityEvent] = []
+    source = unicodedata.normalize("NFKC", str(text or "")).casefold()
+    all_reference_titles = [
+        *preference.reference_games_like,
+        *preference.reference_search_terms,
+        *preference.reference_games_dislike,
+        *(reference_titles or []),
+    ]
+    normalized_references = [
+        unicodedata.normalize("NFKC", title).casefold()
+        for title in all_reference_titles
+        if title
+    ]
+    field_tags = {
+        target: {
+            tag
+            for value in getattr(preference, target)
+            if (tag := canonical_tag_key(value))
+        }
+        for target in EVIDENCE_TARGETS
+    }
+
+    for evidence in preference.explicit_tag_evidence:
+        target = evidence.target
+        tag = canonical_tag_key(evidence.tag)
+        raw_tag = steam_tag_canonical_key(evidence.tag)
+        span = unicodedata.normalize("NFKC", evidence.span).casefold()
+        if (
+            target not in allowed
+            or not tag
+            or not CANONICAL_TAG_PATTERN.fullmatch(raw_tag)
+            or tag not in field_tags[target]
+            or not span
+            or is_quality_only_tag(evidence.tag)
+            or is_quality_only_tag(span)
+        ):
+            continue
+        start = source.rfind(span)
+        if start < 0 or any(span in title for title in normalized_references):
+            continue
+        if (span_tag := normalize_tag(span)) and span_tag != tag:
+            continue
+        is_negative = is_negative_context(source, start, start + len(span))
+        events.append(
+            TagPolarityEvent(
+                start=start,
+                end=start + len(span),
+                tag=tag,
+                polarity="negative" if is_negative else "positive",
+            )
+        )
+        if is_negative:
+            if target == "genres_dislike":
+                allowed[target].add(tag)
+            continue
+        if target == "genres_dislike":
+            continue
+        if target == "required_tags" and not span_has_hard_requirement(source, start):
+            continue
+        allowed[target].add(tag)
+    return allowed, events
+
+
+def validated_same_language_tag_evidence(
+    preference: GamePreference,
+    text: str,
+) -> tuple[dict[str, set[str]], list[TagPolarityEvent]]:
+    allowed = {target: set() for target in EVIDENCE_TARGETS}
+    events: list[TagPolarityEvent] = []
+    source = unicodedata.normalize("NFKC", str(text or "")).casefold()
+    for target in EVIDENCE_TARGETS:
+        for value in getattr(preference, target):
+            tag = canonical_tag_key(value)
+            if not tag or is_quality_only_tag(value):
+                continue
+            occurrences = normalized_alias_occurrences(value, source)
+            if not occurrences:
+                continue
+            start, end = max(occurrences, key=lambda occurrence: occurrence[0])
+            is_negative = is_negative_context(source, start, end)
+            events.append(
+                TagPolarityEvent(
+                    start=start,
+                    end=end,
+                    tag=tag,
+                    polarity="negative" if is_negative else "positive",
+                )
+            )
+            if is_negative:
+                if target == "genres_dislike":
+                    allowed[target].add(tag)
+            elif target == "genres_dislike":
+                continue
+            elif target != "required_tags" or span_has_hard_requirement(source, start):
+                allowed[target].add(tag)
+    return allowed, events
+
+
+def span_has_hard_requirement(text: str, start: int) -> bool:
+    requirement_scope = re.split(
+        r"的|(?:(?:并且?|同时|另外|而且)\s*)?"
+        r"(?:想玩|想要|偏好|喜欢|推荐|寻找|找|"
+        r"want|prefer|recommend|look(?:ing)?\s+for)",
+        clause_left(text, start),
+        flags=re.I,
+    )[-1]
+    return any(
+        marker.strip() in requirement_scope[-24:]
+        for marker in HARD_REQUIREMENT_MARKERS
+    )
 
 
 def expand_related_extra_tags(tags: list[str]) -> list[str]:

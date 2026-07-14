@@ -372,6 +372,396 @@ class PreferenceRulesTest(unittest.TestCase):
         self.assertEqual(merged.extra_tags, [])
         self.assertEqual(merged.quality_intent, "mainstream")
 
+    def test_mainstream_removes_any_gameplay_tag_without_text_evidence(self) -> None:
+        merged = merge_text_preference(
+            GamePreference(
+                required_tags=["strategy"],
+                genres_like=["simulation", "shooter", "singleplayer"],
+                extra_tags=["deckbuilding", "colony sim"],
+            ),
+            "推荐的单机3a大作",
+        )
+
+        self.assertEqual(merged.required_tags, [])
+        self.assertEqual(merged.genres_like, ["singleplayer"])
+        self.assertEqual(merged.extra_tags, [])
+
+    def test_mainstream_keeps_only_gameplay_tags_explicit_in_the_query(self) -> None:
+        merged = merge_text_preference(
+            GamePreference(
+                genres_like=["strategy", "simulation", "shooter"],
+                extra_tags=["deckbuilding"],
+            ),
+            "推荐单机策略模拟 AAA 大作",
+        )
+
+        self.assertEqual(
+            set(merged.genres_like),
+            {"singleplayer", "strategy", "simulation"},
+        )
+        self.assertEqual(merged.extra_tags, [])
+
+    def test_mainstream_accepts_cross_language_tags_with_verified_source_spans(self) -> None:
+        cases = (
+            ("推荐撤离射击 AAA 大作", "extraction_shooter", "撤离射击"),
+            ("银河城 AAA", "metroidvania", "银河城"),
+            ("牌组构筑 AAA", "deckbuilding", "牌组构筑"),
+            ("殖民模拟 3A", "colony_sim", "殖民模拟"),
+        )
+        for text, tag, span in cases:
+            with self.subTest(text=text, tag=tag):
+                merged = merge_text_preference(
+                    GamePreference(
+                        genres_like=[tag, "action", "rpg", "open_world"],
+                        explicit_tag_evidence=[
+                            {"target": "genres_like", "tag": tag, "span": span}
+                        ],
+                    ),
+                    text,
+                )
+
+                self.assertIn(tag, merged.genres_like)
+                self.assertFalse(
+                    {"action", "rpg", "open_world"} & set(merged.genres_like)
+                )
+
+    def test_mainstream_rejects_unverifiable_or_misassigned_tag_evidence(self) -> None:
+        cases = (
+            {"target": "genres_like", "tag": "action", "span": "AAA"},
+            {"target": "genres_like", "tag": "action", "span": "不存在"},
+            {"target": "extra_tags", "tag": "action", "span": "未知玩法"},
+            {"target": "genres_like", "tag": "action", "span": "单机"},
+        )
+        for evidence in cases:
+            with self.subTest(evidence=evidence):
+                merged = merge_text_preference(
+                    GamePreference(
+                        genres_like=["action"],
+                        explicit_tag_evidence=[evidence],
+                    ),
+                    "推荐单机未知玩法 AAA 大作",
+                )
+
+                self.assertNotIn("action", merged.genres_like)
+
+    def test_mainstream_evidence_respects_required_negative_and_reference_context(self) -> None:
+        required = merge_text_preference(
+            GamePreference(
+                required_tags=["precision_duel"],
+                explicit_tag_evidence=[
+                    {
+                        "target": "required_tags",
+                        "tag": "precision_duel",
+                        "span": "精确对决",
+                    }
+                ],
+            ),
+            "必须精确对决的 AAA 大作",
+        )
+        optional = merge_text_preference(
+            GamePreference(
+                required_tags=["precision_duel"],
+                explicit_tag_evidence=[
+                    {
+                        "target": "required_tags",
+                        "tag": "precision_duel",
+                        "span": "精确对决",
+                    }
+                ],
+            ),
+            "想玩精确对决的 AAA 大作",
+        )
+        negative = merge_text_preference(
+            GamePreference(
+                genres_like=["precision_duel"],
+                explicit_tag_evidence=[
+                    {
+                        "target": "genres_like",
+                        "tag": "precision_duel",
+                        "span": "精确对决",
+                    }
+                ],
+            ),
+            "想玩精确对决，但不要精确对决的 AAA 大作",
+        )
+        reference = merge_text_preference(
+            GamePreference(
+                genres_like=["translated_gameplay"],
+                reference_games_like=["未知玩法"],
+                explicit_tag_evidence=[
+                    {
+                        "target": "genres_like",
+                        "tag": "translated_gameplay",
+                        "span": "未知玩法",
+                    }
+                ],
+            ),
+            "想玩类似未知玩法的 AAA 大作",
+        )
+
+        self.assertEqual(required.required_tags, ["precision_duel"])
+        self.assertEqual(optional.required_tags, [])
+        self.assertNotIn("precision_duel", negative.genres_like)
+        self.assertNotIn("translated_gameplay", reference.genres_like)
+
+    def test_mainstream_masks_negative_tags_and_reference_title_words(self) -> None:
+        negative = merge_text_preference(
+            GamePreference(genres_like=["strategy"]),
+            "不要策略的 AAA 大作",
+        )
+        action_title = merge_text_preference(
+            GamePreference(
+                genres_like=["action"],
+                reference_games_like=["Action Henk"],
+                reference_search_terms=["Action Henk"],
+            ),
+            "/gamerec 类似 Action Henk 的 AAA 大作",
+        )
+        rpg_title = merge_text_preference(
+            GamePreference(
+                genres_like=["rpg", "action"],
+                reference_games_like=["RPG Maker"],
+                reference_search_terms=["RPG Maker"],
+            ),
+            "/gamerec 类似 RPG Maker 的 AAA 大作",
+        )
+        unclean_llm_title = merge_text_preference(
+            GamePreference(
+                reference_games_like=["RPG Maker 的 AAA 大作"],
+                reference_search_terms=["RPG Maker"],
+            ),
+            "/gamerec 类似 RPG Maker 的 AAA 大作",
+        )
+
+        self.assertNotIn("strategy", negative.genres_like)
+        self.assertIn("strategy", negative.genres_dislike)
+        self.assertNotIn("action", action_title.genres_like)
+        self.assertEqual(action_title.reference_games_like, ["Action Henk"])
+        self.assertNotIn("rpg", rpg_title.genres_like)
+        self.assertEqual(rpg_title.reference_games_like, ["RPG Maker"])
+        self.assertEqual(unclean_llm_title.reference_games_like, ["RPG Maker"])
+
+    def test_deterministic_reference_extraction_blocks_fabricated_evidence(self) -> None:
+        merged = merge_text_preference(
+            GamePreference(
+                genres_like=["fabricated_anchor"],
+                explicit_tag_evidence=[
+                    {
+                        "target": "genres_like",
+                        "tag": "fabricated_anchor",
+                        "span": "灰区战争",
+                    }
+                ],
+            ),
+            "类似灰区战争，推荐 AAA 大作",
+        )
+
+        self.assertEqual(merged.reference_games_like, ["灰区战争"])
+        self.assertNotIn("fabricated_anchor", merged.genres_like)
+
+    def test_required_evidence_uses_the_nearest_requirement_scope(self) -> None:
+        preference = GamePreference(
+            required_tags=["precision_duel"],
+            explicit_tag_evidence=[
+                {
+                    "target": "required_tags",
+                    "tag": "precision_duel",
+                    "span": "精确对决",
+                }
+            ],
+        )
+
+        unrelated = merge_text_preference(
+            preference,
+            "必须高质量的精确对决 AAA 大作",
+        )
+        direct = merge_text_preference(
+            preference,
+            "必须精确对决的 AAA 大作",
+        )
+
+        self.assertEqual(unrelated.required_tags, [])
+        self.assertEqual(direct.required_tags, ["precision_duel"])
+
+    def test_mainstream_keeps_same_language_explicit_tag_before_vocab_load(self) -> None:
+        merged = merge_text_preference(
+            GamePreference(genres_like=["precision_platformer", "open_world"]),
+            "推荐 precision platformer AAA 大作",
+        )
+
+        self.assertIn("precision_platformer", merged.genres_like)
+        self.assertNotIn("open_world", merged.genres_like)
+
+    def test_quality_words_never_become_gameplay_tags(self) -> None:
+        cases = (
+            ("推荐 AAA 大作", GamePreference(extra_tags=["aaa"]), "aaa"),
+            ("推荐 3A 大作", GamePreference(genres_like=["3a"]), "3a"),
+            (
+                "recommend high quality AAA games",
+                GamePreference(genres_like=["quality"]),
+                "quality",
+            ),
+        )
+        for text, preference, forbidden in cases:
+            with self.subTest(text=text):
+                merged = merge_text_preference(preference, text)
+                self.assertNotIn(
+                    forbidden,
+                    [
+                        *merged.required_tags,
+                        *merged.genres_like,
+                        *merged.extra_tags,
+                    ],
+                )
+
+    def test_required_evidence_does_not_cross_parallel_intent_boundaries(self) -> None:
+        preference = GamePreference(
+            required_tags=["precision_duel"],
+            explicit_tag_evidence=[
+                {
+                    "target": "required_tags",
+                    "tag": "precision_duel",
+                    "span": "精确对决",
+                }
+            ],
+        )
+        cases = (
+            "必须支持中文并想玩精确对决的 AAA 大作",
+            "必须高画质同时想玩精确对决 AAA 大作",
+        )
+
+        for text in cases:
+            with self.subTest(text=text):
+                merged = merge_text_preference(preference, text)
+                self.assertEqual(merged.required_tags, [])
+
+    def test_normal_reference_title_tags_are_demoted_from_explicit_anchors(self) -> None:
+        merged = merge_text_preference(
+            GamePreference(
+                reference_games_like=["Action Henk"],
+                reference_search_terms=["Action Henk"],
+                genres_like=["action"],
+            ),
+            "/gamerec 类似 Action Henk 的游戏",
+        )
+        alias_only = merge_text_preference(
+            GamePreference(
+                reference_games_like=["动作亨克"],
+                reference_search_terms=["Action Henk"],
+                genres_like=["action"],
+            ),
+            "/gamerec 围绕 Action Henk 找游戏",
+        )
+
+        self.assertNotIn("action", merged.genres_like)
+        self.assertIn("action", merged.extra_tags)
+        self.assertNotIn("action", alias_only.genres_like)
+
+    def test_negative_evidence_never_demotes_into_positive_supporting_tags(self) -> None:
+        cases = (
+            ("不要精确对决游戏", "precision_duel", "精确对决"),
+            ("不要撤离射击游戏", "extraction_shooter", "撤离射击"),
+        )
+        for text, tag, span in cases:
+            with self.subTest(text=text):
+                merged = merge_text_preference(
+                    GamePreference(
+                        genres_like=[tag],
+                        explicit_tag_evidence=[
+                            {"target": "genres_like", "tag": tag, "span": span}
+                        ],
+                    ),
+                    text,
+                )
+
+                self.assertNotIn(tag, merged.genres_like)
+                self.assertNotIn(tag, merged.extra_tags)
+                self.assertIn(tag, merged.genres_dislike)
+
+    def test_exclusion_tags_require_negative_source_evidence(self) -> None:
+        hallucinated = merge_text_preference(
+            GamePreference(
+                genres_like=["action"],
+                genres_dislike=["soulslike"],
+            ),
+            "想玩动作游戏",
+        )
+        same_language = merge_text_preference(
+            GamePreference(genres_dislike=["soulslike"]),
+            "不要 soulslike 游戏",
+        )
+        translated = merge_text_preference(
+            GamePreference(
+                genres_dislike=["extraction_shooter"],
+                explicit_tag_evidence=[
+                    {
+                        "target": "genres_dislike",
+                        "tag": "extraction_shooter",
+                        "span": "撤离射击",
+                    }
+                ],
+            ),
+            "不要撤离射击游戏",
+        )
+
+        self.assertNotIn("soulslike", hallucinated.genres_dislike)
+        self.assertIn("soulslike", same_language.genres_dislike)
+        self.assertIn("extraction_shooter", translated.genres_dislike)
+
+    def test_last_evidence_polarity_wins_across_aliases_and_spans(self) -> None:
+        translated = merge_text_preference(
+            GamePreference(
+                genres_like=["precision_duel"],
+                explicit_tag_evidence=[
+                    {
+                        "target": "genres_like",
+                        "tag": "precision_duel",
+                        "span": "精确对决",
+                    },
+                    {
+                        "target": "genres_like",
+                        "tag": "precision_duel",
+                        "span": "精准交锋",
+                    },
+                ],
+            ),
+            "不要精确对决，但想要精准交锋游戏",
+        )
+        same_language = merge_text_preference(
+            GamePreference(genres_like=["动作", "action"]),
+            "不要动作，但想要 action 游戏",
+        )
+
+        self.assertIn("precision_duel", translated.genres_like)
+        self.assertNotIn("precision_duel", translated.genres_dislike)
+        self.assertNotIn("precision_duel", translated.extra_tags)
+        self.assertIn("action", same_language.genres_like)
+        self.assertNotIn("action", same_language.genres_dislike)
+
+    def test_last_negative_evidence_wins_across_translated_spans(self) -> None:
+        merged = merge_text_preference(
+            GamePreference(
+                genres_like=["precision_duel"],
+                explicit_tag_evidence=[
+                    {
+                        "target": "genres_like",
+                        "tag": "precision_duel",
+                        "span": "精准交锋",
+                    },
+                    {
+                        "target": "genres_like",
+                        "tag": "precision_duel",
+                        "span": "精确对决",
+                    },
+                ],
+            ),
+            "想要精准交锋，但不要精确对决游戏",
+        )
+
+        self.assertNotIn("precision_duel", merged.genres_like)
+        self.assertNotIn("precision_duel", merged.extra_tags)
+        self.assertIn("precision_duel", merged.genres_dislike)
+
     def test_merge_preserves_validated_llm_intents_unknown_to_phrase_rules(self) -> None:
         merged = merge_text_preference(
             GamePreference(quality_intent="mainstream", allow_unreleased=True),

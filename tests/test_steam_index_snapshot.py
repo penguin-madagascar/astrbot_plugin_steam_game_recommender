@@ -393,7 +393,7 @@ class ReferenceSteamClient(QueryAwareSteamClient):
                 SteamSearchHit(appid=11, title="Dark Souls Remastered"),
             ],
             "Slay the Spire": [SteamSearchHit(appid=20, title="Unrelated Adventure")],
-            "Overcooked": [SteamSearchHit(appid=30, title="Overcooked! 2")],
+            "Overcooked": [SteamSearchHit(appid=30, title="Overcooked Remastered")],
         }
         return mapping.get(search, [])
 

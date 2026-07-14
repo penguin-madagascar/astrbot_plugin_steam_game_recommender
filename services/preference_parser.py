@@ -23,6 +23,7 @@ PREFERENCE_SCHEMA_HINT = """
   "required_tags": [],
   "genres_like": [],
   "extra_tags": [],
+  "explicit_tag_evidence": [],
   "genres_dislike": [],
   "reference_games_like": [],
   "reference_search_terms": [],
@@ -51,6 +52,11 @@ PREFERENCE_SCHEMA_HINT = """
   或 must、required 等强制措辞时设为 true，否则为 false。
 - genres_like 放用户明确说出的类型/玩法标签。
 - extra_tags 放你从自然语言总结出的补充标签，例如“轻松”“本地合作”“剧情合作”“短流程”。
+- 如果把用户原文中的玩法短语翻译为不同语言的规范标签，必须在 explicit_tag_evidence
+  中写入 {"target":"genres_like","tag":"规范标签","span":"原文最短连续片段"}；
+  target 只能是 required_tags、genres_like、extra_tags 或 genres_dislike，并且必须与标签所在字段一致。
+- span 必须逐字复制用户原文中的最短玩法表达。质量、预算、平台、语言、数量、参考游戏名
+  以及 3A/AAA/大作本身都不能作为标签证据；不要为推测出的玩法编造 span。
 - reference_games_like 只放用户提到的相似游戏名，不要把相似游戏扩写成推荐结果。
 - reference_search_terms 放参考游戏的 Steam 搜索友好标题候选，包括英文和本地化标题。
 - genres_dislike 只放用户明确排除的标签，例如恐怖、魂类、肉鸽、pvp；

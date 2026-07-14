@@ -123,11 +123,42 @@ def normalize_platform(value: str) -> str:
     return text
 
 
+class ExplicitTagEvidence(BaseModel):
+    target: str = ""
+    tag: str = ""
+    span: str = ""
+
+    @validator("target", pre=True)
+    def _normalize_target(cls, value: Any) -> str:
+        target = str(value or "").strip().lower()
+        return (
+            target
+            if target
+            in {"required_tags", "genres_like", "extra_tags", "genres_dislike"}
+            else ""
+        )
+
+    @validator("tag", pre=True)
+    def _normalize_tag(cls, value: Any) -> str:
+        return re.sub(r"\s+", " ", str(value or "")).strip().lower()
+
+    @validator("span", pre=True)
+    def _normalize_span(cls, value: Any) -> str:
+        return str(value or "").strip()
+
+    class Config:
+        extra = "ignore"
+
+
 class GamePreference(BaseModel):
     platforms: list[str] = Field(default_factory=list)
     required_tags: list[str] = Field(default_factory=list)
     genres_like: list[str] = Field(default_factory=list)
     extra_tags: list[str] = Field(default_factory=list)
+    explicit_tag_evidence: list[ExplicitTagEvidence] = Field(
+        default_factory=list,
+        exclude=True,
+    )
     genres_dislike: list[str] = Field(default_factory=list)
     reference_games_like: list[str] = Field(default_factory=list)
     reference_search_terms: list[str] = Field(default_factory=list)

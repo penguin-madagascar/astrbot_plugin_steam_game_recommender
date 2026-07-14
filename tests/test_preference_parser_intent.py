@@ -43,6 +43,10 @@ class PreferenceParserIntentTest(unittest.TestCase):
         self.assertIn('"allow_unreleased": false', PREFERENCE_SCHEMA_HINT)
         self.assertNotIn("genres_like 可包含 action、adventure、rpg", PREFERENCE_SCHEMA_HINT)
         self.assertNotIn("extra_tags 包含 aaa、story rich、open world", PREFERENCE_SCHEMA_HINT)
+        self.assertIn('"explicit_tag_evidence": []', PREFERENCE_SCHEMA_HINT)
+        self.assertIn("span 必须逐字复制用户原文", PREFERENCE_SCHEMA_HINT)
+        self.assertIn("3A/AAA/大作本身都不能作为标签证据", PREFERENCE_SCHEMA_HINT)
+        self.assertIn("genres_dislike，并且必须与标签所在字段一致", PREFERENCE_SCHEMA_HINT)
 
     def test_schema_describes_singleplayer_tags_with_explicit_polarity(self) -> None:
         self.assertNotIn("肉鸽、纯单人、pvp", PREFERENCE_SCHEMA_HINT)
@@ -56,6 +60,20 @@ class PreferenceParserIntentTest(unittest.TestCase):
 
         self.assertEqual(preference.quality_intent, "mainstream")
         self.assertTrue(preference.allow_unreleased)
+
+    def test_explicit_tag_evidence_is_parse_only_metadata(self) -> None:
+        preference = parse_preference_json(
+            '{"genres_like":["dynamic_tag"],"explicit_tag_evidence":['
+            '{"target":"genres_like","tag":"dynamic_tag","span":"未知玩法"}]}'
+        )
+
+        self.assertEqual(preference.explicit_tag_evidence[0].span, "未知玩法")
+        payload = (
+            preference.model_dump()
+            if hasattr(preference, "model_dump")
+            else preference.dict()
+        )
+        self.assertNotIn("explicit_tag_evidence", payload)
 
 
 class PreferenceParserDiagnosticsTest(unittest.IsolatedAsyncioTestCase):

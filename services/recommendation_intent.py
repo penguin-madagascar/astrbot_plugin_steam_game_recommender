@@ -1,13 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 
 from ..storage.models import GameCandidate, GamePreference
-from .tag_normalizer import (
-    canonical_tags_from_terms,
-    steam_tag_result_count_for,
-)
+from .tag_normalizer import canonical_tags_from_terms
 
 
 class IntentTagRole(str, Enum):
@@ -140,6 +138,7 @@ def build_recommendation_intent(preference: GamePreference) -> RecommendationInt
 def expand_intent_with_reference_tags(
     intent: RecommendationIntent,
     positive_reference_candidates: list[GameCandidate] | tuple[GameCandidate, ...],
+    tag_result_counts: Mapping[str, int] | None = None,
 ) -> RecommendationIntent:
     tags_by_canonical = {tag.tag: tag for tag in intent.tags}
     for reference in positive_reference_candidates:
@@ -153,9 +152,12 @@ def expand_intent_with_reference_tags(
         counted = [
             (tag, count)
             for tag in anchor_pool
-            if (count := steam_tag_result_count_for(tag)) is not None
+            if (count := (tag_result_counts or {}).get(tag))
+            is not None
+            and type(count) is int
+            and count >= 0
         ]
-        if len(counted) >= 2:
+        if counted and len(counted) == len(anchor_pool):
             selected = {tag for tag, _count in sorted(counted, key=lambda item: item[1])[:2]}
             anchors = [tag for tag in anchor_pool if tag in selected]
         else:
@@ -191,8 +193,8 @@ def expand_intent_with_reference_tags(
     )
 
 
-def _tag_priority(tag: WeightedIntentTag) -> tuple[int, float, int]:
-    return (_ROLE_PRIORITY[tag.role], tag.weight, _SOURCE_PRIORITY[tag.source])
+def _tag_priority(tag: WeightedIntentTag) -> tuple[int, int, float]:
+    return (_ROLE_PRIORITY[tag.role], _SOURCE_PRIORITY[tag.source], tag.weight)
 
 
 def _group_positive_references(

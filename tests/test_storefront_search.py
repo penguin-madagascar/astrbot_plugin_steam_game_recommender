@@ -13,7 +13,6 @@ from astrbot_plugin_steam_game_recommender.clients.steam import (
 )
 from astrbot_plugin_steam_game_recommender.services.tag_normalizer import (
     register_steam_tag_aliases,
-    steam_tag_result_count_for,
 )
 
 
@@ -51,11 +50,15 @@ def storefront_payload() -> dict[str, Any]:
 
 class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
     async def test_popular_tags_returns_valid_fresh_cache_without_network(self) -> None:
+        now = 1_000.0
         cache = MemoryCache()
         http_client = FakeHttpClient([{"tagid": 999, "name": "unexpected"}])
-        client = SteamClient(http_client, cache)
-        fresh_key = f"{client._cache_key(STEAM_POPULAR_TAGS_URL, {})}:fresh"
-        cache.payloads[fresh_key] = [{"tagid": 29482, "name": "Souls-like"}]
+        client = SteamClient(http_client, cache, clock=lambda: now)
+        fresh_key = f"{client._cache_key(STEAM_POPULAR_TAGS_URL, {})}:v2:fresh"
+        cache.payloads[fresh_key] = {
+            "fetched_at": now,
+            "tags": [{"tagid": 29482, "name": "Souls-like"}],
+        }
 
         tags = await client.get_popular_tags()
 
@@ -64,21 +67,23 @@ class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cache.requested_ttls, [24])
 
     async def test_popular_tags_network_success_writes_fresh_and_stale_cache(self) -> None:
+        now = 1_234.0
         payload = [{"tagid": 29482, "name": "Souls-like", "count": 123}]
         cache = MemoryCache()
         http_client = FakeHttpClient(payload)
-        client = SteamClient(http_client, cache)
-        base_key = client._cache_key(STEAM_POPULAR_TAGS_URL, {})
+        client = SteamClient(http_client, cache, clock=lambda: now)
+        base_key = f"{client._cache_key(STEAM_POPULAR_TAGS_URL, {})}:v2"
 
         tags = await client.get_popular_tags()
 
         expected = [{"tagid": 29482, "name": "Souls-like", "count": 123}]
+        expected_snapshot = {"fetched_at": now, "tags": expected}
         self.assertEqual(tags, expected)
         self.assertEqual(http_client.call_count, 1)
-        self.assertEqual(cache.payloads[f"{base_key}:fresh"], expected)
-        self.assertEqual(cache.payloads[f"{base_key}:stale"], expected)
+        self.assertEqual(cache.payloads[f"{base_key}:fresh"], expected_snapshot)
+        self.assertEqual(cache.payloads[f"{base_key}:stale"], expected_snapshot)
 
-    async def test_popular_tag_counts_seed_first_request_distinctiveness(self) -> None:
+    async def test_popular_tag_optional_counts_are_preserved_by_the_contract(self) -> None:
         payload = [
             {"tagid": 91_001, "name": "Broad Fixture Tag", "total_count": 50_000},
             {"tagid": 91_002, "name": "Narrow Fixture Tag", "count": 120},
@@ -86,10 +91,9 @@ class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
         client = SteamClient(FakeHttpClient(payload), MemoryCache())
 
         tags = await client.get_popular_tags()
-        register_steam_tag_aliases(tags)
 
-        self.assertEqual(steam_tag_result_count_for("broad_fixture_tag"), 50_000)
-        self.assertEqual(steam_tag_result_count_for("narrow_fixture_tag"), 120)
+        self.assertEqual(tags[0]["count"], 50_000)
+        self.assertEqual(tags[1]["count"], 120)
 
     async def test_popular_tag_contract_rejects_invalid_optional_count(self) -> None:
         for value in (True, -1, 1.5, float("inf"), "1.5"):
@@ -105,10 +109,14 @@ class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
                     await client.get_popular_tags()
 
     async def test_popular_tags_network_failure_uses_seven_day_stale_cache(self) -> None:
+        now = 1_000_000.0
         cache = MemoryCache()
-        client = SteamClient(FailingHttpClient(), cache)
-        stale_key = f"{client._cache_key(STEAM_POPULAR_TAGS_URL, {})}:stale"
-        cache.payloads[stale_key] = [{"tagid": 29482, "name": "Souls-like"}]
+        client = SteamClient(FailingHttpClient(), cache, clock=lambda: now)
+        stale_key = f"{client._cache_key(STEAM_POPULAR_TAGS_URL, {})}:v2:stale"
+        cache.payloads[stale_key] = {
+            "fetched_at": now - 6 * 24 * 60 * 60,
+            "tags": [{"tagid": 29482, "name": "Souls-like"}],
+        }
 
         tags = await client.get_popular_tags()
 
@@ -116,11 +124,15 @@ class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(168, cache.requested_ttls)
 
     async def test_popular_tags_contract_failure_uses_seven_day_stale_cache(self) -> None:
+        now = 1_000_000.0
         cache = MemoryCache()
         http_client = FakeHttpClient([{"tagid": 0, "name": "invalid"}])
-        client = SteamClient(http_client, cache)
-        stale_key = f"{client._cache_key(STEAM_POPULAR_TAGS_URL, {})}:stale"
-        cache.payloads[stale_key] = [{"tagid": 29482, "name": "Souls-like"}]
+        client = SteamClient(http_client, cache, clock=lambda: now)
+        stale_key = f"{client._cache_key(STEAM_POPULAR_TAGS_URL, {})}:v2:stale"
+        cache.payloads[stale_key] = {
+            "fetched_at": now - 6 * 24 * 60 * 60,
+            "tags": [{"tagid": 29482, "name": "Souls-like"}],
+        }
 
         tags = await client.get_popular_tags()
 
@@ -129,13 +141,40 @@ class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(168, cache.requested_ttls)
 
     async def test_popular_tags_invalid_stale_cache_raises(self) -> None:
+        now = 1_000_000.0
         cache = MemoryCache()
-        client = SteamClient(FailingHttpClient(), cache)
-        stale_key = f"{client._cache_key(STEAM_POPULAR_TAGS_URL, {})}:stale"
-        cache.payloads[stale_key] = [{"tagid": True, "name": "invalid"}]
+        client = SteamClient(FailingHttpClient(), cache, clock=lambda: now)
+        stale_key = f"{client._cache_key(STEAM_POPULAR_TAGS_URL, {})}:v2:stale"
+        cache.payloads[stale_key] = {
+            "fetched_at": now,
+            "tags": [{"tagid": True, "name": "invalid"}],
+        }
 
         with self.assertRaises(SteamApiError):
             await client.get_popular_tags()
+
+    async def test_stale_popular_tags_never_extend_the_original_fetch_time(self) -> None:
+        now = [1_000_000.0]
+        cache = MemoryCache()
+        first = SteamClient(
+            FakeHttpClient([{"tagid": 29482, "name": "Souls-like"}]),
+            cache,
+            clock=lambda: now[0],
+        )
+        original = await first.get_popular_tags_snapshot()
+        fresh_key = next(
+            key for key in cache.payloads if key.endswith(":v2:fresh")
+        )
+        cache.payloads.pop(fresh_key)
+
+        now[0] += 6 * 24 * 60 * 60
+        offline = SteamClient(FailingHttpClient(), cache, clock=lambda: now[0])
+        stale = await offline.get_popular_tags_snapshot()
+
+        self.assertEqual(stale.fetched_at, original.fetched_at)
+        now[0] += 2 * 24 * 60 * 60
+        with self.assertRaises(SteamApiError):
+            await offline.get_popular_tags_snapshot()
 
     async def test_tag_search_uses_default_relevance_and_parses_contract(self) -> None:
         register_steam_tag_aliases([{"tagid": 29482, "name": "Souls-like"}])
@@ -163,8 +202,6 @@ class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertNotIn("sort_by", http_client.last_params)
-        self.assertEqual(steam_tag_result_count_for("soulslike"), 321)
-
         cached = await client.search_storefront_tag(29482, page_size=60)
 
         self.assertEqual(cached, page)

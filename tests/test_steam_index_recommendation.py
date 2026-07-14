@@ -94,6 +94,38 @@ class TagNormalizerTest(unittest.TestCase):
         )
         self.assertIsNone(normalizer.steam_tag_id_for("precision_platformer"))
 
+    def test_service_vocabulary_aliases_can_register_without_global_ids(self) -> None:
+        normalizer = optional_import(
+            "astrbot_plugin_steam_game_recommender.services.tag_normalizer"
+        )
+
+        with (
+            patch.object(normalizer, "STEAM_TAG_ALIASES", {}),
+            patch.object(normalizer, "STEAM_CANONICAL_TAGS", set()),
+            patch.object(normalizer, "STEAM_TAG_IDS", {}),
+        ):
+            normalizer.register_steam_tag_aliases(
+                [{"tagid": 71, "name": "Existing Fixture Tag"}]
+            )
+            normalizer.register_steam_tag_aliases(
+                [{"tagid": 72, "name": "Service Fixture Tag"}],
+                register_ids=False,
+            )
+
+            self.assertEqual(
+                normalizer.normalize_tag("Existing Fixture Tag"),
+                "existing_fixture_tag",
+            )
+            self.assertEqual(
+                normalizer.normalize_tag("Service Fixture Tag"),
+                "service_fixture_tag",
+            )
+            self.assertEqual(
+                normalizer.steam_tag_id_for("existing_fixture_tag"),
+                71,
+            )
+            self.assertIsNone(normalizer.steam_tag_id_for("service_fixture_tag"))
+
     def test_maps_specific_mechanic_tags_without_broad_false_positive(self) -> None:
         normalizer = optional_import(
             "astrbot_plugin_steam_game_recommender.services.tag_normalizer"

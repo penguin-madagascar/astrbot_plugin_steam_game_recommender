@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import patch
 
 from astrbot_plugin_steam_game_recommender.clients.steam import SteamStorefrontPage
+from astrbot_plugin_steam_game_recommender.services import tag_normalizer
 from astrbot_plugin_steam_game_recommender.services.steam_index import (
     STEAM_INDEX_CACHE_KEY,
     STEAM_TAG_RECALL_DEGRADED_WARNING,
@@ -20,6 +21,148 @@ from astrbot_plugin_steam_game_recommender.storage.models import (
 
 
 class SteamTagRecallIntegrationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_first_reference_query_counts_top_five_before_selecting_anchors(
+        self,
+    ) -> None:
+        reference = GameCandidate(
+            appid=900,
+            title="Anchor Seed",
+            app_type="game",
+            ordered_tags=["Action", "RPG", "Souls-like", "Dark Fantasy", "Difficult"],
+            platforms=["PC"],
+            stores=["Steam"],
+        )
+        tag_ids = {
+            "Action": 1,
+            "RPG": 2,
+            "Souls-like": 3,
+            "Dark Fantasy": 4,
+            "Difficult": 5,
+        }
+        tag_results = {
+            tag_id: [
+                SteamSearchHit(
+                    appid=tag_id * 1_000 + index,
+                    title=f"Tag {tag_id}-{index}",
+                )
+                for index in range(1, count + 1)
+            ]
+            for tag_id, count in {1: 10, 2: 8, 3: 2, 4: 3, 5: 6}.items()
+        }
+        client = RecallSteamClient(tag_ids=tag_ids, tag_results=tag_results)
+        service = SteamGameIndexService(client, MemoryCache(snapshot([reference])))
+        preference = GamePreference(reference_games_like=["Anchor Seed"])
+
+        with (
+            patch.dict(tag_normalizer.STEAM_TAG_IDS, {}, clear=True),
+        ):
+            with self.assertLogs(
+                "astrbot_plugin_steam_game_recommender.services.steam_index",
+                level="DEBUG",
+            ) as logs:
+                ranked = await service.recommend(preference, limit=5)
+
+        rank_logs = [
+            message
+            for message in logs.output
+            if "recommendation_rank event=rank_complete" in message
+        ]
+        self.assertIn("anchors=['soulslike', 'dark_fantasy']", rank_logs[-1])
+        self.assertEqual(
+            client.tag_calls,
+            [(1, 20), (2, 20), (3, 20), (4, 20), (5, 20)],
+        )
+        self.assertTrue({game.appid for game in ranked} <= {3_001, 3_002, 4_001, 4_002, 4_003})
+        self.assertFalse({1_001, 2_001, 5_001} & set(client.detail_calls))
+
+    async def test_failed_count_prefetch_falls_back_without_retrying_storefront(
+        self,
+    ) -> None:
+        reference = GameCandidate(
+            appid=910,
+            title="Fallback Seed",
+            app_type="game",
+            ordered_tags=["Action", "RPG", "Puzzle", "Strategy", "Simulation"],
+            platforms=["PC"],
+            stores=["Steam"],
+        )
+        client = RecallSteamClient(
+            tag_ids={"Action": 11, "RPG": 12, "Puzzle": 13, "Strategy": 14, "Simulation": 15},
+            tag_results={
+                11: RuntimeError("count endpoint unavailable"),
+                12: [SteamSearchHit(appid=12_001, title="RPG Match")],
+                13: [SteamSearchHit(appid=13_001, title="Puzzle Match")],
+                14: [SteamSearchHit(appid=14_001, title="Strategy Match")],
+                15: [SteamSearchHit(appid=15_001, title="Simulation Match")],
+            },
+            text_results={
+                "action": [SteamSearchHit(appid=11_001, title="Action Text Match")]
+            },
+        )
+        service = SteamGameIndexService(client, MemoryCache(snapshot([reference])))
+        preference = GamePreference(reference_games_like=["Fallback Seed"])
+
+        with (
+            patch.dict(tag_normalizer.STEAM_TAG_IDS, {}, clear=True),
+        ):
+            ranked = await service.recommend(preference, limit=5)
+
+        self.assertEqual(client.tag_calls.count((11, 20)), 1)
+        self.assertEqual(client.text_calls, [("action", 20)])
+        self.assertEqual({game.appid for game in ranked}, {11_001, 12_001})
+        self.assertEqual(
+            preference.parse_warnings.count(STEAM_TAG_RECALL_DEGRADED_WARNING),
+            1,
+        )
+
+    async def test_missing_vocabulary_preserves_canonical_required_tag_safely(
+        self,
+    ) -> None:
+        client = RecallSteamClient(
+            text_results={"precision duel": []},
+        )
+        service = SteamGameIndexService(
+            client,
+            MemoryCache(
+                snapshot([candidate(30_001, "Unrelated Action", ["Action"])])
+            ),
+        )
+        preference = GamePreference(required_tags=["precision_duel"])
+
+        with (
+            patch.object(tag_normalizer, "STEAM_TAG_ALIASES", {}),
+            patch.object(tag_normalizer, "STEAM_CANONICAL_TAGS", set()),
+            patch.object(tag_normalizer, "STEAM_TAG_IDS", {}),
+        ):
+            ranked = await service.recommend(preference, limit=5)
+
+        self.assertEqual(ranked, [])
+        self.assertEqual(client.text_calls, [("precision duel", 20)])
+        self.assertIn(STEAM_TAG_RECALL_DEGRADED_WARNING, preference.parse_warnings)
+
+    async def test_missing_vocabulary_preserves_canonical_exclusion_tag(self) -> None:
+        forbidden = candidate(31_001, "A Forbidden", ["Precision Duel"])
+        allowed = [
+            candidate(31_100 + index, f"B Allowed {index}", ["Action"])
+            for index in range(10)
+        ]
+        client = RecallSteamClient()
+        service = SteamGameIndexService(
+            client,
+            MemoryCache(snapshot([forbidden, *allowed])),
+        )
+        preference = GamePreference(genres_dislike=["precision_duel"])
+
+        with (
+            patch.object(tag_normalizer, "STEAM_TAG_ALIASES", {}),
+            patch.object(tag_normalizer, "STEAM_CANONICAL_TAGS", set()),
+            patch.object(tag_normalizer, "STEAM_TAG_IDS", {}),
+        ):
+            ranked = await service.recommend(preference, limit=5)
+
+        self.assertNotIn(forbidden.appid, [game.appid for game in ranked])
+        self.assertIn(STEAM_TAG_RECALL_DEGRADED_WARNING, preference.parse_warnings)
+
     async def test_request_retrieval_rank_breaks_equal_final_scores(self) -> None:
         client = RecallSteamClient(
             tag_ids={"Action": 1, "Puzzle": 2},
@@ -96,11 +239,7 @@ class SteamTagRecallIntegrationTest(unittest.IsolatedAsyncioTestCase):
             "astrbot_plugin_steam_game_recommender.services.steam_index",
             level="DEBUG",
         ) as logs:
-            with patch(
-                "astrbot_plugin_steam_game_recommender.services.steam_index.steam_tag_id_for",
-                return_value=None,
-            ):
-                await service.recommend(preference, limit=1)
+            await service.recommend(preference, limit=1)
 
         self.assertEqual(client.text_calls, [("soulslike", 20)])
         self.assertEqual(client.tag_calls, [])
@@ -253,14 +392,10 @@ class SteamTagRecallIntegrationTest(unittest.IsolatedAsyncioTestCase):
         cache = YieldingMemoryCache()
         service = SteamGameIndexService(client, cache)
 
-        with patch(
-            "astrbot_plugin_steam_game_recommender.services.steam_index.steam_tag_id_for",
-            return_value=None,
-        ):
-            first, second = await asyncio.gather(
-                service.recommend(GamePreference(genres_like=["action"]), limit=1),
-                service.recommend(GamePreference(genres_like=["puzzle"]), limit=1),
-            )
+        first, second = await asyncio.gather(
+            service.recommend(GamePreference(genres_like=["action"]), limit=1),
+            service.recommend(GamePreference(genres_like=["puzzle"]), limit=1),
+        )
 
         self.assertEqual(client.popular_tag_calls, 1)
         self.assertEqual({first[0].appid, second[0].appid}, {701, 702})
@@ -286,6 +421,168 @@ class SteamTagRecallIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await service.ensure_steam_tag_aliases())
         self.assertTrue(await service.ensure_steam_tag_aliases())
         self.assertEqual(client.popular_tag_calls, 2)
+
+    async def test_loaded_tag_vocabulary_refreshes_after_twenty_four_hours(self) -> None:
+        client = RefreshingAliasClient()
+        now = [1_000.0]
+        service = SteamGameIndexService(
+            client,
+            MemoryCache(),
+            clock=lambda: now[0],
+        )
+
+        self.assertTrue(await service.ensure_steam_tag_aliases())
+        now[0] += 24 * 60 * 60 - 1
+        self.assertTrue(await service.ensure_steam_tag_aliases())
+        self.assertEqual(client.popular_tag_calls, 1)
+
+        now[0] += 1
+        self.assertTrue(await service.ensure_steam_tag_aliases())
+        self.assertEqual(client.popular_tag_calls, 2)
+
+    async def test_expired_tag_vocabulary_cannot_reuse_old_dynamic_tag_id(self) -> None:
+        now = [1_000_000.0]
+        client = ExpiringVocabularyClient(now)
+        service = SteamGameIndexService(
+            client,
+            MemoryCache(),
+            clock=lambda: now[0],
+        )
+        preference = GamePreference(genres_like=["expiry probe"])
+
+        with (
+            patch.object(tag_normalizer, "STEAM_TAG_ALIASES", {}),
+            patch.object(tag_normalizer, "STEAM_CANONICAL_TAGS", set()),
+            patch.object(tag_normalizer, "STEAM_TAG_IDS", {}),
+        ):
+            first = await service.recommend(preference, limit=1)
+            now[0] += 8 * 24 * 60 * 60
+            client.fail_vocabulary_refresh = True
+            second_preference = GamePreference(genres_like=["expiry probe"])
+            second = await service.recommend(second_preference, limit=1)
+
+        self.assertEqual([game.appid for game in first], [801])
+        self.assertEqual([game.appid for game in second], [802])
+        self.assertEqual(client.tag_calls, [(99_999, 20)])
+        self.assertEqual(client.text_calls, [("expiry probe", 20)])
+        self.assertIn(STEAM_TAG_RECALL_DEGRADED_WARNING, second_preference.parse_warnings)
+
+    async def test_service_instances_keep_independent_dynamic_tag_ids(self) -> None:
+        alpha_client = RecallSteamClient(
+            tag_ids={"Alpha Dynamic": 71},
+            tag_results={71: [SteamSearchHit(appid=871, title="Alpha Match")]},
+        )
+        beta_client = RecallSteamClient(
+            tag_ids={"Beta Dynamic": 72},
+            tag_results={72: [SteamSearchHit(appid=872, title="Beta Match")]},
+        )
+        alpha = SteamGameIndexService(alpha_client, MemoryCache())
+        beta = SteamGameIndexService(beta_client, MemoryCache())
+
+        with (
+            patch.object(tag_normalizer, "STEAM_TAG_ALIASES", {}),
+            patch.object(tag_normalizer, "STEAM_CANONICAL_TAGS", set()),
+            patch.object(tag_normalizer, "STEAM_TAG_IDS", {}),
+        ):
+            await alpha.recommend(
+                GamePreference(genres_like=["alpha dynamic"]),
+                limit=1,
+            )
+            await beta.recommend(
+                GamePreference(genres_like=["beta dynamic"]),
+                limit=1,
+            )
+            await alpha.recommend(
+                GamePreference(genres_like=["alpha dynamic"]),
+                limit=1,
+            )
+            cross_preference = GamePreference(genres_like=["beta dynamic"])
+            await alpha.recommend(cross_preference, limit=1)
+
+        self.assertEqual(alpha_client.tag_calls, [(71, 20), (71, 20)])
+        self.assertEqual(beta_client.tag_calls, [(72, 20)])
+        self.assertIn(STEAM_TAG_RECALL_DEGRADED_WARNING, cross_preference.parse_warnings)
+
+    async def test_cancelling_one_alias_waiter_keeps_shared_load_alive(self) -> None:
+        client = CancellationSteamClient()
+        service = SteamGameIndexService(client, MemoryCache())
+        first = asyncio.create_task(service.ensure_steam_tag_aliases())
+        second = asyncio.create_task(service.ensure_steam_tag_aliases())
+        await client.alias_started.wait()
+
+        first.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await first
+        client.alias_release.set()
+
+        self.assertTrue(await second)
+        await asyncio.sleep(0)
+        self.assertEqual(client.popular_tag_calls, 1)
+        self.assertIsNone(service._tag_aliases_task)
+
+    async def test_cancelling_one_storefront_waiter_keeps_shared_page_alive(self) -> None:
+        client = CancellationSteamClient()
+        service = SteamGameIndexService(client, MemoryCache())
+        first = asyncio.create_task(
+            service._shared_storefront_tag_page(81, client.search_storefront_tag)
+        )
+        second = asyncio.create_task(
+            service._shared_storefront_tag_page(81, client.search_storefront_tag)
+        )
+        await client.tag_started.wait()
+
+        first.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await first
+        client.tag_release.set()
+
+        page = await second
+        await asyncio.sleep(0)
+        self.assertEqual(page.total_count, 1)
+        self.assertEqual(client.tag_calls, [(81, 20)])
+        self.assertEqual(service._storefront_tag_tasks, {})
+
+    async def test_concurrent_reference_requests_share_count_prefetches(self) -> None:
+        reference = GameCandidate(
+            appid=920,
+            title="Concurrent Seed",
+            app_type="game",
+            ordered_tags=["Action", "RPG", "Puzzle", "Strategy", "Simulation"],
+            platforms=["PC"],
+            stores=["Steam"],
+        )
+        client = SlowRecallSteamClient(
+            tag_ids={"Action": 21, "RPG": 22, "Puzzle": 23, "Strategy": 24, "Simulation": 25},
+            tag_results={
+                tag_id: [
+                    SteamSearchHit(appid=tag_id * 1_000, title=f"Tag {tag_id}")
+                ]
+                for tag_id in range(21, 26)
+            },
+        )
+        service = SteamGameIndexService(
+            client,
+            YieldingMemoryCache(snapshot([reference])),
+        )
+
+        with (
+            patch.dict(tag_normalizer.STEAM_TAG_IDS, {}, clear=True),
+        ):
+            await asyncio.gather(
+                service.recommend(
+                    GamePreference(reference_games_like=["Concurrent Seed"]),
+                    limit=2,
+                ),
+                service.recommend(
+                    GamePreference(reference_games_like=["Concurrent Seed"]),
+                    limit=2,
+                ),
+            )
+
+        self.assertEqual(
+            sorted(client.tag_calls),
+            [(tag_id, 20) for tag_id in range(21, 26)],
+        )
 
 
 class RecallSteamClient:
@@ -360,6 +657,16 @@ class RecallSteamClient:
         )
 
 
+class SlowRecallSteamClient(RecallSteamClient):
+    async def search_storefront_tag(
+        self,
+        tag_id: int,
+        page_size: int = 20,
+    ) -> SteamStorefrontPage:
+        await asyncio.sleep(0.01)
+        return await super().search_storefront_tag(tag_id, page_size)
+
+
 class ConcurrentFallbackClient:
     language = "english"
 
@@ -402,6 +709,68 @@ class RetryableAliasClient:
         if self.popular_tag_calls == 1:
             raise RuntimeError("temporary")
         return [{"tagid": 1, "name": "Action"}]
+
+
+class RefreshingAliasClient:
+    def __init__(self) -> None:
+        self.popular_tag_calls = 0
+
+    async def get_popular_tags(self) -> list[dict[str, Any]]:
+        self.popular_tag_calls += 1
+        return [{"tagid": 1, "name": "Action"}]
+
+
+class ExpiringVocabularyClient(RecallSteamClient):
+    def __init__(self, now: list[float]) -> None:
+        super().__init__(
+            tag_results={
+                99_999: [SteamSearchHit(appid=801, title="Dynamic Tag Match")]
+            },
+            text_results={
+                "expiry probe": [SteamSearchHit(appid=802, title="Text Fallback")]
+            },
+        )
+        self.now = now
+        self.initial_fetch_time = now[0]
+        self.fail_vocabulary_refresh = False
+
+    async def get_popular_tags_snapshot(self) -> SimpleNamespace:
+        if self.fail_vocabulary_refresh:
+            raise RuntimeError("vocabulary refresh unavailable")
+        return SimpleNamespace(
+            tags=({"tagid": 99_999, "name": "Expiry Probe"},),
+            fetched_at=self.initial_fetch_time,
+        )
+
+
+class CancellationSteamClient(RecallSteamClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.popular_tag_calls = 0
+        self.alias_started = asyncio.Event()
+        self.alias_release = asyncio.Event()
+        self.tag_started = asyncio.Event()
+        self.tag_release = asyncio.Event()
+
+    async def get_popular_tags(self) -> list[dict[str, Any]]:
+        self.popular_tag_calls += 1
+        self.alias_started.set()
+        await self.alias_release.wait()
+        return [{"tagid": 81, "name": "Cancellation Probe"}]
+
+    async def search_storefront_tag(
+        self,
+        tag_id: int,
+        page_size: int = 20,
+    ) -> SteamStorefrontPage:
+        self.tag_calls.append((tag_id, page_size))
+        self.tag_started.set()
+        await self.tag_release.wait()
+        return SteamStorefrontPage(
+            (SteamSearchHit(appid=881, title="Cancellation Match"),),
+            1,
+            0,
+        )
 
 
 class MemoryCache:

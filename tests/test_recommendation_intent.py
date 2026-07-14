@@ -15,7 +15,6 @@ from astrbot_plugin_steam_game_recommender.services.recommendation_intent import
     expand_intent_with_reference_tags,
 )
 from astrbot_plugin_steam_game_recommender.services.tag_normalizer import (
-    record_steam_tag_result_count,
     register_steam_tag_aliases,
 )
 from astrbot_plugin_steam_game_recommender.storage.models import (
@@ -161,15 +160,20 @@ class ReferenceTagIntentExpansionTest(unittest.TestCase):
                 for index, name in enumerate(tag_names, start=90_001)
             ]
         )
-        for tag_id, count in zip(range(90_001, 90_006), [5_000, 20, 40, 300, 900]):
-            record_steam_tag_result_count(tag_id, count)
         intent = build_recommendation_intent(GamePreference())
         reference = GameCandidate(
             title="Reference",
             ordered_tags=tag_names,
         )
 
-        expanded = expand_intent_with_reference_tags(intent, [reference])
+        expanded = expand_intent_with_reference_tags(
+            intent,
+            [reference],
+            tag_result_counts={
+                name.lower().replace(" ", "_"): count
+                for name, count in zip(tag_names[:5], [5_000, 20, 40, 300, 900])
+            },
+        )
 
         self.assertEqual(intent.tags, ())
         self.assertEqual(
@@ -207,6 +211,37 @@ class ReferenceTagIntentExpansionTest(unittest.TestCase):
                 ("adventure", IntentTagRole.SUPPORTING, 0.5 * 0.85**2),
             ],
         )
+
+    def test_request_local_counts_override_process_global_counts(self) -> None:
+        tag_names = [
+            "Local Broad",
+            "Local Common",
+            "Local Specific",
+            "Local Narrow",
+        ]
+        register_steam_tag_aliases(
+            [
+                {"tagid": index, "name": name}
+                for index, name in enumerate(tag_names, start=91_001)
+            ]
+        )
+        reference = GameCandidate(title="Reference", ordered_tags=tag_names)
+
+        expanded = expand_intent_with_reference_tags(
+            build_recommendation_intent(GamePreference()),
+            [reference],
+            tag_result_counts={
+                "local_broad": 10_000,
+                "local_common": 8_000,
+                "local_specific": 10,
+                "local_narrow": 20,
+            },
+        )
+
+        anchors = [
+            tag.tag for tag in expanded.tags if tag.role is IntentTagRole.ANCHOR
+        ]
+        self.assertEqual(anchors, ["local_specific", "local_narrow"])
 
     def test_canonical_dedupe_never_downgrades_explicit_intent(self) -> None:
         intent = build_recommendation_intent(
@@ -258,6 +293,33 @@ class ReferenceTagIntentExpansionTest(unittest.TestCase):
 
         self.assertEqual(len(expanded.tags), 10)
         self.assertEqual(expanded.tags[-1].tag, "building")
+
+    def test_reference_source_outranks_derived_weight_for_the_same_role(self) -> None:
+        intent = build_recommendation_intent(
+            GamePreference(extra_tags=["building"])
+        )
+        reference = GameCandidate(
+            title="Reference",
+            ordered_tags=[
+                "Action",
+                "RPG",
+                "Adventure",
+                "Puzzle",
+                "Strategy",
+                "Simulation",
+                "Crafting",
+                "Management",
+                "Farming",
+                "Building",
+            ],
+        )
+
+        expanded = expand_intent_with_reference_tags(intent, [reference])
+        building = next(tag for tag in expanded.tags if tag.tag == "building")
+
+        self.assertEqual(building.role, IntentTagRole.SUPPORTING)
+        self.assertEqual(building.source, IntentTagSource.REFERENCE)
+        self.assertAlmostEqual(building.weight, 0.5 * 0.85**9)
 
 
 if __name__ == "__main__":

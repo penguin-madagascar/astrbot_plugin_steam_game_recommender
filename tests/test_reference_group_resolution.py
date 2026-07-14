@@ -397,6 +397,94 @@ class ReferenceGroupResolutionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.search_calls, [])
         self.assertEqual([item.appid for item in reference_candidates(preference, entries)], [70])
 
+    async def test_cached_sequel_does_not_preempt_remote_base_edition(self) -> None:
+        preference = GamePreference(reference_games_like=["Portal"])
+        client = FrozenReferenceSteamClient(
+            search_results={
+                ("Portal", "english"): [
+                    SteamSearchHit(appid=75, title="Portal Remastered")
+                ]
+            },
+            details={75: game(75, "Portal Remastered", ["Puzzle"])},
+        )
+        service = SteamGameIndexService(client, MemoryCache({}), clock=lambda: 1_000.0)
+
+        entries = await service.refresh_entries(
+            preference,
+            [game(74, "Portal 2", ["Puzzle"])],
+            target_pool=1,
+        )
+
+        self.assertEqual(preference.resolved_reference_games[0].appid, 75)
+        self.assertIn("Portal", [call["search"] for call in client.search_calls])
+        self.assertEqual([item.appid for item in reference_candidates(preference, entries)], [75])
+
+    async def test_cached_edition_does_not_preempt_remote_exact_title(self) -> None:
+        preference = GamePreference(reference_games_like=["Portal"])
+        client = FrozenReferenceSteamClient(
+            search_results={
+                ("Portal", "english"): [SteamSearchHit(appid=77, title="Portal")]
+            },
+            details={77: game(77, "Portal", ["Puzzle"])},
+        )
+        service = SteamGameIndexService(client, MemoryCache({}), clock=lambda: 1_000.0)
+
+        entries = await service.refresh_entries(
+            preference,
+            [game(76, "Portal Remastered", ["Puzzle"])],
+            target_pool=1,
+        )
+
+        self.assertEqual(preference.resolved_reference_games[0].appid, 77)
+        self.assertIn("Portal", [call["search"] for call in client.search_calls])
+        self.assertEqual([item.appid for item in reference_candidates(preference, entries)], [77])
+
+    async def test_invalid_remote_exact_falls_back_to_cached_edition(self) -> None:
+        preference = GamePreference(reference_games_like=["Portal"])
+        client = FrozenReferenceSteamClient(
+            search_results={
+                ("Portal", "english"): [SteamSearchHit(appid=79, title="Portal")]
+            },
+            details={},
+        )
+        service = SteamGameIndexService(client, MemoryCache({}), clock=lambda: 1_000.0)
+
+        entries = await service.refresh_entries(
+            preference,
+            [game(78, "Portal Remastered", ["Puzzle"])],
+            target_pool=1,
+        )
+
+        self.assertEqual(preference.resolved_reference_games[0].appid, 78)
+        self.assertEqual(preference.parse_warnings, [])
+        self.assertEqual(client.detail_appids, [79])
+        self.assertEqual([item.appid for item in reference_candidates(preference, entries)], [78])
+
+    async def test_remote_fuzzy_cannot_replace_cached_base_after_exact_fails(
+        self,
+    ) -> None:
+        preference = GamePreference(reference_games_like=["Portal"])
+        client = FrozenReferenceSteamClient(
+            search_results={
+                ("Portal", "english"): [
+                    SteamSearchHit(appid=80, title="Portal"),
+                    SteamSearchHit(appid=81, title="Portals"),
+                ]
+            },
+            details={81: game(81, "Portals", ["Puzzle"])},
+        )
+        service = SteamGameIndexService(client, MemoryCache({}), clock=lambda: 1_000.0)
+
+        entries = await service.refresh_entries(
+            preference,
+            [game(78, "Portal Remastered", ["Puzzle"])],
+            target_pool=1,
+        )
+
+        self.assertEqual(preference.resolved_reference_games[0].appid, 78)
+        self.assertEqual(client.detail_appids, [80])
+        self.assertEqual([item.appid for item in reference_candidates(preference, entries)], [78])
+
     async def test_refresh_prunes_removed_references_and_their_warnings(self) -> None:
         preference = GamePreference()
         preference.resolved_reference_games = [

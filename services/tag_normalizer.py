@@ -30,6 +30,7 @@ TAG_ALIASES = {
     "多人": "multiplayer",
     "singleplayer": "singleplayer",
     "single player": "singleplayer",
+    "单机": "singleplayer",
     "单人": "singleplayer",
     "puzzle": "puzzle",
     "解谜": "puzzle",
@@ -142,10 +143,14 @@ TAG_ALIASES = {
 STEAM_TAG_ALIASES: dict[str, str] = {}
 STEAM_CANONICAL_TAGS: set[str] = set()
 STEAM_TAG_IDS: dict[str, int] = {}
-STEAM_TAG_RESULT_COUNTS: dict[str, int] = {}
+ASCII_CANONICAL_TAG_PATTERN = re.compile(r"[a-z0-9]+(?:_[a-z0-9]+)*")
 
 
-def register_steam_tag_aliases(tags: list[dict[str, Any]]) -> None:
+def register_steam_tag_aliases(
+    tags: list[dict[str, Any]],
+    *,
+    register_ids: bool = True,
+) -> None:
     for item in tags:
         if not isinstance(item, dict):
             continue
@@ -153,20 +158,42 @@ def register_steam_tag_aliases(tags: list[dict[str, Any]]) -> None:
         key = normalize_key(name)
         if not key:
             continue
-        canonical = TAG_ALIASES.get(key, steam_tag_canonical_key(name))
+        canonical = canonical_steam_tag_name(name)
         if canonical:
             STEAM_TAG_ALIASES[key] = canonical
             STEAM_CANONICAL_TAGS.add(canonical)
             tag_id = item.get("tagid", item.get("id"))
-            if tag_id is not None:
+            if register_ids and tag_id is not None:
                 STEAM_TAG_IDS[canonical] = int(tag_id)
-            result_count = item.get("total_count", item.get("count"))
-            if type(result_count) is int and result_count >= 0:
-                STEAM_TAG_RESULT_COUNTS[canonical] = result_count
+
+
+def register_canonical_tag_keys(values: list[str] | tuple[str, ...]) -> list[str]:
+    """Register already-normalized request tags without inventing Steam IDs."""
+    registered: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        raw = str(value or "").strip().casefold()
+        canonical = steam_tag_canonical_key(raw)
+        if (
+            raw != canonical
+            or not ASCII_CANONICAL_TAG_PATTERN.fullmatch(canonical)
+            or canonical in seen
+        ):
+            continue
+        STEAM_TAG_ALIASES[normalize_key(raw)] = canonical
+        STEAM_CANONICAL_TAGS.add(canonical)
+        registered.append(canonical)
+        seen.add(canonical)
+    return registered
 
 
 def steam_tag_canonical_key(value: str) -> str:
     return normalize_key(value).replace(" ", "_")
+
+
+def canonical_steam_tag_name(value: str) -> str:
+    key = normalize_key(value)
+    return TAG_ALIASES.get(key, steam_tag_canonical_key(value))
 
 
 def canonical_tags() -> set[str]:
@@ -202,17 +229,6 @@ def steam_tag_for_id(tag_id: int) -> str | None:
     )
 
 
-def record_steam_tag_result_count(tag_id: int, total_count: int) -> None:
-    canonical = steam_tag_for_id(tag_id)
-    if canonical:
-        STEAM_TAG_RESULT_COUNTS[canonical] = max(int(total_count), 0)
-
-
-def steam_tag_result_count_for(value: str) -> int | None:
-    canonical = normalize_tag(value) or steam_tag_canonical_key(value)
-    return STEAM_TAG_RESULT_COUNTS.get(canonical)
-
-
 def canonical_tags_from_terms(values: list[str] | tuple[str, ...]) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
@@ -222,6 +238,35 @@ def canonical_tags_from_terms(values: list[str] | tuple[str, ...]) -> list[str]:
             result.append(tag)
             seen.add(tag)
     return result
+
+
+def canonical_tag_occurrences(value: str) -> list[tuple[str, int, int]]:
+    aliases = dict(STEAM_TAG_ALIASES)
+    aliases.update(TAG_ALIASES)
+    occurrences: list[tuple[str, int, int]] = []
+    for alias, canonical in aliases.items():
+        occurrences.extend(
+            (canonical, start, end)
+            for start, end in normalized_alias_occurrences(alias, value)
+        )
+    return occurrences
+
+
+def normalized_alias_occurrences(alias: str, value: str) -> list[tuple[int, int]]:
+    source = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    normalized_alias = normalize_key(alias)
+    if not source or not normalized_alias:
+        return []
+    if any("\u4e00" <= character <= "\u9fff" for character in normalized_alias):
+        pattern = re.escape(normalized_alias)
+    else:
+        words = normalized_alias.split()
+        pattern = (
+            r"(?<![0-9a-z])"
+            + r"[\s/_\\-]+".join(re.escape(word) for word in words)
+            + r"(?![0-9a-z])"
+        )
+    return [(match.start(), match.end()) for match in re.finditer(pattern, source)]
 
 
 def candidate_canonical_tags(candidate: GameCandidate) -> list[str]:

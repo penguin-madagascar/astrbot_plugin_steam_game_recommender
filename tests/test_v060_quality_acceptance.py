@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import unittest
 from collections import defaultdict
+from copy import deepcopy
 from statistics import fmean
 
 import httpx
@@ -51,6 +52,15 @@ QUALITY_SLICES = {
 }
 
 
+def fixture_tag_id(fixture: dict, name: str) -> int:
+    expected = name.casefold()
+    return next(
+        int(item["tagid"])
+        for item in fixture["tags"]
+        if str(item["name"]).casefold() == expected
+    )
+
+
 class V060EndToEndQualityAcceptanceTest(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -58,6 +68,74 @@ class V060EndToEndQualityAcceptanceTest(unittest.IsolatedAsyncioTestCase):
         cls.scenarios = {
             scenario["id"]: scenario for scenario in cls.fixture["scenarios"]
         }
+
+    def test_frozen_storefront_contract_is_independent_from_judgments(self) -> None:
+        self.assertEqual(
+            self.fixture["baseline_snapshot"]["source_commit"],
+            "202d2125fac730ab94a9fc08277510b40c513a14",
+        )
+        self.assertTrue(
+            all(
+                "count" not in tag and "total_count" not in tag
+                for tag in self.fixture["tags"]
+            )
+        )
+        self.assertIn("storefront_tag_results", self.fixture)
+        self.assertTrue(
+            all(
+                "recall_appids" not in scenario
+                for scenario in self.fixture["scenarios"]
+            )
+        )
+
+    async def test_frozen_llm_receives_the_original_query(self) -> None:
+        scenario = self.scenarios["souls_cn_original"]
+        run = await run_e2e_scenario(self.fixture, scenario)
+
+        self.assertEqual(len(run.llm_prompts), 1)
+        self.assertIn(scenario["query"], run.llm_prompts[0])
+
+    async def test_mainstream_keeps_verified_cross_language_gameplay_only(self) -> None:
+        run = await run_e2e_scenario(
+            self.fixture,
+            self.scenarios["mainstream_cross_language_gameplay"],
+        )
+
+        self.assertIn("extraction_shooter", run.preference.genres_like)
+        self.assertFalse(
+            {"action", "rpg", "open_world"} & set(run.preference.genres_like)
+        )
+        self.assertIn(
+            fixture_tag_id(self.fixture, "Extraction Shooter"),
+            run.client.storefront_tag_calls,
+        )
+        self.assertTrue({210, 211, 212} <= set(run.ranking[:5]))
+
+    async def test_wrong_tag_cannot_preserve_unrelated_slice_recall(self) -> None:
+        for scenario_id in ("souls_cn_original", "extraction_cn_original"):
+            with self.subTest(scenario=scenario_id):
+                scenario = self.scenarios[scenario_id]
+                wrong_fixture = deepcopy(self.fixture)
+                reference_appid = int(scenario["expected_reference_appid"])
+                reference = next(
+                    game
+                    for game in wrong_fixture["games"]
+                    if int(game["appid"]) == reference_appid
+                )
+                reference["ordered_tags"] = ["Deckbuilding", "Card Battler"]
+
+                run = await run_e2e_scenario(wrong_fixture, scenario)
+                ranking = [str(appid) for appid in run.ranking]
+                relevance = {
+                    str(appid): int(value)
+                    for appid, value in scenario["relevance"].items()
+                }
+
+                self.assertEqual(recall_at_k(ranking, relevance, k=50), 0.0)
+                self.assertIn(
+                    fixture_tag_id(self.fixture, "Deckbuilding"),
+                    run.client.storefront_tag_calls,
+                )
 
     async def test_real_pipeline_meets_retrieval_ranking_and_safety_gates(self) -> None:
         evaluated = [
@@ -162,7 +240,13 @@ class V060EndToEndQualityAcceptanceTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("dark souls", searched)
         self.assertEqual(
             set(run.client.storefront_tag_calls),
-            {steam_tag_id_for("soulslike"), steam_tag_id_for("dark_fantasy")},
+            {
+                fixture_tag_id(self.fixture, "Souls-like"),
+                fixture_tag_id(self.fixture, "Action"),
+                fixture_tag_id(self.fixture, "RPG"),
+                fixture_tag_id(self.fixture, "Dark Fantasy"),
+                fixture_tag_id(self.fixture, "Difficult"),
+            },
         )
 
     async def test_all_aliases_fail_once_without_false_resolution(self) -> None:

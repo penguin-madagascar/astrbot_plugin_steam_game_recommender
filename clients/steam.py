@@ -5,13 +5,13 @@ import html
 import json
 import math
 import re
+import time
 from dataclasses import dataclass
 from html.parser import HTMLParser
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
-from ..services.tag_normalizer import record_steam_tag_result_count
 from ..storage.models import GameCandidate, SteamOwnedGame, SteamSearchHit
 from ..storage.repository import SQLiteCacheRepository
 
@@ -88,6 +88,12 @@ class SteamStorefrontPage:
     start: int
 
 
+@dataclass(frozen=True)
+class SteamTagVocabularySnapshot:
+    tags: tuple[dict[str, Any], ...]
+    fetched_at: float
+
+
 class SteamClient:
     """Steam Store public API data source for Steam-only recommendations."""
 
@@ -99,6 +105,7 @@ class SteamClient:
         default_country: str = "CN",
         language: str = "schinese",
         steam_api_key: str = "",
+        clock: Callable[[], float] = time.time,
     ) -> None:
         self.client = client
         self.cache = cache
@@ -106,6 +113,7 @@ class SteamClient:
         self.default_country = default_country.strip().upper() or "CN"
         self.language = language.strip() or "schinese"
         self.steam_api_key = steam_api_key.strip()
+        self.clock = clock
 
     async def search_games(
         self,
@@ -200,7 +208,6 @@ class SteamClient:
                 "infinite": 1,
             }
         )
-        record_steam_tag_result_count(resolved_tag_id, page.total_count)
         return page
 
     async def browse_top_sellers(
@@ -261,13 +268,19 @@ class SteamClient:
         )
 
     async def get_popular_tags(self) -> list[dict[str, Any]]:
-        cache_key = self._cache_key(STEAM_POPULAR_TAGS_URL, {})
+        snapshot = await self.get_popular_tags_snapshot()
+        return [dict(tag) for tag in snapshot.tags]
+
+    async def get_popular_tags_snapshot(self) -> SteamTagVocabularySnapshot:
+        cache_key = f"{self._cache_key(STEAM_POPULAR_TAGS_URL, {})}:v2"
         fresh_key = f"{cache_key}:fresh"
         stale_key = f"{cache_key}:stale"
         fresh = await self.cache.get_json(fresh_key, STOREFRONT_FRESH_TTL_HOURS)
         if fresh is not None:
             try:
-                return parse_popular_tags(fresh)
+                snapshot = parse_popular_tag_snapshot(fresh)
+                if self._tag_snapshot_age(snapshot) <= STOREFRONT_FRESH_TTL_HOURS * 3600:
+                    return snapshot
             except SteamApiError:
                 pass
 
@@ -283,17 +296,27 @@ class SteamClient:
         except SteamApiError as exc:
             error = exc
         else:
-            await self.cache.set_json(fresh_key, tags)
-            await self.cache.set_json(stale_key, tags)
-            return tags
+            snapshot = SteamTagVocabularySnapshot(
+                tags=tuple(tags),
+                fetched_at=float(self.clock()),
+            )
+            payload = popular_tag_snapshot_payload(snapshot)
+            await self.cache.set_json(fresh_key, payload)
+            await self.cache.set_json(stale_key, payload)
+            return snapshot
 
         stale = await self.cache.get_json(stale_key, STOREFRONT_STALE_TTL_HOURS)
         if stale is not None:
             try:
-                return parse_popular_tags(stale)
+                snapshot = parse_popular_tag_snapshot(stale)
+                if self._tag_snapshot_age(snapshot) <= STOREFRONT_STALE_TTL_HOURS * 3600:
+                    return snapshot
             except SteamApiError:
                 pass
         raise error
+
+    def _tag_snapshot_age(self, snapshot: SteamTagVocabularySnapshot) -> float:
+        return max(float(self.clock()) - snapshot.fetched_at, 0.0)
 
     async def get_store_page_tags(self, appid: int) -> list[str]:
         text = await self._get_text(
@@ -464,6 +487,30 @@ def parse_popular_tags(payload: Any) -> list[dict[str, Any]]:
             tag["count"] = storefront_non_negative_int(raw_count, "count")
         tags.append(tag)
     return tags
+
+
+def parse_popular_tag_snapshot(payload: Any) -> SteamTagVocabularySnapshot:
+    if not isinstance(payload, dict):
+        raise SteamApiError("Steam 热门标签缓存缺少快照元数据。")
+    fetched_at = payload.get("fetched_at")
+    if isinstance(fetched_at, bool) or not isinstance(fetched_at, (int, float)):
+        raise SteamApiError("Steam 热门标签缓存时间无效。")
+    fetched_at = float(fetched_at)
+    if not math.isfinite(fetched_at) or fetched_at < 0:
+        raise SteamApiError("Steam 热门标签缓存时间无效。")
+    return SteamTagVocabularySnapshot(
+        tags=tuple(parse_popular_tags(payload.get("tags"))),
+        fetched_at=fetched_at,
+    )
+
+
+def popular_tag_snapshot_payload(
+    snapshot: SteamTagVocabularySnapshot,
+) -> dict[str, Any]:
+    return {
+        "fetched_at": snapshot.fetched_at,
+        "tags": [dict(tag) for tag in snapshot.tags],
+    }
 
 
 def storefront_non_negative_int(value: Any, field_name: str) -> int:
