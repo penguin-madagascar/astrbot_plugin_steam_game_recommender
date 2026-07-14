@@ -13,6 +13,11 @@ except ModuleNotFoundError:
 from astrbot_plugin_steam_game_recommender.services.played_filter import (
     filter_games_by_library_mode,
 )
+from astrbot_plugin_steam_game_recommender.services.candidate_tag_evidence import (
+    build_candidate_tag_evidence,
+    matches_excluded_tags,
+    satisfies_required_tags,
+)
 from astrbot_plugin_steam_game_recommender.services.preference_parser import keyword_fallback
 from astrbot_plugin_steam_game_recommender.services.recommendation_evaluation import (
     constraint_violation_rate,
@@ -24,6 +29,11 @@ from astrbot_plugin_steam_game_recommender.services.similarity_ranker import (
     build_profile_from_preference,
     ranked_game_sort_key,
     rank_steam_candidates,
+)
+from astrbot_plugin_steam_game_recommender.services.recommendation_intent import (
+    IntentTagRole,
+    build_recommendation_intent,
+    expand_intent_with_reference_tags,
 )
 from astrbot_plugin_steam_game_recommender.services.steam_price_bridge import (
     attach_missing_price_warning,
@@ -148,15 +158,26 @@ def evaluate_current_scenario(scenario: dict) -> dict[str, float]:
         for index, item in enumerate(scenario["candidates"], 1)
     ]
     positive_tags, negative_tags = REFERENCE_TAGS.get(scenario["id"], ([], []))
-    profile = build_profile_from_preference(
-        preference,
-        reference_candidates=reference_candidates(positive_tags, "Positive Seed"),
-        negative_reference_candidates=reference_candidates(negative_tags, "Negative Seed"),
+    positive_references = reference_candidates(positive_tags, "Positive Seed")
+    negative_references = reference_candidates(negative_tags, "Negative Seed")
+    intent = expand_intent_with_reference_tags(
+        build_recommendation_intent(preference),
+        positive_references,
     )
-    ranked = rank_steam_candidates(candidates, profile, min_review_count=50)
+    ranked = rank_steam_candidates(
+        candidates,
+        intent,
+        positive_reference_candidates=positive_references,
+        negative_reference_candidates=negative_references,
+        language_profile=build_profile_from_preference(preference),
+    )
     ranked = apply_scenario_filters(ranked, scenario, preference)
     id_by_title = {item["title"]: item["id"] for item in scenario["candidates"]}
-    relevance = {item["id"]: item["relevance"] for item in scenario["candidates"]}
+    relevance = hard_constraint_eligible_relevance(
+        scenario,
+        preference,
+        candidates,
+    )
     candidate_ranking = [id_by_title[game.title] for game in ranked]
     selected = ranked[: scenario["target_count"]]
     ranking = [id_by_title[game.title] for game in selected]
@@ -171,6 +192,25 @@ def evaluate_current_scenario(scenario: dict) -> dict[str, float]:
         ),
         "fill_rate": fill_rate(ranking, target_count=scenario["target_count"]),
     }
+
+
+def hard_constraint_eligible_relevance(
+    scenario: dict,
+    preference: GamePreference,
+    candidates: list[GameCandidate],
+) -> dict[str, int]:
+    intent = build_recommendation_intent(preference)
+    required = [tag.tag for tag in intent.tags if tag.role is IntentTagRole.REQUIRED]
+    excluded = [tag.tag for tag in intent.tags if tag.role is IntentTagRole.EXCLUDE]
+    relevance: dict[str, int] = {}
+    for item, candidate in zip(scenario["candidates"], candidates):
+        evidence = build_candidate_tag_evidence(candidate)
+        eligible = satisfies_required_tags(evidence, required) and not matches_excluded_tags(
+            evidence,
+            excluded,
+        )
+        relevance[item["id"]] = item["relevance"] if eligible else 0
+    return relevance
 
 
 def adjusted_preference(scenario: dict) -> GamePreference:

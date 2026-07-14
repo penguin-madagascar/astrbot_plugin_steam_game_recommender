@@ -24,6 +24,9 @@ from astrbot_plugin_steam_game_recommender.services.steam_price_bridge import ( 
     attach_price_summary,
     load_price_plugin_symbols,
 )
+from astrbot_plugin_steam_game_recommender.services.similarity_ranker import (  # noqa: E402
+    ranked_game_sort_key,
+)
 from astrbot_plugin_steam_game_recommender.storage.models import (  # noqa: E402
     GamePreference,
     GamePriceSummary,
@@ -572,6 +575,33 @@ class PriceBridgeTest(unittest.IsolatedAsyncioTestCase):
 
 
 class BudgetScoringTest(unittest.TestCase):
+    def test_budget_adjustment_cannot_move_b_tier_ahead_of_a_tier(self) -> None:
+        tier_a = RankedGame(
+            title="Tier A",
+            score=30,
+            score_breakdown=ScoreBreakdown(relevance_tier="A", layer_score=0.30),
+        )
+        tier_b = RankedGame(
+            title="Tier B",
+            score=90,
+            score_breakdown=ScoreBreakdown(relevance_tier="B", layer_score=0.90),
+        )
+        adjusted_a = attach_price_summary(
+            tier_a,
+            price_summary(current_cny=120, lowest_cny=110),
+            GamePreference(budget=100, budget_is_required=True),
+        )
+        adjusted_b = attach_price_summary(
+            tier_b,
+            price_summary(current_cny=60, lowest_cny=50),
+            GamePreference(budget=100),
+        )
+
+        self.assertEqual(
+            [game.title for game in sorted([adjusted_b, adjusted_a], key=ranked_game_sort_key)],
+            ["Tier A", "Tier B"],
+        )
+
     def test_score_breakdown_accepts_required_budget_penalty(self) -> None:
         self.assertEqual(ScoreBreakdown(budget_adjustment=-10).budget_adjustment, -10)
 

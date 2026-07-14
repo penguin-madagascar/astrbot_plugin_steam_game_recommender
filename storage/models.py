@@ -394,6 +394,15 @@ class SteamOwnedGame(BaseModel):
 
 
 class ScoreBreakdown(BaseModel):
+    relevance_tier: str = "broad"
+    anchor_coverage: float = 0.0
+    supporting_similarity: float = 0.0
+    negative_reference_similarity: float = 0.0
+    semantic_score: float = 0.0
+    wilson_lower_bound: float = 0.0
+    quality_score: float = 0.0
+    layer_score: float = 0.0
+    retrieval_rank: int = 0
     tag_coverage: float = 0.0
     positive_reference: float | None = None
     library_profile: float | None = None
@@ -406,6 +415,13 @@ class ScoreBreakdown(BaseModel):
     budget_adjustment: float = 0.0
 
     @validator(
+        "anchor_coverage",
+        "supporting_similarity",
+        "negative_reference_similarity",
+        "semantic_score",
+        "wilson_lower_bound",
+        "quality_score",
+        "layer_score",
         "tag_coverage",
         "positive_reference",
         "library_profile",
@@ -421,6 +437,19 @@ class ScoreBreakdown(BaseModel):
         except (TypeError, ValueError):
             number = 0.0
         return min(max(number, 0.0), 1.0)
+
+    @validator("relevance_tier", pre=True)
+    def _normalize_relevance_tier(cls, value: Any) -> str:
+        tier = str(value or "").strip()
+        return tier if tier in {"A", "B", "C", "broad"} else "broad"
+
+    @validator("retrieval_rank", pre=True)
+    def _normalize_retrieval_rank(cls, value: Any) -> int:
+        try:
+            rank = int(value)
+        except (TypeError, ValueError):
+            rank = 0
+        return max(rank, 0)
 
     @validator("positive_score", pre=True)
     def _normalize_positive_score(cls, value: Any) -> float:

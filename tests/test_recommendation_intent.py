@@ -25,6 +25,17 @@ from astrbot_plugin_steam_game_recommender.storage.models import (
 
 
 class RecommendationIntentBuilderTest(unittest.TestCase):
+    def test_adds_gameplay_constraints_as_derived_supporting_tags(self) -> None:
+        intent = build_recommendation_intent(
+            GamePreference(players=2, difficulty="easy", mood="轻松")
+        )
+        by_tag = {tag.tag: tag for tag in intent.tags}
+
+        for canonical in ("co_op", "multiplayer", "casual", "relaxing"):
+            self.assertEqual(by_tag[canonical].role, IntentTagRole.SUPPORTING)
+            self.assertEqual(by_tag[canonical].source, IntentTagSource.DERIVED)
+            self.assertEqual(by_tag[canonical].weight, 0.35)
+
     def test_builds_weighted_roles_and_deduplicates_canonical_tags(self) -> None:
         intent = build_recommendation_intent(
             GamePreference(

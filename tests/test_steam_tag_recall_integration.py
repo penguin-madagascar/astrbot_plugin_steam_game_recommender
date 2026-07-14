@@ -20,6 +20,30 @@ from astrbot_plugin_steam_game_recommender.storage.models import (
 
 
 class SteamTagRecallIntegrationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_request_retrieval_rank_breaks_equal_final_scores(self) -> None:
+        client = RecallSteamClient(
+            tag_ids={"Action": 1, "Puzzle": 2},
+            tag_results={
+                1: [
+                    SteamSearchHit(appid=601, title="Action First"),
+                    SteamSearchHit(appid=603, title="Action Second"),
+                ],
+                2: [SteamSearchHit(appid=602, title="Puzzle First")],
+            },
+        )
+        service = SteamGameIndexService(client, MemoryCache())
+
+        ranked = await service.recommend(
+            GamePreference(genres_like=["action", "puzzle"]),
+            limit=3,
+        )
+
+        self.assertEqual([game.appid for game in ranked], [601, 602, 603])
+        self.assertEqual(
+            [game.score_breakdown.retrieval_rank for game in ranked],
+            [1, 2, 3],
+        )
+
     async def test_three_anchor_tags_use_independent_storefront_queries(self) -> None:
         client = RecallSteamClient(
             tag_ids={"Action": 1, "RPG": 2, "Puzzle": 3},

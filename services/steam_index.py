@@ -56,7 +56,6 @@ STEAM_INDEX_MAX_SEARCHES_PER_ROUND = 8
 STEAM_INDEX_SEARCH_RESULTS_PER_TERM = 10
 STEAM_INDEX_MAX_NEW_APPIDS_PER_ROUND = 60
 STEAM_HTTP_CONCURRENCY = 6
-USABLE_SCORE_THRESHOLD = 38
 SNAPSHOT_STORAGE_TTL_HOURS = 24 * 3650
 REFERENCE_MATCH_THRESHOLD = 0.75
 
@@ -156,7 +155,7 @@ class SteamGameIndexService:
         ranked = exclude_previously_shown(ranked, excluded_appids, excluded_titles)
         ranked = deduplicate_game_editions(ranked, preferred_appids)
         quality_target = max(10, max(int(limit), 0) * 2)
-        quality_count = sum(game.score >= USABLE_SCORE_THRESHOLD for game in ranked)
+        quality_count = len(ranked)
         if not specific_intent and quality_count >= quality_target:
             return ranked[:limit]
 
@@ -176,6 +175,11 @@ class SteamGameIndexService:
                 self.min_positive_ratio,
                 profile_tag_weights=profile_tag_weights,
                 positive_component_weights=self.positive_component_weights,
+                retrieval_ranks={
+                    int(hit.candidate.appid): hit.retrieval_rank
+                    for hit in recall.hits
+                    if hit.candidate.appid is not None
+                },
             )
             ranked = exclude_previously_shown(
                 ranked,
@@ -949,19 +953,30 @@ def rank_entries(
     min_positive_ratio: float,
     profile_tag_weights: dict[str, float] | None = None,
     positive_component_weights: Mapping[str, Any] | None = None,
+    retrieval_ranks: Mapping[int, int] | None = None,
 ) -> list[RankedGame]:
+    positives = reference_candidates(preference, entries)
+    negatives = negative_reference_candidates(preference, entries)
+    intent = expand_intent_with_reference_tags(
+        build_recommendation_intent(preference),
+        positives,
+    )
     profile = build_profile_from_preference(
         preference,
-        reference_candidates=reference_candidates(preference, entries),
-        negative_reference_candidates=negative_reference_candidates(preference, entries),
+        reference_candidates=positives,
+        negative_reference_candidates=negatives,
     )
     return rank_steam_candidates(
         entries,
-        profile,
+        intent,
         min_review_count,
         min_positive_ratio,
         profile_tag_weights=profile_tag_weights,
         positive_component_weights=positive_component_weights,
+        positive_reference_candidates=positives,
+        negative_reference_candidates=negatives,
+        retrieval_ranks=retrieval_ranks,
+        language_profile=profile,
     )
 
 

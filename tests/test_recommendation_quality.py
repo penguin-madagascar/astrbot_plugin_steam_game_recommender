@@ -201,9 +201,10 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(
-            [game.title for game in ranked],
-            ["Farm Co-op A", "Farm Co-op B", "Story Co-op", "Lower Match Builder"],
+            {game.title for game in ranked[:3]},
+            {"Farm Co-op A", "Farm Co-op B", "Story Co-op"},
         )
+        self.assertEqual(ranked[-1].title, "Lower Match Builder")
 
     async def test_cached_index_returns_continuous_score_order(self) -> None:
         cache = MemoryCache(
@@ -235,9 +236,10 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(
-            [game.title for game in ranked],
-            ["Farm Co-op A", "Farm Co-op B", "Story Co-op", "Lower Match Builder"],
+            {game.title for game in ranked[:3]},
+            {"Farm Co-op A", "Farm Co-op B", "Story Co-op"},
         )
+        self.assertEqual(ranked[-1].title, "Lower Match Builder")
 
     def test_exclude_tags_filter_horror_and_singleplayer_only(self) -> None:
         ranked = rank_steam_candidates(

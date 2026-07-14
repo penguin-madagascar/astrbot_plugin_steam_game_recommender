@@ -152,7 +152,7 @@ class SimilarityRankerTest(unittest.TestCase):
             ranked[1].score_breakdown.tag_coverage,
         )
         self.assertTrue(
-            any(item.evidence_id == "tag_match" for item in ranked[0].recommendation_evidence)
+            any(item.evidence_id == "core_match" for item in ranked[0].recommendation_evidence)
         )
 
     def test_excludes_disliked_tags_and_singleplayer_only_candidates(self) -> None:

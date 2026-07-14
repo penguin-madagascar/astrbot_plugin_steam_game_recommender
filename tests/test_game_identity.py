@@ -14,7 +14,11 @@ from astrbot_plugin_steam_game_recommender.services.similarity_ranker import (
 from astrbot_plugin_steam_game_recommender.services.steam_index import (
     exclude_previously_shown,
 )
-from astrbot_plugin_steam_game_recommender.storage.models import GameCandidate, RankedGame
+from astrbot_plugin_steam_game_recommender.storage.models import (
+    GameCandidate,
+    RankedGame,
+    ScoreBreakdown,
+)
 
 
 class GameFamilyKeyTest(unittest.TestCase):
@@ -61,6 +65,30 @@ class GameFamilyKeyTest(unittest.TestCase):
 
 
 class EditionDeduplicationTest(unittest.TestCase):
+    def test_never_replaces_a_higher_tier_edition_with_lower_tier_standard_game(self) -> None:
+        games = [
+            RankedGame(
+                appid=2,
+                title="Control Ultimate Edition",
+                score=30,
+                score_breakdown=ScoreBreakdown(
+                    relevance_tier="A", layer_score=0.30, retrieval_rank=2
+                ),
+            ),
+            RankedGame(
+                appid=1,
+                title="Control",
+                score=99,
+                score_breakdown=ScoreBreakdown(
+                    relevance_tier="B", layer_score=0.99, retrieval_rank=1
+                ),
+            ),
+        ]
+
+        selected = deduplicate_game_editions(games)
+
+        self.assertEqual([game.appid for game in selected], [2])
+
     def test_prefers_standard_game_even_when_an_edition_scores_higher(self) -> None:
         games = [
             ranked(2, "Control Ultimate Edition", 95),

@@ -12,6 +12,7 @@ from astrbot_plugin_steam_game_recommender.services.similarity_ranker import (
     resolve_positive_component_weights,
     weighted_positive_score,
 )
+from astrbot_plugin_steam_game_recommender.services.recommendation_scoring import quality_score
 from astrbot_plugin_steam_game_recommender.storage.models import (
     GameCandidate,
     RankedGame,
@@ -122,7 +123,7 @@ class ContinuousScoringTest(unittest.TestCase):
         self.assertAlmostEqual(popularity_score(99_999), 1.0)
         self.assertEqual(popularity_score(1_000_000), 1.0)
 
-    def test_missing_reference_and_library_weights_are_renormalized(self) -> None:
+    def test_ranker_uses_fixed_anchor_semantic_and_quality_policy(self) -> None:
         ranked = rank_steam_candidates(
             [candidate("Complete Match", ["Co-op", "Puzzle"], reviews=999)],
             SteamTagProfile(include_tags=["co_op", "puzzle"]),
@@ -130,13 +131,13 @@ class ContinuousScoringTest(unittest.TestCase):
         )
 
         game = ranked[0]
-        popularity = min(math.log10(1_000) / 5, 1)
-        expected = round((35 * 1.0 + 20 * 0.8 + 15 * popularity) / 70 * 100)
+        expected_layer = 0.70 * (0.70 * 0.65) + 0.30 * quality_score(0.8, 999)
 
-        self.assertEqual(game.score, expected)
+        self.assertEqual(game.score, round(expected_layer * 100))
         self.assertIsNone(game.score_breakdown.positive_reference)
         self.assertIsNone(game.score_breakdown.library_profile)
-        self.assertAlmostEqual(game.score_breakdown.positive_score, expected, delta=0.5)
+        self.assertAlmostEqual(game.score_breakdown.anchor_coverage, 0.65)
+        self.assertAlmostEqual(game.score_breakdown.layer_score, expected_layer)
 
     def test_low_match_popularity_cannot_beat_high_match_candidate(self) -> None:
         ranked = rank_steam_candidates(
@@ -153,7 +154,7 @@ class ContinuousScoringTest(unittest.TestCase):
             ranked[1].score_breakdown.tag_coverage,
         )
 
-    def test_ranker_uses_instance_weights_without_mutating_defaults(self) -> None:
+    def test_legacy_component_weights_do_not_override_fixed_policy(self) -> None:
         candidates = [
             candidate("Exact Small Match", ["Puzzle"], reviews=1, ratio=0.8),
             candidate("Huge Wrong Match", ["Action"], reviews=1_000_000, ratio=0.8),
@@ -174,7 +175,7 @@ class ContinuousScoringTest(unittest.TestCase):
         )
 
         self.assertEqual(default_ranked[0].title, "Exact Small Match")
-        self.assertEqual(popularity_ranked[0].title, "Huge Wrong Match")
+        self.assertEqual(popularity_ranked[0].title, "Exact Small Match")
         self.assertEqual(POSITIVE_COMPONENT_WEIGHTS["tag_coverage"], 35.0)
         self.assertEqual(POSITIVE_COMPONENT_WEIGHTS["popularity"], 15.0)
 
@@ -203,7 +204,7 @@ class ContinuousScoringTest(unittest.TestCase):
             )
         )
 
-    def test_unknown_hard_constraints_deduct_at_most_fifteen_and_violations_filter(self) -> None:
+    def test_unknown_hard_constraints_are_filtered_by_direct_evidence_gate(self) -> None:
         ranked = rank_steam_candidates(
             [
                 candidate("Confirmed", ["Online Co-op", "Puzzle"]),
@@ -213,15 +214,7 @@ class ContinuousScoringTest(unittest.TestCase):
             SteamTagProfile(include_tags=["puzzle"], required_tags=["online_coop"]),
         )
 
-        self.assertEqual([game.title for game in ranked], ["Confirmed", "Unknown"])
-        unknown = ranked[1]
-        self.assertEqual(unknown.score_breakdown.unknown_constraints_penalty, 15)
-        self.assertTrue(
-            any(
-                evidence.sentiment == "uncertain" and evidence.important
-                for evidence in unknown.recommendation_evidence
-            )
-        )
+        self.assertEqual([game.title for game in ranked], ["Confirmed"])
 
     def test_ranked_model_uses_only_new_scoring_and_evidence_fields(self) -> None:
         breakdown_fields = (
@@ -243,69 +236,45 @@ class ContinuousScoringTest(unittest.TestCase):
         self.assertIn("recommendation_evidence", ranked_fields)
         self.assertIn("recommendation_reason", ranked_fields)
 
-    def test_stable_sort_uses_score_coverage_reviews_year_and_title(self) -> None:
+    def test_stable_sort_uses_tier_raw_layer_then_retrieval_rank(self) -> None:
         games = [
             RankedGame(
-                title="Lower Score",
-                score=90,
-                review_total=10_000,
-                release_date="2026",
-                score_breakdown=ScoreBreakdown(tag_coverage=1),
+                title="Tier B",
+                score=99,
+                score_breakdown=ScoreBreakdown(
+                    relevance_tier="B", layer_score=0.99, retrieval_rank=1
+                ),
             ),
             RankedGame(
-                title="Higher Score",
-                score=91,
-                review_total=1,
-                release_date="2020",
-                score_breakdown=ScoreBreakdown(tag_coverage=0),
+                title="Tier A",
+                score=10,
+                score_breakdown=ScoreBreakdown(
+                    relevance_tier="A", layer_score=0.10, retrieval_rank=1
+                ),
             ),
             RankedGame(
-                title="Higher Coverage",
+                title="Higher Layer",
                 score=90,
-                review_total=1,
-                release_date="2020",
-                score_breakdown=ScoreBreakdown(tag_coverage=0.9),
+                score_breakdown=ScoreBreakdown(
+                    relevance_tier="A", layer_score=0.90, retrieval_rank=20
+                ),
             ),
             RankedGame(
-                title="More Reviews",
+                title="Earlier Retrieval",
                 score=90,
-                review_total=100,
-                release_date="2020",
-                score_breakdown=ScoreBreakdown(tag_coverage=0.8),
-            ),
-            RankedGame(
-                title="Newer",
-                score=90,
-                review_total=10,
-                release_date="2025",
-                score_breakdown=ScoreBreakdown(tag_coverage=0.8),
-            ),
-            RankedGame(
-                title="Alpha",
-                score=90,
-                review_total=10,
-                release_date="2024",
-                score_breakdown=ScoreBreakdown(tag_coverage=0.8),
-            ),
-            RankedGame(
-                title="Zulu",
-                score=90,
-                review_total=10,
-                release_date="2024",
-                score_breakdown=ScoreBreakdown(tag_coverage=0.8),
+                score_breakdown=ScoreBreakdown(
+                    relevance_tier="A", layer_score=0.90, retrieval_rank=2
+                ),
             ),
         ]
 
         self.assertEqual(
             [game.title for game in sorted(games, key=ranked_game_sort_key)],
             [
-                "Higher Score",
-                "Lower Score",
-                "Higher Coverage",
-                "More Reviews",
-                "Newer",
-                "Alpha",
-                "Zulu",
+                "Earlier Retrieval",
+                "Higher Layer",
+                "Tier A",
+                "Tier B",
             ],
         )
 
@@ -337,14 +306,14 @@ class LanguageScoringTest(unittest.TestCase):
 
         self.assertEqual(
             [game.title for game in ranked],
-            ["Simplified", "Unknown", "Traditional Only"],
+            ["Simplified", "Traditional Only", "Unknown"],
         )
         by_title = {game.title: game for game in ranked}
         self.assertEqual(by_title["Simplified"].score_breakdown.language_adjustment, 0)
         self.assertEqual(by_title["Unknown"].score_breakdown.language_adjustment, -2)
         self.assertEqual(by_title["Traditional Only"].score_breakdown.language_adjustment, -10)
         self.assertEqual(by_title["Unknown"].score_breakdown.unknown_constraints_penalty, 0)
-        self.assertEqual(by_title["Simplified"].score_breakdown.tag_coverage, 1)
+        self.assertEqual(by_title["Simplified"].score_breakdown.tag_coverage, 0.65)
         self.assertTrue(
             any("简体中文" in item.text for item in by_title["Unknown"].recommendation_evidence)
         )
@@ -366,7 +335,7 @@ class LanguageScoringTest(unittest.TestCase):
         )[0]
 
         self.assertEqual(game.score_breakdown.language_adjustment, -5)
-        self.assertEqual(game.score_breakdown.tag_coverage, 1)
+        self.assertEqual(game.score_breakdown.tag_coverage, 0.65)
 
     def test_multiple_languages_apply_only_the_most_severe_penalty_once(self) -> None:
         game = rank_steam_candidates(

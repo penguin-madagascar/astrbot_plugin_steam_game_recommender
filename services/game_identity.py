@@ -64,15 +64,45 @@ def deduplicate_game_editions(
 
     selected: list[RankedGame] = []
     for family in families.values():
-        preferred_games = [
+        best_tier_order = min(ranked_game_precedence_key(game)[0] for game in family)
+        tier_family = [
             game
             for game in family
+            if ranked_game_precedence_key(game)[0] == best_tier_order
+        ]
+        preferred_games = [
+            game
+            for game in tier_family
             if game.appid is not None and int(game.appid) in preferred
         ]
-        standard_games = [game for game in family if not is_edition_title(game.title)]
-        pool = preferred_games or standard_games or family
-        selected.append(max(pool, key=lambda game: int(game.score)))
-    return sorted(selected, key=lambda game: -int(game.score))
+        standard_games = [
+            game for game in tier_family if not is_edition_title(game.title)
+        ]
+        pool = preferred_games or standard_games or tier_family
+        selected.append(min(pool, key=ranked_game_precedence_key))
+    return sorted(selected, key=ranked_game_precedence_key)
+
+
+def ranked_game_precedence_key(game: RankedGame) -> tuple[float | int | str, ...]:
+    tier_order = {"A": 0, "broad": 0, "B": 1, "C": 2}
+    breakdown = game.score_breakdown
+    raw_layer = float(breakdown.layer_score)
+    has_scored_layer = raw_layer != 0.0
+    if not has_scored_layer and game.score:
+        raw_layer = float(game.score) / 100.0
+    effective_layer = (
+        raw_layer + float(breakdown.budget_adjustment) / 100.0
+        if has_scored_layer
+        else raw_layer
+    )
+    retrieval_rank = int(breakdown.retrieval_rank)
+    return (
+        tier_order.get(breakdown.relevance_tier, 3),
+        -effective_layer,
+        -raw_layer,
+        retrieval_rank if retrieval_rank > 0 else 1_000_000_000,
+        game.title.casefold(),
+    )
 
 
 def normalize_game_title(title: str) -> str:

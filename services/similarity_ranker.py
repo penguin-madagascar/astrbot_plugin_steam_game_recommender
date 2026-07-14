@@ -14,14 +14,37 @@ from ..storage.models import (
     ScoreBreakdown,
     split_language_list,
 )
-from .constraint_evaluator import ConstraintAssessment, evaluate_candidate_constraints
+from .candidate_tag_evidence import (
+    CandidateTagEvidence,
+    build_candidate_tag_evidence,
+    matches_excluded_tags,
+    satisfies_required_tags,
+)
+from .constraint_evaluator import ConstraintAssessment
+from .recommendation_intent import (
+    IntentTagRole,
+    IntentTagSource,
+    QualityIntent,
+    RecommendationIntent,
+    WeightedIntentTag,
+)
+from .recommendation_scoring import (
+    RelevanceTier,
+    anchor_coverage,
+    evidence_scaled_similarity,
+    layer_score,
+    popularity,
+    quality_score,
+    relevance_tier,
+    semantic_score,
+    wilson_lower_bound,
+)
 from .tag_normalizer import (
-    candidate_canonical_tags,
     canonical_tags_from_terms,
     extract_description_terms,
+    normalize_tag,
 )
 
-MULTIPLAYER_TAGS = {"co_op", "local_coop", "online_coop", "multiplayer"}
 POSITIVE_COMPONENT_WEIGHTS = {
     "tag_coverage": 35.0,
     "positive_reference": 25.0,
@@ -117,107 +140,258 @@ def build_profile_from_preference(
 
 def rank_steam_candidates(
     candidates: list[GameCandidate],
-    profile: SteamTagProfile,
+    intent_or_profile: RecommendationIntent | SteamTagProfile,
     min_review_count: int = 50,
     min_positive_ratio: float = 0.65,
     profile_tag_weights: dict[str, float] | None = None,
     positive_component_weights: Mapping[str, Any] | None = None,
+    *,
+    positive_reference_candidates: list[GameCandidate] | None = None,
+    negative_reference_candidates: list[GameCandidate] | None = None,
+    retrieval_ranks: Mapping[int, int] | None = None,
+    language_profile: SteamTagProfile | None = None,
 ) -> list[RankedGame]:
-    del min_positive_ratio
+    del min_review_count, min_positive_ratio, positive_component_weights
+    intent, compatibility_profile = resolve_rank_intent(intent_or_profile)
+    profile = language_profile or compatibility_profile or SteamTagProfile()
+    positive_references = (
+        list(positive_reference_candidates)
+        if positive_reference_candidates is not None
+        else list(profile.positive_reference_candidates)
+    )
+    negative_references = (
+        list(negative_reference_candidates)
+        if negative_reference_candidates is not None
+        else list(profile.negative_reference_candidates)
+    )
+    reference_appids = {
+        int(reference.appid)
+        for reference in [*positive_references, *negative_references]
+        if reference.appid is not None
+    }
+    if compatibility_profile is not None:
+        reference_appids.update(compatibility_profile.reference_appids)
+        reference_appids.update(compatibility_profile.reference_appids_dislike)
+
+    required_tags = [
+        intent_tag.tag
+        for intent_tag in intent.tags
+        if intent_tag.role is IntentTagRole.REQUIRED
+    ]
+    excluded_tags = [
+        intent_tag.tag
+        for intent_tag in intent.tags
+        if intent_tag.role is IntentTagRole.EXCLUDE
+    ]
+    supporting_weights, library_tags = supporting_query_weights(
+        intent,
+        profile_tag_weights or {},
+    )
+    negative_evidence = [
+        build_candidate_tag_evidence(reference) for reference in negative_references
+    ]
     ranked: list[RankedGame] = []
-    profile_weights = profile_tag_weights or {}
-    idf = compute_tag_idf([ordered_tag_sequence(candidate) for candidate in candidates])
-    review_prior = candidate_pool_review_prior(candidates)
-    prior_strength = max(int(min_review_count), 50)
-    reference_appids = {*profile.reference_appids, *profile.reference_appids_dislike}
-    for candidate in candidates:
+    for input_rank, candidate in enumerate(candidates, start=1):
         if candidate.appid is not None and int(candidate.appid) in reference_appids:
             continue
-
-        constraints = evaluate_candidate_constraints(
-            candidate,
-            required_tags=profile.required_tags,
-            exclude_tags=profile.exclude_tags,
-        )
-        if constraints.status == "violated":
+        if candidate.coming_soon and not intent.allow_unreleased:
+            continue
+        candidate_evidence = build_candidate_tag_evidence(candidate)
+        if not satisfies_required_tags(candidate_evidence, required_tags):
+            continue
+        if matches_excluded_tags(candidate_evidence, excluded_tags):
             continue
 
-        tags = candidate_canonical_tags(candidate)
-        matched = [tag for tag in profile.include_tags if tag in tags]
-        missing = [tag for tag in profile.include_tags if tag not in matched]
-        tag_coverage = preference_coverage(
-            matched,
-            profile.include_tags,
+        anchor_value = anchor_coverage(intent, candidate_evidence)
+        tier = relevance_tier(intent, candidate_evidence)
+        supporting_value = evidence_scaled_similarity(
+            supporting_weights,
+            candidate_evidence.supporting,
         )
-        candidate_weights = candidate_tag_weights(candidate, idf)
-        positive_reference = maximum_reference_similarity(
-            candidate_weights,
-            profile.positive_reference_candidates,
-            idf,
+        negative_value = maximum_evidence_similarity(
+            candidate_evidence,
+            negative_evidence,
         )
-        negative_reference = maximum_reference_similarity(
-            candidate_weights,
-            profile.negative_reference_candidates,
-            idf,
+        semantic_value = semantic_score(
+            intent,
+            anchor_value,
+            supporting_value,
+            negative_value,
         )
-        library_profile = profile_weight_bonus(tags, profile_weights) if profile_weights else None
-        review_reputation = bayesian_review_score(
+        wilson_value = (
+            wilson_lower_bound(candidate.review_positive_ratio, candidate.review_total)
+            if candidate.review_positive_ratio is not None
+            else 0.0
+        )
+        popularity_value = popularity(candidate.review_total)
+        quality_value = quality_score(
+            candidate.review_positive_ratio,
+            candidate.review_total,
+        )
+        layer_value = layer_score(
+            semantic_value,
+            quality_value,
+            intent.quality_intent,
+        )
+        retrieval_rank = resolve_retrieval_rank(
             candidate,
-            prior=review_prior,
-            prior_strength=prior_strength,
+            input_rank,
+            retrieval_ranks,
         )
-        popularity = popularity_score(candidate.review_total)
         language_adjustment = language_preference_adjustment(candidate, profile)
-        positive_score = weighted_positive_score(
-            positive_component_weights=positive_component_weights,
-            tag_coverage=tag_coverage,
-            positive_reference=(
-                positive_reference if profile.positive_reference_candidates else None
-            ),
-            library_profile=library_profile,
-            review_reputation=review_reputation,
-            popularity=popularity,
-        )
-        negative_penalty = min(max(negative_reference, 0.0), 1.0) * 20.0
-        unknown_penalty = unknown_constraint_penalty(constraints, profile)
-        score = clamp_score(
-            positive_score - negative_penalty - unknown_penalty + language_adjustment
-        )
         breakdown = ScoreBreakdown(
-            tag_coverage=tag_coverage,
-            positive_reference=(
-                positive_reference if profile.positive_reference_candidates else None
-            ),
-            library_profile=library_profile,
-            review_reputation=review_reputation,
-            popularity=popularity,
-            positive_score=positive_score,
-            negative_reference_penalty=negative_penalty,
-            unknown_constraints_penalty=unknown_penalty,
+            relevance_tier=tier.value,
+            anchor_coverage=anchor_value,
+            supporting_similarity=supporting_value,
+            negative_reference_similarity=negative_value,
+            semantic_score=semantic_value,
+            wilson_lower_bound=wilson_value,
+            quality_score=quality_value,
+            layer_score=layer_value,
+            retrieval_rank=retrieval_rank,
+            tag_coverage=anchor_value if tier is not RelevanceTier.BROAD else supporting_value,
+            positive_reference=None,
+            library_profile=library_match_score(candidate_evidence, library_tags),
+            review_reputation=wilson_value,
+            popularity=popularity_value,
+            positive_score=layer_value * 100,
+            negative_reference_penalty=min(negative_value * 25.0, 20.0),
+            unknown_constraints_penalty=0.0,
             language_adjustment=language_adjustment,
         )
-        evidence = build_recommendation_evidence(
+        explanation = build_anchor_tier_evidence(
             candidate=candidate,
+            intent=intent,
             profile=profile,
-            matched_tags=matched,
-            missing_tags=missing,
-            constraints=constraints,
-            positive_reference=positive_reference,
-            negative_reference=negative_reference,
-            library_profile=library_profile,
-            review_reputation=review_reputation,
-            popularity=popularity,
+            candidate_evidence=candidate_evidence,
+            tier=tier,
+            negative_similarity=negative_value,
+            wilson_value=wilson_value,
+            library_tags=library_tags,
+            has_positive_references=bool(positive_references),
         )
         ranked.append(
             RankedGame.from_candidate(
                 mark_index_source(candidate),
-                score,
+                clamp_score(layer_value * 100),
                 breakdown,
-                evidence,
+                explanation,
             )
         )
 
     return sorted(ranked, key=ranked_game_sort_key)
+
+
+def resolve_rank_intent(
+    value: RecommendationIntent | SteamTagProfile,
+) -> tuple[RecommendationIntent, SteamTagProfile | None]:
+    if isinstance(value, RecommendationIntent):
+        return value, None
+    tags: list[WeightedIntentTag] = []
+    seen: set[str] = set()
+    groups = (
+        (value.required_tags, IntentTagRole.REQUIRED, 1.0),
+        (value.include_tags, IntentTagRole.ANCHOR, 1.0),
+        (value.exclude_tags, IntentTagRole.EXCLUDE, 1.0),
+    )
+    for terms, role, weight in groups:
+        for canonical in canonical_tags_from_terms(terms):
+            if canonical in seen:
+                continue
+            tags.append(
+                WeightedIntentTag(
+                    canonical,
+                    role,
+                    IntentTagSource.EXPLICIT,
+                    weight,
+                )
+            )
+            seen.add(canonical)
+    return (
+        RecommendationIntent(
+            tags=tuple(tags),
+            references=(),
+            quality_intent=QualityIntent.NORMAL,
+            allow_unreleased=False,
+        ),
+        value,
+    )
+
+
+def supporting_query_weights(
+    intent: RecommendationIntent,
+    profile_tag_weights: Mapping[str, float],
+) -> tuple[dict[str, float], set[str]]:
+    weights = {
+        intent_tag.tag: min(max(float(intent_tag.weight), 0.0), 1.0)
+        for intent_tag in intent.tags
+        if intent_tag.role is IntentTagRole.SUPPORTING and intent_tag.weight > 0.0
+    }
+    occupied = {intent_tag.tag for intent_tag in intent.tags}
+    library_tags: set[str] = set()
+    for raw_tag, raw_weight in profile_tag_weights.items():
+        canonical = normalize_tag(raw_tag)
+        if not canonical or canonical in occupied:
+            continue
+        try:
+            profile_weight = float(raw_weight)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(profile_weight) or profile_weight <= 0.0:
+            continue
+        weights[canonical] = 0.25 * min(profile_weight, 1.0)
+        library_tags.add(canonical)
+    return weights, library_tags
+
+
+def library_match_score(
+    evidence: CandidateTagEvidence,
+    library_tags: set[str],
+) -> float | None:
+    if not library_tags:
+        return None
+    return max((evidence.supporting.get(tag, 0.0) for tag in library_tags), default=0.0)
+
+
+def maximum_evidence_similarity(
+    candidate: CandidateTagEvidence,
+    references: list[CandidateTagEvidence],
+) -> float:
+    return max(
+        (
+            evidence_vector_cosine(candidate.supporting, reference.supporting)
+            for reference in references
+        ),
+        default=0.0,
+    )
+
+
+def evidence_vector_cosine(
+    left: Mapping[str, float],
+    right: Mapping[str, float],
+) -> float:
+    if not left or not right:
+        return 0.0
+    dot = sum(float(value) * float(right.get(tag, 0.0)) for tag, value in left.items())
+    left_norm = math.sqrt(sum(float(value) ** 2 for value in left.values()))
+    right_norm = math.sqrt(sum(float(value) ** 2 for value in right.values()))
+    if left_norm <= 0.0 or right_norm <= 0.0:
+        return 0.0
+    return min(max(dot / (left_norm * right_norm), 0.0), 1.0)
+
+
+def resolve_retrieval_rank(
+    candidate: GameCandidate,
+    input_rank: int,
+    retrieval_ranks: Mapping[int, int] | None,
+) -> int:
+    if candidate.appid is None or not retrieval_ranks:
+        return input_rank
+    try:
+        rank = int(retrieval_ranks.get(int(candidate.appid), input_rank))
+    except (TypeError, ValueError):
+        return input_rank
+    return rank if rank > 0 else input_rank
 
 
 def preference_coverage(
@@ -300,6 +474,132 @@ def unknown_constraint_penalty(
 
 def clamp_score(value: float) -> int:
     return min(max(round(float(value)), 0), 100)
+
+
+def build_anchor_tier_evidence(
+    candidate: GameCandidate,
+    intent: RecommendationIntent,
+    profile: SteamTagProfile,
+    candidate_evidence: CandidateTagEvidence,
+    tier: RelevanceTier,
+    negative_similarity: float,
+    wilson_value: float,
+    library_tags: set[str],
+    has_positive_references: bool,
+) -> list[RecommendationEvidence]:
+    evidence: list[RecommendationEvidence] = []
+    anchors = [
+        intent_tag.tag
+        for intent_tag in intent.tags
+        if intent_tag.role is IntentTagRole.ANCHOR
+    ]
+    matched_anchors = [
+        tag for tag in anchors if candidate_evidence.direct.get(tag, 0.0) > 0.0
+    ]
+    if matched_anchors:
+        evidence.append(
+            evidence_item(
+                "core_match",
+                "core",
+                "positive",
+                f"命中核心标签：{'、'.join(matched_anchors[:5])}",
+            )
+        )
+    if tier in {RelevanceTier.B, RelevanceTier.C}:
+        missing = [
+            tag for tag in anchors if candidate_evidence.direct.get(tag, 0.0) < 0.60
+        ]
+        evidence.append(
+            evidence_item(
+                "core_missing",
+                "core",
+                "uncertain",
+                f"宽松匹配：缺失或证据不足的核心特征为{'、'.join((missing or anchors)[:5])}",
+                important=True,
+            )
+        )
+
+    supporting = [
+        intent_tag.tag
+        for intent_tag in intent.tags
+        if intent_tag.role is IntentTagRole.SUPPORTING
+        and candidate_evidence.supporting.get(intent_tag.tag, 0.0) > 0.0
+    ]
+    if supporting:
+        evidence.append(
+            evidence_item(
+                "supporting_match",
+                "supporting",
+                "positive",
+                f"命中辅助标签：{'、'.join(supporting[:5])}",
+            )
+        )
+    matched_library = [
+        tag for tag in library_tags if candidate_evidence.supporting.get(tag, 0.0) > 0.0
+    ]
+    if matched_library:
+        evidence.append(
+            evidence_item(
+                "library_profile",
+                "library",
+                "positive",
+                f"命中游戏库辅助偏好：{'、'.join(sorted(matched_library)[:5])}",
+            )
+        )
+    if has_positive_references:
+        evidence.append(
+            evidence_item(
+                "reference_expansion",
+                "reference",
+                "positive",
+                "已从解析成功的参考游戏提取核心与辅助标签",
+            )
+        )
+    if negative_similarity > 0.0:
+        evidence.append(
+            evidence_item(
+                "negative_reference",
+                "reference",
+                "negative",
+                f"与负向参考的玩法标签相似度为 {negative_similarity:.0%}",
+                important=negative_similarity >= 0.25,
+            )
+        )
+
+    if candidate.review_total and candidate.review_positive_ratio is not None:
+        evidence.append(
+            evidence_item(
+                "review_confidence",
+                "reviews",
+                "positive" if wilson_value >= 0.70 else "uncertain",
+                (
+                    f"Steam 好评率 {candidate.review_positive_ratio:.0%}，"
+                    f"共 {candidate.review_total} 条评测；"
+                    f"Wilson 置信下界 {wilson_value:.0%}"
+                ),
+            )
+        )
+    else:
+        evidence.append(
+            evidence_item(
+                "review_unknown",
+                "reviews",
+                "uncertain",
+                "Steam 评测缺失或为零，口碑置信度不足",
+            )
+        )
+    if intent.quality_intent is QualityIntent.MAINSTREAM:
+        evidence.append(
+            evidence_item(
+                "mainstream_intent",
+                "quality",
+                "positive",
+                "按高知名度/大作倾向提高成熟口碑在层内的权重",
+            )
+        )
+
+    append_language_evidence(evidence, candidate, profile)
+    return dedupe_evidence(evidence)
 
 
 def build_recommendation_evidence(
@@ -484,9 +784,28 @@ def language_label(language: str) -> str:
 
 
 def ranked_game_sort_key(game: RankedGame) -> tuple[Any, ...]:
+    tier_order = {
+        RelevanceTier.A.value: 0,
+        RelevanceTier.BROAD.value: 0,
+        RelevanceTier.B.value: 1,
+        RelevanceTier.C.value: 2,
+    }
+    breakdown = game.score_breakdown
+    raw_layer = float(breakdown.layer_score)
+    has_scored_layer = raw_layer != 0.0
+    if not has_scored_layer and game.score:
+        raw_layer = float(game.score) / 100.0
+    effective_layer = (
+        raw_layer + float(breakdown.budget_adjustment) / 100.0
+        if has_scored_layer
+        else raw_layer
+    )
+    retrieval_rank = int(breakdown.retrieval_rank)
     return (
-        -int(game.score),
-        -float(game.score_breakdown.tag_coverage),
+        tier_order.get(breakdown.relevance_tier, 3),
+        -effective_layer,
+        -raw_layer,
+        retrieval_rank if retrieval_rank > 0 else 1_000_000_000,
         -int(game.review_total or 0),
         -release_year(game.release_date or game.released),
         game.title.casefold(),

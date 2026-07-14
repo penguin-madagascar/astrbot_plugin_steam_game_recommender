@@ -113,7 +113,7 @@ class UserProfileSteamIndexTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_recommend_uses_service_positive_component_weights(self) -> None:
+    async def test_legacy_component_weights_cannot_override_anchor_tiers(self) -> None:
         service = SteamGameIndexService(
             steam_client=NoLiveSearchSteamClient(),
             cache=MemoryCache(
@@ -136,7 +136,7 @@ class UserProfileSteamIndexTest(unittest.IsolatedAsyncioTestCase):
             limit=2,
         )
 
-        self.assertEqual(ranked[0].title, "Huge Wrong Match")
+        self.assertEqual(ranked[0].title, "Exact Small Match")
         self.assertEqual(service.positive_component_weights["popularity"], 100.0)
 
 

@@ -100,6 +100,27 @@ def build_recommendation_intent(preference: GamePreference) -> RecommendationInt
             if current is None or _tag_priority(candidate) > _tag_priority(current):
                 tags_by_canonical[tag] = candidate
 
+    derived_groups: list[list[str]] = []
+    if preference.players is not None and preference.players >= 2:
+        derived_groups.append(["co_op", "multiplayer"])
+    if preference.difficulty and any(
+        word in preference.difficulty for word in ("easy", "简单", "轻松", "休闲")
+    ):
+        derived_groups.append(["casual", "relaxing"])
+    if preference.mood:
+        derived_groups.append([preference.mood])
+    for values in derived_groups:
+        for tag in canonical_tags_from_terms(values):
+            candidate = WeightedIntentTag(
+                tag,
+                IntentTagRole.SUPPORTING,
+                IntentTagSource.DERIVED,
+                0.35,
+            )
+            current = tags_by_canonical.get(tag)
+            if current is None or _tag_priority(candidate) > _tag_priority(current):
+                tags_by_canonical[tag] = candidate
+
     positive_references = _group_positive_references(
         preference.reference_games_like,
         preference.reference_search_terms,
