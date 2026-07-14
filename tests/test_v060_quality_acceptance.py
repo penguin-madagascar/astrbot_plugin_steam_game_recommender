@@ -2,323 +2,219 @@ from __future__ import annotations
 
 # ruff: noqa: E402, I001
 
+import os
 import unittest
+from collections import defaultdict
 from statistics import fmean
+
+import httpx
 
 try:
     _astrbot_stubs = __import__("tests.test_prepare_recommendation")
 except ModuleNotFoundError:
     _astrbot_stubs = __import__("test_prepare_recommendation")
 
-from astrbot_plugin_steam_game_recommender.services.played_filter import (
-    filter_games_by_library_mode,
-)
-from astrbot_plugin_steam_game_recommender.services.candidate_tag_evidence import (
-    build_candidate_tag_evidence,
-    matches_excluded_tags,
-    satisfies_required_tags,
-)
-from astrbot_plugin_steam_game_recommender.services.preference_parser import keyword_fallback
+from astrbot_plugin_steam_game_recommender.clients.steam import SteamClient
 from astrbot_plugin_steam_game_recommender.services.recommendation_evaluation import (
-    constraint_violation_rate,
     fill_rate,
+    hit_at_k,
     ndcg_at_k,
+    pairwise_accuracy,
     recall_at_k,
-)
-from astrbot_plugin_steam_game_recommender.services.similarity_ranker import (
-    build_profile_from_preference,
-    ranked_game_sort_key,
-    rank_steam_candidates,
-)
-from astrbot_plugin_steam_game_recommender.services.recommendation_intent import (
-    IntentTagRole,
-    build_recommendation_intent,
-    expand_intent_with_reference_tags,
-)
-from astrbot_plugin_steam_game_recommender.services.steam_price_bridge import (
-    attach_missing_price_warning,
-    attach_price_summary,
 )
 from astrbot_plugin_steam_game_recommender.services.tag_normalizer import (
     register_steam_tag_aliases,
-)
-from astrbot_plugin_steam_game_recommender.storage.models import (
-    GameCandidate,
-    GamePreference,
-    GamePriceSummary,
-    SteamOwnedGame,
+    steam_tag_id_for,
 )
 
 try:
-    from tests.recommendation_scenario_loader import load_recommendation_quality_fixture
+    from tests.e2e_recommendation_harness import (
+        MemoryIndexCache,
+        load_e2e_fixture,
+        run_e2e_scenario,
+    )
 except ModuleNotFoundError:
-    from recommendation_scenario_loader import load_recommendation_quality_fixture
+    from e2e_recommendation_harness import (
+        MemoryIndexCache,
+        load_e2e_fixture,
+        run_e2e_scenario,
+    )
 
-REFERENCE_TAGS = {
-    "reference-stardew-positive": (
-        ["farming", "life_sim", "relaxing", "crafting"],
-        [],
-    ),
-    "reference-dark-souls-negative-tag": (
-        ["dark_fantasy", "soulslike", "action", "story_rich"],
-        [],
-    ),
-    "reference-slay-spire-negative": (
-        [],
-        ["deckbuilding", "card_battler", "roguelike"],
-    ),
-    "reference-positive-and-negative": (
-        ["co_op", "puzzle", "story_rich"],
-        ["co_op", "cooking", "time_management"],
-    ),
-    "retry-like-second": (
-        ["co_op", "puzzle", "story_rich"],
-        [],
-    ),
-    "retry-dislike-first": (
-        [],
-        ["roguelike", "action"],
-    ),
+
+QUALITY_SLICES = {
+    "souls_like",
+    "extraction_shooter",
+    "metroidvania",
+    "deckbuilding",
+    "colony_sim",
+    "mainstream",
 }
 
 
-class V060QualityAcceptanceTest(unittest.TestCase):
+class V060EndToEndQualityAcceptanceTest(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.fixture = load_recommendation_quality_fixture()
-        all_tags = {
-            tag
-            for scenario in cls.fixture["scenarios"]
-            for candidate in scenario["candidates"]
-            for tag in candidate["tags"]
+        cls.fixture = load_e2e_fixture()
+        cls.scenarios = {
+            scenario["id"]: scenario for scenario in cls.fixture["scenarios"]
         }
-        register_steam_tag_aliases(
-            [{"tagid": index, "name": tag} for index, tag in enumerate(sorted(all_tags), 1)]
-        )
 
-    def test_current_pipeline_meets_offline_quality_gates(self) -> None:
-        current = {
-            scenario["id"]: evaluate_current_scenario(scenario)
+    async def test_real_pipeline_meets_retrieval_ranking_and_safety_gates(self) -> None:
+        evaluated = [
+            await run_e2e_scenario(self.fixture, scenario)
             for scenario in self.fixture["scenarios"]
-        }
-        legacy = {
-            scenario["id"]: evaluate_legacy_scenario(scenario)
-            for scenario in self.fixture["scenarios"]
-        }
-        current_ndcg = fmean(result["ndcg_at_5"] for result in current.values())
-        legacy_ndcg = fmean(result["ndcg_at_5"] for result in legacy.values())
-        current_recall = fmean(result["recall_at_20"] for result in current.values())
-
-        self.assertGreaterEqual(current_recall, 0.95)
-        self.assertGreaterEqual(current_ndcg - legacy_ndcg, 0.05)
-        self.assertTrue(
-            all(result["constraint_violation_rate"] == 0 for result in current.values())
-        )
-        for scenario in self.fixture["scenarios"]:
-            if qualified_candidate_count(scenario) >= scenario["target_count"]:
-                self.assertEqual(current[scenario["id"]]["fill_rate"], 1.0)
-
-        categories = {scenario["category"] for scenario in self.fixture["scenarios"]}
-        for category in categories:
-            scenario_ids = [
-                scenario["id"]
-                for scenario in self.fixture["scenarios"]
-                if scenario["category"] == category
-            ]
-            current_category = fmean(current[item]["ndcg_at_5"] for item in scenario_ids)
-            legacy_category = fmean(legacy[item]["ndcg_at_5"] for item in scenario_ids)
-            self.assertGreaterEqual(
-                current_category,
-                legacy_category - 0.02,
-                msg=f"quality regression in category {category}",
-            )
-
-
-def evaluate_current_scenario(scenario: dict) -> dict[str, float]:
-    preference = adjusted_preference(scenario)
-    candidates = [
-        GameCandidate(
-            appid=index,
-            title=item["title"],
-            platforms=["PC"],
-            ordered_tags=item["tags"],
-            stores=["Steam"],
-            review_total=500,
-            review_positive_ratio=0.8,
-            supported_languages=(
-                ["schinese"]
-                if "chinese" in item["tags"]
-                else ["english"]
-                if "english_only" in item["tags"]
-                else []
-            ),
-            language_data_available=bool({"chinese", "english_only"}.intersection(item["tags"])),
-            internal_source_markers=["steam_index"],
-        )
-        for index, item in enumerate(scenario["candidates"], 1)
-    ]
-    positive_tags, negative_tags = REFERENCE_TAGS.get(scenario["id"], ([], []))
-    positive_references = reference_candidates(positive_tags, "Positive Seed")
-    negative_references = reference_candidates(negative_tags, "Negative Seed")
-    intent = expand_intent_with_reference_tags(
-        build_recommendation_intent(preference),
-        positive_references,
-    )
-    ranked = rank_steam_candidates(
-        candidates,
-        intent,
-        positive_reference_candidates=positive_references,
-        negative_reference_candidates=negative_references,
-        language_profile=build_profile_from_preference(preference),
-    )
-    ranked = apply_scenario_filters(ranked, scenario, preference)
-    id_by_title = {item["title"]: item["id"] for item in scenario["candidates"]}
-    relevance = hard_constraint_eligible_relevance(
-        scenario,
-        preference,
-        candidates,
-    )
-    candidate_ranking = [id_by_title[game.title] for game in ranked]
-    selected = ranked[: scenario["target_count"]]
-    ranking = [id_by_title[game.title] for game in selected]
-    ndcg = ndcg_at_k(ranking, relevance, k=scenario["target_count"])
-    return {
-        "ndcg_at_target": ndcg,
-        "ndcg_at_5": ndcg_at_k(ranking, relevance, k=5),
-        "recall_at_20": recall_at_k(candidate_ranking, relevance, k=20),
-        "constraint_violation_rate": constraint_violation_rate(
-            ranking,
-            known_hard_violation_ids(scenario),
-        ),
-        "fill_rate": fill_rate(ranking, target_count=scenario["target_count"]),
-    }
-
-
-def hard_constraint_eligible_relevance(
-    scenario: dict,
-    preference: GamePreference,
-    candidates: list[GameCandidate],
-) -> dict[str, int]:
-    intent = build_recommendation_intent(preference)
-    required = [tag.tag for tag in intent.tags if tag.role is IntentTagRole.REQUIRED]
-    excluded = [tag.tag for tag in intent.tags if tag.role is IntentTagRole.EXCLUDE]
-    relevance: dict[str, int] = {}
-    for item, candidate in zip(scenario["candidates"], candidates):
-        evidence = build_candidate_tag_evidence(candidate)
-        eligible = satisfies_required_tags(evidence, required) and not matches_excluded_tags(
-            evidence,
-            excluded,
-        )
-        relevance[item["id"]] = item["relevance"] if eligible else 0
-    return relevance
-
-
-def adjusted_preference(scenario: dict) -> GamePreference:
-    preference = keyword_fallback(scenario["query"])
-    scenario_id = scenario["id"]
-    if scenario_id == "similar-candidates-score-order":
-        preference.genres_like = ["co-op", "puzzle"]
-    if scenario_id == "retry-too-hard":
-        preference.genres_like = ["casual", "relaxing", "adventure"]
-        preference.genres_dislike = ["difficult", "soulslike"]
-        preference.difficulty = "easy"
-    return preference
-
-
-def reference_candidates(tags: list[str], title: str) -> list[GameCandidate]:
-    if not tags:
-        return []
-    return [
-        GameCandidate(
-            appid=9_000 + len(tags),
-            title=title,
-            platforms=["PC"],
-            ordered_tags=tags,
-            stores=["Steam"],
-        )
-    ]
-
-
-def apply_scenario_filters(
-    ranked: list,
-    scenario: dict,
-    preference: GamePreference,
-) -> list:
-    if preference.library_filter_mode:
-        owned = [
-            SteamOwnedGame(appid=index, playtime_forever=60)
-            for index, item in enumerate(scenario["candidates"], 1)
-            if item.get("owned")
+            if scenario["slice"] in QUALITY_SLICES
         ]
-        ranked, _removed = filter_games_by_library_mode(
-            ranked,
-            owned,
-            preference.library_filter_mode,
-        )
-    if preference.budget is not None:
-        price_by_title = {item["title"]: item.get("price_cny") for item in scenario["candidates"]}
-        priced = []
-        for game in ranked:
-            price = price_by_title[game.title]
-            if price is None:
-                priced.append(attach_missing_price_warning(game))
-            else:
-                priced.append(
-                    attach_price_summary(
-                        game,
-                        GamePriceSummary(
-                            region=preference.region or "CN",
-                            currency=preference.budget_currency or "CNY",
-                            current_price=f"¥{price:g}",
-                            current_amount=float(price),
-                            historic_low=f"¥{price:g}",
-                            historic_low_amount=float(price),
-                        ),
-                        preference,
-                    )
+        recalls: list[float] = []
+        hits: list[float] = []
+        pairwise: list[float] = []
+        ndcg_deltas: list[float] = []
+        slice_recalls: dict[str, list[float]] = defaultdict(list)
+        slice_deltas: dict[str, list[float]] = defaultdict(list)
+        reference_total = 0
+        reference_correct = 0
+        reference_errors = 0
+
+        for run in evaluated:
+            scenario = run.scenario
+            ranking = [str(appid) for appid in run.ranking]
+            relevance = {
+                str(appid): int(value)
+                for appid, value in scenario["relevance"].items()
+            }
+            relevant_ids = {appid for appid, value in relevance.items() if value > 0}
+            strong_ids = {str(appid) for appid in scenario["strong_appids"]}
+            baseline = [str(appid) for appid in scenario["baseline_ranking"]]
+            pairs = [
+                (str(core_appid), str(broad_appid))
+                for core_appid, broad_appid in scenario["pairwise"]
+            ]
+            recall = recall_at_k(ranking, relevance, k=50)
+            current_ndcg = ndcg_at_k(ranking, relevance, k=5)
+            baseline_ndcg = ndcg_at_k(baseline, relevance, k=5)
+            delta = current_ndcg - baseline_ndcg
+
+            recalls.append(recall)
+            hits.append(hit_at_k(ranking, strong_ids, k=20))
+            if pairs:
+                pairwise.append(pairwise_accuracy(ranking, pairs))
+            ndcg_deltas.append(delta)
+            slice_recalls[scenario["slice"]].append(recall)
+            slice_deltas[scenario["slice"]].append(delta)
+
+            self.assertEqual(len(run.ranking), len(set(run.ranking)), scenario["id"])
+            self.assertTrue(
+                all(game.app_type == "game" for game in run.ranked),
+                scenario["id"],
+            )
+            self.assertTrue(
+                all(not game.coming_soon for game in run.ranked),
+                scenario["id"],
+            )
+            selected = ranking[: int(scenario["target_count"])]
+            if len(relevant_ids) >= int(scenario["target_count"]):
+                self.assertEqual(
+                    fill_rate(selected, int(scenario["target_count"])),
+                    1.0,
+                    scenario["id"],
                 )
-        ranked = sorted(priced, key=ranked_game_sort_key)
-    return ranked
+            for appid in run.ranking:
+                self.assertIn(appid, run.client.detail_calls, scenario["id"])
+                self.assertIn(appid, run.client.store_tag_calls, scenario["id"])
+                self.assertIn(appid, run.client.review_calls, scenario["id"])
 
+            expected_reference = scenario.get("expected_reference_appid")
+            if expected_reference is not None:
+                reference_total += 1
+                resolved = [
+                    item.appid
+                    for item in run.preference.resolved_reference_games
+                    if item.appid is not None
+                ]
+                if resolved and int(resolved[0]) == int(expected_reference):
+                    reference_correct += 1
+                elif resolved:
+                    reference_errors += 1
 
-def qualified_candidate_count(scenario: dict) -> int:
-    candidates = [
-        item
-        for item in scenario["candidates"]
-        if item["id"] not in known_hard_violation_ids(scenario)
-    ]
-    if scenario["id"] == "library-exclude-owned":
-        candidates = [item for item in candidates if not item.get("owned")]
-    elif scenario["id"] == "library-only-owned":
-        candidates = [item for item in candidates if item.get("owned")]
-    return len(candidates)
+        self.assertGreaterEqual(reference_correct / reference_total, 0.95)
+        self.assertLessEqual(reference_errors / reference_total, 0.01)
+        self.assertGreaterEqual(fmean(recalls), 0.90)
+        self.assertTrue(
+            all(fmean(values) >= 0.85 for values in slice_recalls.values())
+        )
+        self.assertGreaterEqual(fmean(hits), 0.95)
+        self.assertGreaterEqual(fmean(pairwise), 0.95)
+        self.assertGreaterEqual(fmean(ndcg_deltas), -0.01)
+        self.assertTrue(
+            all(fmean(values) >= -0.02 for values in slice_deltas.values())
+        )
 
+    async def test_alias_group_uses_any_reliable_alias_and_preserves_sequel_number(self) -> None:
+        run = await run_e2e_scenario(
+            self.fixture,
+            self.scenarios["souls_cn_original"],
+        )
 
-def known_hard_violation_ids(scenario: dict) -> list[str]:
-    if scenario["id"] in {
-        "reference-slay-spire-negative",
-        "reference-positive-and-negative",
-        "required-chinese",
-        "retry-dislike-first",
-    }:
-        return []
-    return scenario["violating_ids"]
+        self.assertEqual(run.preference.resolved_reference_games[0].appid, 100)
+        self.assertNotEqual(run.preference.resolved_reference_games[0].appid, 101)
+        searched = {query.casefold() for query, _language in run.client.reference_calls}
+        self.assertIn("黑暗之魂".casefold(), searched)
+        self.assertIn("dark souls", searched)
+        self.assertEqual(
+            set(run.client.storefront_tag_calls),
+            {steam_tag_id_for("soulslike"), steam_tag_id_for("dark_fantasy")},
+        )
 
+    async def test_all_aliases_fail_once_without_false_resolution(self) -> None:
+        run = await run_e2e_scenario(
+            self.fixture,
+            self.scenarios["all_aliases_fail"],
+        )
 
-def evaluate_legacy_scenario(scenario: dict) -> dict[str, float]:
-    relevance = {item["id"]: item["relevance"] for item in scenario["candidates"]}
-    return {
-        "ndcg_at_target": ndcg_at_k(
-            scenario["legacy_ranking"],
-            relevance,
-            k=scenario["target_count"],
-        ),
-        "ndcg_at_5": ndcg_at_k(
-            scenario["legacy_ranking"],
-            relevance,
-            k=5,
-        ),
-    }
+        self.assertEqual(run.ranking, [])
+        self.assertTrue(run.preference.resolved_reference_games)
+        self.assertIsNone(run.preference.resolved_reference_games[0].appid)
+        warnings = [
+            warning
+            for warning in run.preference.parse_warnings
+            if "未能可靠解析" in warning
+        ]
+        self.assertEqual(len(warnings), 1)
+
+    async def test_review_confidence_matrix_never_imputes_missing_quality(self) -> None:
+        run = await run_e2e_scenario(
+            self.fixture,
+            self.scenarios["review_confidence_matrix"],
+        )
+
+        positions = {appid: index for index, appid in enumerate(run.ranking)}
+        self.assertLess(positions[706], positions[705])
+        self.assertLess(positions[705], positions[704])
+        self.assertLess(positions[704], positions[703])
+        self.assertLess(positions[703], positions[702])
+        by_appid = {int(game.appid): game for game in run.ranked if game.appid is not None}
+        self.assertEqual(by_appid[701].score_breakdown.quality_score, 0.0)
+        self.assertEqual(by_appid[702].score_breakdown.quality_score, 0.0)
+        self.assertEqual(
+            by_appid[701].score_breakdown.quality_score,
+            by_appid[702].score_breakdown.quality_score,
+        )
+
+    @unittest.skipUnless(
+        os.getenv("STEAM_STOREFRONT_SMOKE") == "1",
+        "set STEAM_STOREFRONT_SMOKE=1 for the periodic live Steam contract check",
+    )
+    async def test_optional_live_storefront_contract_smoke(self) -> None:
+        async with httpx.AsyncClient(timeout=10.0) as http_client:
+            client = SteamClient(http_client, MemoryIndexCache(), default_country="CN")
+            tags = await client.get_popular_tags()
+            register_steam_tag_aliases(tags)
+            tag_id = steam_tag_id_for("soulslike")
+            self.assertIsNotNone(tag_id)
+            page = await client.search_storefront_tag(int(tag_id), page_size=5)
+
+        self.assertGreaterEqual(page.total_count, len(page.hits))
+        self.assertTrue(all(hit.appid > 0 and hit.title for hit in page.hits))
 
 
 if __name__ == "__main__":

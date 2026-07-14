@@ -5,7 +5,9 @@ import unittest
 from astrbot_plugin_steam_game_recommender.services.recommendation_evaluation import (
     constraint_violation_rate,
     fill_rate,
+    hit_at_k,
     ndcg_at_k,
+    pairwise_accuracy,
     recall_at_k,
 )
 
@@ -69,6 +71,24 @@ class RecommendationEvaluationTest(unittest.TestCase):
 
     def test_fill_rate_ignores_duplicate_ids(self) -> None:
         self.assertAlmostEqual(fill_rate(["a", "a", "b"], target_count=3), 2 / 3)
+
+    def test_hit_at_k_requires_a_relevant_result_within_cutoff(self) -> None:
+        ranking = ["broad", "core"]
+
+        self.assertEqual(hit_at_k(ranking, {"core"}, k=1), 0.0)
+        self.assertEqual(hit_at_k(ranking, {"core"}, k=2), 1.0)
+        self.assertEqual(hit_at_k(ranking, set(), k=2), 0.0)
+
+    def test_pairwise_accuracy_counts_missing_preferred_as_failure(self) -> None:
+        ranking = ["core-a", "broad-a", "core-b"]
+        pairs = [
+            ("core-a", "broad-a"),
+            ("core-b", "broad-b"),
+            ("missing-core", "broad-a"),
+        ]
+
+        self.assertAlmostEqual(pairwise_accuracy(ranking, pairs), 1 / 3)
+        self.assertEqual(pairwise_accuracy(ranking, []), 0.0)
 
 
 if __name__ == "__main__":

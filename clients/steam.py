@@ -458,7 +458,11 @@ def parse_popular_tags(payload: Any) -> list[dict[str, Any]]:
             raise SteamApiError("Steam 热门标签包含无效 tagid。")
         if not isinstance(name, str) or not name.strip():
             raise SteamApiError("Steam 热门标签包含无效名称。")
-        tags.append({"tagid": tagid, "name": name.strip()})
+        tag = {"tagid": tagid, "name": name.strip()}
+        raw_count = item.get("total_count", item.get("count"))
+        if raw_count is not None:
+            tag["count"] = storefront_non_negative_int(raw_count, "count")
+        tags.append(tag)
     return tags
 
 

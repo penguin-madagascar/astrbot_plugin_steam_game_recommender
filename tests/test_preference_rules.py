@@ -307,13 +307,22 @@ class PreferenceRulesTest(unittest.TestCase):
             ["Slay the Spire"],
         )
 
-    def test_dark_souls_like_request_extracts_searchable_soulslike_profile(self) -> None:
+    def test_reference_title_does_not_hardcode_gameplay_tags(self) -> None:
         preference = infer_preference_from_text("类似黑暗之魂的游戏")
 
         self.assertEqual(preference.reference_games_like, ["黑暗之魂"])
-        self.assertIn("soulslike", preference.extra_tags)
-        self.assertIn("action", preference.extra_tags)
-        self.assertIn("rpg", preference.extra_tags)
+        self.assertNotIn(
+            "soulslike",
+            [*preference.required_tags, *preference.genres_like, *preference.extra_tags],
+        )
+
+        unrelated = infer_preference_from_text("类似Souls Harbor的游戏")
+
+        self.assertEqual(unrelated.reference_games_like, ["Souls Harbor"])
+        self.assertNotIn(
+            "soulslike",
+            [*unrelated.required_tags, *unrelated.genres_like, *unrelated.extra_tags],
+        )
 
     def test_singleplayer_aaa_request_sets_intents_without_fabricated_genres(self) -> None:
         preference = infer_preference_from_text("推荐的单机3a大作")

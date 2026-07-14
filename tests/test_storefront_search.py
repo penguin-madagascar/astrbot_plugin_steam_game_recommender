@@ -72,11 +72,37 @@ class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
 
         tags = await client.get_popular_tags()
 
-        expected = [{"tagid": 29482, "name": "Souls-like"}]
+        expected = [{"tagid": 29482, "name": "Souls-like", "count": 123}]
         self.assertEqual(tags, expected)
         self.assertEqual(http_client.call_count, 1)
         self.assertEqual(cache.payloads[f"{base_key}:fresh"], expected)
         self.assertEqual(cache.payloads[f"{base_key}:stale"], expected)
+
+    async def test_popular_tag_counts_seed_first_request_distinctiveness(self) -> None:
+        payload = [
+            {"tagid": 91_001, "name": "Broad Fixture Tag", "total_count": 50_000},
+            {"tagid": 91_002, "name": "Narrow Fixture Tag", "count": 120},
+        ]
+        client = SteamClient(FakeHttpClient(payload), MemoryCache())
+
+        tags = await client.get_popular_tags()
+        register_steam_tag_aliases(tags)
+
+        self.assertEqual(steam_tag_result_count_for("broad_fixture_tag"), 50_000)
+        self.assertEqual(steam_tag_result_count_for("narrow_fixture_tag"), 120)
+
+    async def test_popular_tag_contract_rejects_invalid_optional_count(self) -> None:
+        for value in (True, -1, 1.5, float("inf"), "1.5"):
+            with self.subTest(value=value):
+                client = SteamClient(
+                    FakeHttpClient(
+                        [{"tagid": 91_003, "name": "Fixture Tag", "count": value}]
+                    ),
+                    MemoryCache(),
+                )
+
+                with self.assertRaises(SteamApiError):
+                    await client.get_popular_tags()
 
     async def test_popular_tags_network_failure_uses_seven_day_stale_cache(self) -> None:
         cache = MemoryCache()

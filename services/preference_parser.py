@@ -52,7 +52,7 @@ PREFERENCE_SCHEMA_HINT = """
 - genres_like 放用户明确说出的类型/玩法标签。
 - extra_tags 放你从自然语言总结出的补充标签，例如“轻松”“本地合作”“剧情合作”“短流程”。
 - reference_games_like 只放用户提到的相似游戏名，不要把相似游戏扩写成推荐结果。
-- reference_search_terms 放参考游戏的 Steam 搜索友好标题候选，例如“黑暗之魂”对应 “Dark Souls”。
+- reference_search_terms 放参考游戏的 Steam 搜索友好标题候选，包括英文和本地化标题。
 - genres_dislike 只放用户明确排除的标签，例如恐怖、魂类、肉鸽、pvp；
   明确说不要单机、不要单人或排除 singleplayer 时，才把 singleplayer 放入此字段。
 - 同一标签出现冲突时，以用户文本中最后一次明确表达的喜欢/排除极性为准。

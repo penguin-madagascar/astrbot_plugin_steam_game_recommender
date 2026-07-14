@@ -13,7 +13,6 @@ SOULSLIKE_TERMS = (
     "类魂",
     "soulslike",
     "souls-like",
-    "dark souls",
 )
 
 TAG_INTENT_TERMS: dict[str, tuple[str, ...]] = {
@@ -43,7 +42,7 @@ TAG_INTENT_TERMS: dict[str, tuple[str, ...]] = {
     "building": ("建造", "building"),
     "racing": ("赛车", "竞速", "racing"),
     "horror": ("恐怖", "horror"),
-    "soulslike": SOULSLIKE_TERMS[:-1],
+    "soulslike": SOULSLIKE_TERMS,
     "roguelike": ("肉鸽", "roguelike", "rogue-like", "roguelite"),
     "violent": ("血腥", "violent", "gore"),
     "singleplayer": ("纯单人", "单机", "单人", "singleplayer", "single-player"),
@@ -172,8 +171,6 @@ def infer_preference_from_text(text: str) -> GamePreference:
     reference_like = extract_reference_games(text)
     reference_dislike = extract_disliked_reference_games(text)
     reference_like = remove_reference_titles(reference_like, reference_dislike)
-    if references_imply_soulslike(reference_like):
-        genres_like = merge_lists(genres_like, ["soulslike"])
     extra_tags = keyword_hits(
         lower,
         {
@@ -185,8 +182,6 @@ def infer_preference_from_text(text: str) -> GamePreference:
         },
     )
     extra_tags = remove_terms_matching_tags(extra_tags, set(negative_tags))
-    if references_imply_soulslike(reference_like):
-        extra_tags = merge_lists(extra_tags, ["soulslike"])
     extra_tags = expand_related_extra_tags(extra_tags)
     genres_like = remove_terms_matching_tags(genres_like, set(negative_tags))
     extra_tags = remove_terms_matching_tags(extra_tags, set(negative_tags))
@@ -488,10 +483,6 @@ def clause_right(text: str, position: int) -> str:
 def search_terms_from_reference_titles(titles: list[str]) -> list[str]:
     terms = [title for title in titles if re.search(r"[A-Za-z]", title)]
     return merge_lists([], terms)
-
-
-def references_imply_soulslike(titles: list[str]) -> bool:
-    return any("魂" in title or "souls" in title.lower() for title in titles)
 
 
 def has_aaa_intent(text: str) -> bool:

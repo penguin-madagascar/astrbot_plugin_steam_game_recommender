@@ -59,6 +59,38 @@ def fill_rate(ranking: Sequence[str], target_count: int) -> float:
     return min(len(unique_ranking) / target_count, 1.0)
 
 
+def hit_at_k(
+    ranking: Sequence[str],
+    relevant_ids: Collection[str],
+    k: int,
+) -> float:
+    """Return one when at least one target is present in the first ``k`` results."""
+    if k <= 0 or not relevant_ids:
+        return 0.0
+    return float(bool(set(_unique_ids(ranking)[:k]) & set(relevant_ids)))
+
+
+def pairwise_accuracy(
+    ranking: Sequence[str],
+    preferred_pairs: Sequence[tuple[str, str]],
+) -> float:
+    """Measure how often a preferred item outranks its paired comparison item."""
+    if not preferred_pairs:
+        return 0.0
+    positions = {item_id: index for index, item_id in enumerate(_unique_ids(ranking))}
+    correct = 0
+    for preferred_id, comparison_id in preferred_pairs:
+        preferred_position = positions.get(preferred_id)
+        comparison_position = positions.get(comparison_id)
+        if (
+            preferred_position is not None
+            and comparison_position is not None
+            and preferred_position < comparison_position
+        ):
+            correct += 1
+    return correct / len(preferred_pairs)
+
+
 def _unique_ids(ranking: Sequence[str]) -> list[str]:
     return list(dict.fromkeys(ranking))
 

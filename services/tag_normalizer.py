@@ -160,6 +160,9 @@ def register_steam_tag_aliases(tags: list[dict[str, Any]]) -> None:
             tag_id = item.get("tagid", item.get("id"))
             if tag_id is not None:
                 STEAM_TAG_IDS[canonical] = int(tag_id)
+            result_count = item.get("total_count", item.get("count"))
+            if type(result_count) is int and result_count >= 0:
+                STEAM_TAG_RESULT_COUNTS[canonical] = result_count
 
 
 def steam_tag_canonical_key(value: str) -> str:

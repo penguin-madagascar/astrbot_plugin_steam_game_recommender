@@ -1,0 +1,141 @@
+{
+  "tags": [
+    {"tagid": 101, "name": "Action", "count": 1000000},
+    {"tagid": 102, "name": "RPG", "count": 800000},
+    {"tagid": 103, "name": "Souls-like", "count": 12000},
+    {"tagid": 104, "name": "Dark Fantasy", "count": 50000},
+    {"tagid": 105, "name": "Difficult", "count": 200000},
+    {"tagid": 201, "name": "Extraction Shooter", "count": 4000},
+    {"tagid": 202, "name": "Tactical", "count": 100000},
+    {"tagid": 203, "name": "Military", "count": 150000},
+    {"tagid": 204, "name": "Shooter", "count": 900000},
+    {"tagid": 205, "name": "PvE", "count": 400000},
+    {"tagid": 301, "name": "Metroidvania", "count": 35000},
+    {"tagid": 302, "name": "Exploration", "count": 250000},
+    {"tagid": 303, "name": "Platformer", "count": 300000},
+    {"tagid": 304, "name": "2D", "count": 400000},
+    {"tagid": 401, "name": "Deckbuilding", "count": 20000},
+    {"tagid": 402, "name": "Card Battler", "count": 30000},
+    {"tagid": 403, "name": "Roguelike", "count": 100000},
+    {"tagid": 404, "name": "Strategy", "count": 800000},
+    {"tagid": 405, "name": "Turn-Based", "count": 350000},
+    {"tagid": 501, "name": "Colony Sim", "count": 8000},
+    {"tagid": 502, "name": "Base Building", "count": 40000},
+    {"tagid": 503, "name": "Management", "count": 300000},
+    {"tagid": 504, "name": "Simulation", "count": 900000},
+    {"tagid": 601, "name": "Singleplayer", "count": 700000},
+    {"tagid": 602, "name": "Open World", "count": 450000},
+    {"tagid": 603, "name": "Story Rich", "count": 300000}
+  ],
+  "reference_search": {
+    "dark souls": [
+      {"appid": 101, "title": "DARK SOULS II"},
+      {"appid": 100, "title": "DARK SOULS REMASTERED"}
+    ],
+    "gray zone warfare": [
+      {"appid": 200, "title": "Gray Zone Warfare"}
+    ],
+    "空洞骑士": [
+      {"appid": 300, "title": "空洞骑士"}
+    ],
+    "hollow knight": [
+      {"appid": 300, "title": "Hollow Knight"}
+    ],
+    "杀戮尖塔": [
+      {"appid": 400, "title": "杀戮尖塔"}
+    ],
+    "slay the spire": [
+      {"appid": 400, "title": "Slay the Spire"}
+    ],
+    "环世界": [
+      {"appid": 500, "title": "环世界"}
+    ],
+    "rimworld": [
+      {"appid": 500, "title": "RimWorld"}
+    ]
+  },
+  "games": [
+    {"appid": 100, "title": "DARK SOULS: REMASTERED", "ordered_tags": ["Souls-like", "Action", "RPG", "Dark Fantasy", "Difficult"], "review_total": 95000, "review_positive_ratio": 0.91},
+    {"appid": 101, "title": "DARK SOULS II", "ordered_tags": ["Souls-like", "Action", "RPG", "Dark Fantasy", "Difficult"], "review_total": 130000, "review_positive_ratio": 0.84},
+    {"appid": 110, "title": "ELDEN RING", "ordered_tags": ["Souls-like", "Dark Fantasy", "Action", "RPG", "Open World"], "review_total": 800000, "review_positive_ratio": 0.93},
+    {"appid": 111, "title": "Lies of P", "ordered_tags": ["Souls-like", "Dark Fantasy", "Action", "RPG", "Difficult"], "review_total": 80000, "review_positive_ratio": 0.92},
+    {"appid": 112, "title": "Nioh 2", "ordered_tags": ["Souls-like", "Dark Fantasy", "Action", "RPG", "Difficult"], "review_total": 75000, "review_positive_ratio": 0.88},
+    {"appid": 113, "title": "Dragon Age: Inquisition", "ordered_tags": ["Dark Fantasy", "RPG", "Action", "Story Rich"], "review_total": 180000, "review_positive_ratio": 0.86},
+    {"appid": 114, "title": "The Adventures of Elliot", "ordered_tags": ["Action", "RPG", "Adventure"], "review_total": 2500, "review_positive_ratio": 0.80},
+    {"appid": 115, "title": "Generic Action RPG", "ordered_tags": ["Action", "RPG", "Open World"], "review_total": 350000, "review_positive_ratio": 0.94},
+    {"appid": 116, "title": "Unreleased Souls Adventure", "ordered_tags": ["Souls-like", "Dark Fantasy", "Action"], "review_total": 0, "review_positive_ratio": null, "coming_soon": true},
+    {"appid": 117, "title": "Souls Soundtrack", "ordered_tags": ["Souls-like"], "review_total": 500, "review_positive_ratio": 0.95, "app_type": "dlc"},
+
+    {"appid": 200, "title": "Gray Zone Warfare", "ordered_tags": ["Extraction Shooter", "Tactical", "Military", "Shooter", "PvE"], "review_total": 70000, "review_positive_ratio": 0.69},
+    {"appid": 210, "title": "Escape from Tarkov", "ordered_tags": ["Extraction Shooter", "Tactical", "Military", "Shooter", "PvE"], "review_total": 350000, "review_positive_ratio": 0.82},
+    {"appid": 211, "title": "Arena Breakout: Infinite", "ordered_tags": ["Extraction Shooter", "Tactical", "Shooter", "Military", "PvP"], "review_total": 90000, "review_positive_ratio": 0.78},
+    {"appid": 212, "title": "Incursion Red River", "ordered_tags": ["Extraction Shooter", "Tactical", "PvE", "Shooter", "Military"], "review_total": 12000, "review_positive_ratio": 0.81},
+    {"appid": 213, "title": "Tactical Assault VR", "ordered_tags": ["Tactical", "Military", "Shooter", "PvE"], "review_total": 3550, "review_positive_ratio": 0.81},
+    {"appid": 214, "title": "Eldorado FPS", "ordered_tags": ["Shooter", "Military", "PvE", "Action"], "review_total": 28, "review_positive_ratio": 0.82},
+    {"appid": 215, "title": "Blockbuster Military Shooter", "ordered_tags": ["Tactical", "Military", "Shooter", "Action"], "review_total": 500000, "review_positive_ratio": 0.90},
+    {"appid": 216, "title": "Upcoming Extraction", "ordered_tags": ["Extraction Shooter", "Tactical", "Shooter"], "review_total": null, "review_positive_ratio": null, "coming_soon": true},
+    {"appid": 217, "title": "Extraction Cosmetic Pack", "ordered_tags": ["Extraction Shooter"], "review_total": 100, "review_positive_ratio": 0.9, "app_type": "dlc"},
+
+    {"appid": 300, "title": "Hollow Knight", "ordered_tags": ["Metroidvania", "Exploration", "Platformer", "Action", "2D"], "review_total": 400000, "review_positive_ratio": 0.97},
+    {"appid": 310, "title": "Ori and the Will of the Wisps", "ordered_tags": ["Metroidvania", "Exploration", "Platformer", "Action", "2D"], "review_total": 130000, "review_positive_ratio": 0.96},
+    {"appid": 311, "title": "Bloodstained: Ritual of the Night", "ordered_tags": ["Metroidvania", "Exploration", "Action", "RPG", "Platformer"], "review_total": 30000, "review_positive_ratio": 0.94},
+    {"appid": 312, "title": "Nine Sols", "ordered_tags": ["Metroidvania", "Exploration", "Action", "2D", "Difficult"], "review_total": 45000, "review_positive_ratio": 0.95},
+    {"appid": 313, "title": "A Hat in Time", "ordered_tags": ["Exploration", "Platformer", "Action"], "review_total": 60000, "review_positive_ratio": 0.98},
+    {"appid": 314, "title": "Popular Platform Adventure", "ordered_tags": ["Platformer", "Exploration", "Action"], "review_total": 700000, "review_positive_ratio": 0.96},
+    {"appid": 315, "title": "Ordinary Action Platformer", "ordered_tags": ["Platformer", "Action", "2D"], "review_total": 200000, "review_positive_ratio": 0.93},
+    {"appid": 316, "title": "Upcoming Metroidvania", "ordered_tags": ["Metroidvania", "Exploration"], "review_total": null, "review_positive_ratio": null, "coming_soon": true},
+    {"appid": 317, "title": "Hollow Knight Soundtrack", "ordered_tags": ["Metroidvania"], "review_total": 5000, "review_positive_ratio": 0.99, "app_type": "dlc"},
+
+    {"appid": 400, "title": "Slay the Spire", "ordered_tags": ["Deckbuilding", "Card Battler", "Roguelike", "Strategy", "Turn-Based"], "review_total": 250000, "review_positive_ratio": 0.97},
+    {"appid": 410, "title": "Monster Train", "ordered_tags": ["Deckbuilding", "Card Battler", "Roguelike", "Strategy", "Turn-Based"], "review_total": 45000, "review_positive_ratio": 0.96},
+    {"appid": 411, "title": "Wildfrost", "ordered_tags": ["Deckbuilding", "Card Battler", "Roguelike", "Strategy", "Turn-Based"], "review_total": 18000, "review_positive_ratio": 0.82},
+    {"appid": 412, "title": "Across the Obelisk", "ordered_tags": ["Deckbuilding", "Card Battler", "Roguelike", "Strategy", "Co-op"], "review_total": 22000, "review_positive_ratio": 0.86},
+    {"appid": 413, "title": "Gems of War - Puzzle RPG", "ordered_tags": ["Card Battler", "RPG", "Puzzle", "Strategy"], "review_total": 11000, "review_positive_ratio": 0.79},
+    {"appid": 414, "title": "Popular Card RPG", "ordered_tags": ["Card Battler", "RPG", "Strategy"], "review_total": 500000, "review_positive_ratio": 0.92},
+    {"appid": 415, "title": "Generic Turn Based RPG", "ordered_tags": ["Turn-Based", "RPG", "Strategy"], "review_total": 300000, "review_positive_ratio": 0.95},
+    {"appid": 416, "title": "Upcoming Deckbuilder", "ordered_tags": ["Deckbuilding", "Card Battler"], "review_total": null, "review_positive_ratio": null, "coming_soon": true},
+    {"appid": 417, "title": "Card Art Book", "ordered_tags": ["Deckbuilding"], "review_total": 200, "review_positive_ratio": 0.96, "app_type": "dlc"},
+
+    {"appid": 500, "title": "RimWorld", "ordered_tags": ["Colony Sim", "Base Building", "Management", "Simulation", "Strategy"], "review_total": 200000, "review_positive_ratio": 0.98},
+    {"appid": 510, "title": "Oxygen Not Included", "ordered_tags": ["Colony Sim", "Base Building", "Management", "Simulation", "Strategy"], "review_total": 130000, "review_positive_ratio": 0.96},
+    {"appid": 511, "title": "Going Medieval", "ordered_tags": ["Colony Sim", "Base Building", "Management", "Simulation", "Strategy"], "review_total": 18000, "review_positive_ratio": 0.90},
+    {"appid": 512, "title": "Dwarf Fortress", "ordered_tags": ["Colony Sim", "Base Building", "Management", "Simulation", "Strategy"], "review_total": 30000, "review_positive_ratio": 0.95},
+    {"appid": 513, "title": "Cities: Skylines", "ordered_tags": ["Base Building", "Management", "Simulation", "Strategy"], "review_total": 250000, "review_positive_ratio": 0.93},
+    {"appid": 514, "title": "Popular Management Sim", "ordered_tags": ["Management", "Simulation", "Strategy"], "review_total": 600000, "review_positive_ratio": 0.96},
+    {"appid": 515, "title": "Generic Base Builder", "ordered_tags": ["Base Building", "Simulation", "Strategy"], "review_total": 350000, "review_positive_ratio": 0.94},
+    {"appid": 516, "title": "Upcoming Colony Sim", "ordered_tags": ["Colony Sim", "Base Building"], "review_total": null, "review_positive_ratio": null, "coming_soon": true},
+    {"appid": 517, "title": "Colony Sim Soundtrack", "ordered_tags": ["Colony Sim"], "review_total": 300, "review_positive_ratio": 0.98, "app_type": "dlc"},
+
+    {"appid": 610, "title": "Baldur's Gate 3", "ordered_tags": ["Singleplayer", "RPG", "Story Rich", "Turn-Based"], "review_total": 900000, "review_positive_ratio": 0.96},
+    {"appid": 611, "title": "Cyberpunk 2077", "ordered_tags": ["Singleplayer", "Open World", "RPG", "Story Rich", "Action"], "review_total": 800000, "review_positive_ratio": 0.88},
+    {"appid": 612, "title": "Red Dead Redemption 2", "ordered_tags": ["Singleplayer", "Open World", "Story Rich", "Action"], "review_total": 650000, "review_positive_ratio": 0.91},
+    {"appid": 613, "title": "Hello Kitty Island Adventure", "ordered_tags": ["Singleplayer", "Adventure", "RPG", "Open World"], "review_total": 12000, "review_positive_ratio": 0.94},
+    {"appid": 614, "title": "Gems of War - Puzzle RPG", "ordered_tags": ["RPG", "Puzzle", "Card Battler"], "review_total": 11000, "review_positive_ratio": 0.79},
+    {"appid": 615, "title": "Well Known Singleplayer Adventure", "ordered_tags": ["Singleplayer", "Adventure", "Story Rich"], "review_total": 300000, "review_positive_ratio": 0.90},
+    {"appid": 616, "title": "Upcoming AAA Adventure", "ordered_tags": ["Singleplayer", "Action", "Adventure"], "review_total": null, "review_positive_ratio": null, "coming_soon": true},
+    {"appid": 617, "title": "AAA Deluxe Upgrade", "ordered_tags": ["Singleplayer"], "review_total": 1000, "review_positive_ratio": 0.91, "app_type": "dlc"},
+
+    {"appid": 701, "title": "Reviews Unknown", "ordered_tags": ["Souls-like", "Action", "RPG"], "review_total": null, "review_positive_ratio": null},
+    {"appid": 702, "title": "Reviews Zero", "ordered_tags": ["Souls-like", "Action", "RPG"], "review_total": 0, "review_positive_ratio": 0.90},
+    {"appid": 703, "title": "Reviews One", "ordered_tags": ["Souls-like", "Action", "RPG"], "review_total": 1, "review_positive_ratio": 0.90},
+    {"appid": 704, "title": "Reviews Fifty", "ordered_tags": ["Souls-like", "Action", "RPG"], "review_total": 50, "review_positive_ratio": 0.90},
+    {"appid": 705, "title": "Reviews Thousand", "ordered_tags": ["Souls-like", "Action", "RPG"], "review_total": 1000, "review_positive_ratio": 0.90},
+    {"appid": 706, "title": "Reviews Hundred Thousand", "ordered_tags": ["Souls-like", "Action", "RPG"], "review_total": 100000, "review_positive_ratio": 0.90}
+  ],
+  "scenarios": [
+    {"id": "souls_cn_original", "slice": "souls_like", "query": "/gamerec 类似黑暗之魂的游戏", "frozen_llm": {"reference_games_like": ["黑暗之魂"], "reference_search_terms": ["Dark Souls"]}, "expected_reference_appid": 100, "recall_appids": [110, 113, 111, 114, 112, 115, 116, 117], "relevance": {"110": 3, "111": 3, "112": 3, "113": 1, "114": 1, "115": 1}, "strong_appids": [110, 111, 112], "pairwise": [[110, 113], [111, 115], [112, 114]], "baseline_ranking": [113, 115, 110, 114, 111], "target_count": 5},
+    {"id": "souls_en_rewrite", "slice": "souls_like", "query": "/gamerec games like Dark Souls", "frozen_llm": {"reference_games_like": ["Dark Souls"], "reference_search_terms": ["黑暗之魂"]}, "expected_reference_appid": 100, "recall_appids": [113, 110, 115, 111, 114, 112, 116, 117], "relevance": {"110": 3, "111": 3, "112": 3, "113": 1, "114": 1, "115": 1}, "strong_appids": [110, 111, 112], "pairwise": [[110, 113], [111, 115], [112, 114]], "baseline_ranking": [115, 113, 110, 114, 112], "target_count": 5},
+    {"id": "extraction_cn_original", "slice": "extraction_shooter", "query": "/gamerec 类似灰区战争的游戏", "frozen_llm": {"reference_games_like": ["灰区战争"], "reference_search_terms": ["Gray Zone Warfare"]}, "expected_reference_appid": 200, "recall_appids": [213, 210, 214, 211, 215, 212, 216, 217], "relevance": {"210": 3, "211": 3, "212": 3, "213": 1, "214": 1, "215": 1}, "strong_appids": [210, 211, 212], "pairwise": [[210, 213], [211, 215], [212, 214]], "baseline_ranking": [213, 215, 210, 214, 211], "target_count": 5},
+    {"id": "extraction_en_rewrite", "slice": "extraction_shooter", "query": "/gamerec similar to Gray Zone Warfare", "frozen_llm": {"reference_games_like": ["Gray Zone Warfare"], "reference_search_terms": ["灰区战争"]}, "expected_reference_appid": 200, "recall_appids": [215, 213, 210, 214, 211, 212, 216, 217], "relevance": {"210": 3, "211": 3, "212": 3, "213": 1, "214": 1, "215": 1}, "strong_appids": [210, 211, 212], "pairwise": [[210, 213], [211, 215], [212, 214]], "baseline_ranking": [215, 213, 214, 210, 211], "target_count": 5},
+    {"id": "metroidvania_cn", "slice": "metroidvania", "query": "/gamerec 类似空洞骑士的游戏", "frozen_llm": {"reference_games_like": ["空洞骑士"], "reference_search_terms": ["Hollow Knight"]}, "expected_reference_appid": 300, "recall_appids": [313, 310, 314, 311, 315, 312, 316, 317], "relevance": {"310": 3, "311": 3, "312": 3, "313": 1, "314": 1, "315": 1}, "strong_appids": [310, 311, 312], "pairwise": [[310, 313], [311, 314], [312, 315]], "baseline_ranking": [314, 313, 310, 315, 311], "target_count": 5},
+    {"id": "metroidvania_en", "slice": "metroidvania", "query": "/gamerec similar to Hollow Knight", "frozen_llm": {"reference_games_like": ["Hollow Knight"], "reference_search_terms": ["空洞骑士"]}, "expected_reference_appid": 300, "recall_appids": [314, 313, 310, 315, 311, 312, 316, 317], "relevance": {"310": 3, "311": 3, "312": 3, "313": 1, "314": 1, "315": 1}, "strong_appids": [310, 311, 312], "pairwise": [[310, 313], [311, 314], [312, 315]], "baseline_ranking": [314, 315, 313, 310, 311], "target_count": 5},
+    {"id": "deckbuilding_cn", "slice": "deckbuilding", "query": "/gamerec 类似杀戮尖塔的游戏", "frozen_llm": {"reference_games_like": ["杀戮尖塔"], "reference_search_terms": ["Slay the Spire"]}, "expected_reference_appid": 400, "recall_appids": [413, 410, 414, 411, 415, 412, 416, 417], "relevance": {"410": 3, "411": 3, "412": 3, "413": 1, "414": 1, "415": 1}, "strong_appids": [410, 411, 412], "pairwise": [[410, 413], [411, 414], [412, 415]], "baseline_ranking": [414, 413, 410, 415, 411], "target_count": 5},
+    {"id": "deckbuilding_en", "slice": "deckbuilding", "query": "/gamerec games like Slay the Spire", "frozen_llm": {"reference_games_like": ["Slay the Spire"], "reference_search_terms": ["杀戮尖塔"]}, "expected_reference_appid": 400, "recall_appids": [414, 413, 410, 415, 411, 412, 416, 417], "relevance": {"410": 3, "411": 3, "412": 3, "413": 1, "414": 1, "415": 1}, "strong_appids": [410, 411, 412], "pairwise": [[410, 413], [411, 414], [412, 415]], "baseline_ranking": [414, 415, 413, 410, 411], "target_count": 5},
+    {"id": "colony_cn", "slice": "colony_sim", "query": "/gamerec 类似环世界的游戏", "frozen_llm": {"reference_games_like": ["环世界"], "reference_search_terms": ["RimWorld"]}, "expected_reference_appid": 500, "recall_appids": [513, 510, 514, 511, 515, 512, 516, 517], "relevance": {"510": 3, "511": 3, "512": 3, "513": 1, "514": 1, "515": 1}, "strong_appids": [510, 511, 512], "pairwise": [[510, 513], [511, 514], [512, 515]], "baseline_ranking": [514, 513, 510, 515, 511], "target_count": 5},
+    {"id": "colony_en", "slice": "colony_sim", "query": "/gamerec similar to RimWorld", "frozen_llm": {"reference_games_like": ["RimWorld"], "reference_search_terms": ["环世界"]}, "expected_reference_appid": 500, "recall_appids": [514, 513, 510, 515, 511, 512, 516, 517], "relevance": {"510": 3, "511": 3, "512": 3, "513": 1, "514": 1, "515": 1}, "strong_appids": [510, 511, 512], "pairwise": [[510, 513], [511, 514], [512, 515]], "baseline_ranking": [514, 515, 513, 510, 511], "target_count": 5},
+    {"id": "mainstream_cn_original", "slice": "mainstream", "query": "/gamerec 推荐的单机3a大作", "frozen_llm": {}, "recall_appids": [613, 614, 610, 615, 611, 612, 616, 617], "top_seller_appids": [613, 614, 610, 615, 611, 612, 616, 617], "relevance": {"610": 3, "611": 3, "612": 3, "613": 1, "614": 1, "615": 2}, "strong_appids": [610, 611, 612], "pairwise": [[610, 613], [611, 614], [612, 613]], "baseline_ranking": [613, 614, 610, 615, 611], "target_count": 5},
+    {"id": "mainstream_cn_rewrite", "slice": "mainstream", "query": "/gamerec 想玩知名度高的单人 AAA 大作", "frozen_llm": {}, "recall_appids": [614, 613, 615, 610, 611, 612, 616, 617], "top_seller_appids": [614, 613, 615, 610, 611, 612, 616, 617], "relevance": {"610": 3, "611": 3, "612": 3, "613": 1, "614": 1, "615": 2}, "strong_appids": [610, 611, 612], "pairwise": [[610, 613], [611, 614], [612, 613]], "baseline_ranking": [614, 613, 615, 610, 611], "target_count": 5},
+    {"id": "review_confidence_matrix", "slice": "quality_confidence", "query": "/gamerec 想玩魂类游戏", "frozen_llm": {}, "recall_appids": [701, 702, 703, 704, 705, 706], "relevance": {"701": 1, "702": 1, "703": 1, "704": 1, "705": 1, "706": 1}, "strong_appids": [706], "pairwise": [], "baseline_ranking": [701, 702, 703, 704, 705], "target_count": 5},
+    {"id": "all_aliases_fail", "slice": "reference_failure", "query": "/gamerec 类似不存在游戏的游戏", "frozen_llm": {"reference_games_like": ["不存在游戏"], "reference_search_terms": ["Missing Fixture Game"]}, "expected_reference_appid": null, "recall_appids": [], "relevance": {}, "strong_appids": [], "pairwise": [], "baseline_ranking": [], "target_count": 5}
+  ]
+}
