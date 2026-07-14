@@ -116,7 +116,9 @@ class SteamGameRecommenderPlugin(Star):
             10,
         )
         self.provider_id = str(model_config.get("llm_provider_id", "") or "").strip()
-        self.enable_llm_fallback = bool(model_config.get("enable_llm_fallback"))
+        self.fallback_provider_id = str(
+            model_config.get("llm_fallback_provider_id", "") or ""
+        ).strip()
         self.default_region = normalize_region(str(price_config.get("default_region") or "CN"))
         self.steam_min_review_count = safe_int(
             self.recommendation_config.get("steam_min_review_count"),
@@ -458,7 +460,7 @@ class SteamGameRecommenderPlugin(Star):
         preference.library_filter_mode = library_filter_mode
         if warning := steam_only_scope_warning_for(preference):
             preference.parse_warnings.append(warning)
-        if not has_supported_steam_platform(preference) and not self.enable_llm_fallback:
+        if not has_supported_steam_platform(preference) and not self.fallback_provider_id:
             raise LibraryFilterModeError(preference.parse_warnings[-1])
         result_limit = effective_result_limit(self.max_results, preference.result_count)
         return PreparedRecommendation(
@@ -563,7 +565,7 @@ class SteamGameRecommenderPlugin(Star):
             preference,
             ranked_games,
             limit=result_limit,
-            enable_empty_fallback=self.enable_llm_fallback,
+            fallback_provider_id=self.fallback_provider_id,
             raw_query=prepared.raw_query,
         )
         return RecommendationRun(

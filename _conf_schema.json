@@ -11,11 +11,12 @@
         "_special": "select_provider",
         "default": ""
       },
-      "enable_llm_fallback": {
-        "type": "bool",
-        "description": "启用 LLM 空结果兜底",
-        "hint": "开启后，如果 Steam 索引和过滤后没有结果，或用户明确要求非 Steam 平台，会使用 LLM 生成已标注的未验证建议。",
-        "default": false
+      "llm_fallback_provider_id": {
+        "type": "string",
+        "description": "用于空结果兜底的 LLM 提供商",
+        "hint": "⚠️ 仅在 Steam 索引或过滤后为空时使用；这些 LLM 建议未经过 Steam 应用类型、同作版本和套餐校验，可能包含 DLC、原声、工具、套餐或不同版本。留空即关闭。",
+        "_special": "select_provider",
+        "default": ""
       },
       "steam_api_key": {
         "type": "string",

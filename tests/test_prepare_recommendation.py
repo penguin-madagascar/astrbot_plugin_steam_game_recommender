@@ -83,7 +83,7 @@ class PluginDashboardConfigTest(unittest.TestCase):
         config = {
             "model_and_access": {
                 "llm_provider_id": "provider/nested",
-                "enable_llm_fallback": True,
+                "llm_fallback_provider_id": "provider/fallback",
                 "steam_api_key": "nested-steam-key",
             },
             "price_and_region": {
@@ -133,7 +133,7 @@ class PluginDashboardConfigTest(unittest.TestCase):
             plugin = SteamGameRecommenderPlugin(object(), config)
 
         self.assertEqual(plugin.provider_id, "provider/nested")
-        self.assertIs(plugin.enable_llm_fallback, True)
+        self.assertEqual(plugin.fallback_provider_id, "provider/fallback")
         self.assertEqual(plugin.default_region, "JP")
         self.assertEqual(plugin.max_results, 8)
         self.assertEqual(plugin.steam_min_review_count, 80)
@@ -179,7 +179,7 @@ class PrepareRecommendationLlmFallbackTest(unittest.IsolatedAsyncioTestCase):
         plugin = object.__new__(SteamGameRecommenderPlugin)
         plugin.max_results = 5
         plugin.default_region = "CN"
-        plugin.enable_llm_fallback = False
+        plugin.fallback_provider_id = ""
         plugin.preference_parser = parser
 
         prepared = await plugin._prepare_recommendation(
@@ -191,7 +191,7 @@ class PrepareRecommendationLlmFallbackTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prepared.preference.region, "US")
         self.assertEqual(prepared.preference.budget_currency, "USD")
 
-    async def test_prepare_rejects_non_steam_platform_when_llm_fallback_is_disabled(self) -> None:
+    async def test_prepare_rejects_non_steam_platform_without_fallback_provider(self) -> None:
         preference = GamePreference(
             platforms=["nintendo switch"],
             genres_like=["party"],
@@ -199,7 +199,7 @@ class PrepareRecommendationLlmFallbackTest(unittest.IsolatedAsyncioTestCase):
         )
         plugin = object.__new__(SteamGameRecommenderPlugin)
         plugin.max_results = 5
-        plugin.enable_llm_fallback = False
+        plugin.fallback_provider_id = ""
         plugin.preference_parser = FakePreferenceParser(preference)
 
         with self.assertRaises(LibraryFilterModeError) as raised:
@@ -207,7 +207,7 @@ class PrepareRecommendationLlmFallbackTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("仅支持 Steam", str(raised.exception))
 
-    async def test_prepare_allows_non_steam_platform_when_llm_fallback_is_enabled(self) -> None:
+    async def test_prepare_allows_non_steam_platform_with_explicit_fallback_provider(self) -> None:
         preference = GamePreference(
             platforms=["nintendo switch"],
             genres_like=["party"],
@@ -215,7 +215,7 @@ class PrepareRecommendationLlmFallbackTest(unittest.IsolatedAsyncioTestCase):
         )
         plugin = object.__new__(SteamGameRecommenderPlugin)
         plugin.max_results = 5
-        plugin.enable_llm_fallback = True
+        plugin.fallback_provider_id = "provider/fallback"
         plugin.preference_parser = FakePreferenceParser(preference)
 
         prepared = await plugin._prepare_recommendation(object(), "Switch 聚会游戏")
@@ -228,7 +228,7 @@ class PrepareRecommendationLlmFallbackTest(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         plugin = object.__new__(SteamGameRecommenderPlugin)
-        plugin.enable_llm_fallback = True
+        plugin.fallback_provider_id = "provider/fallback"
         plugin.provider_id = "provider-1"
         plugin.context = FakeLlmContext(
             "LLM 兜底建议（未经过 Steam 索引验证）\n1. 《Mario Kart 8 Deluxe》：适合轻松多人竞速。"
@@ -262,7 +262,7 @@ class PrepareRecommendationLlmFallbackTest(unittest.IsolatedAsyncioTestCase):
 class RecommendationPipelineTest(unittest.IsolatedAsyncioTestCase):
     async def test_library_snapshot_is_loaded_once_for_profile_and_filtering(self) -> None:
         plugin = object.__new__(SteamGameRecommenderPlugin)
-        plugin.enable_llm_fallback = False
+        plugin.fallback_provider_id = ""
         plugin.provider_id = ""
         plugin.context = FakeLlmContext("")
         plugin.cache = BoundAccountCache()
@@ -287,7 +287,7 @@ class RecommendationPipelineTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_only_owned_passes_owned_appids_as_edition_preference(self) -> None:
         plugin = object.__new__(SteamGameRecommenderPlugin)
-        plugin.enable_llm_fallback = False
+        plugin.fallback_provider_id = ""
         plugin.provider_id = ""
         plugin.context = FakeLlmContext("")
         plugin.cache = BoundAccountCache()
@@ -321,7 +321,7 @@ class RecommendationPipelineTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_final_output_guard_drops_unconfirmed_or_non_game_candidates(self) -> None:
         plugin = object.__new__(SteamGameRecommenderPlugin)
-        plugin.enable_llm_fallback = False
+        plugin.fallback_provider_id = ""
         plugin.provider_id = ""
         plugin.context = FakeLlmContext("")
         plugin.cache = BoundAccountCache()

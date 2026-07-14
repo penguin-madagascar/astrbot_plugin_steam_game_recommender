@@ -8,10 +8,11 @@ from pathlib import Path
 from typing import Any
 
 PLUGIN_NAME = "astrbot_plugin_steam_game_recommender"
+LEGACY_FALLBACK_FLAG = "enable_llm_fallback"
 GROUP_LEGACY_KEYS = {
     "model_and_access": (
         "llm_provider_id",
-        "enable_llm_fallback",
+        "llm_fallback_provider_id",
         "steam_api_key",
     ),
     "price_and_region": (
@@ -29,14 +30,24 @@ GROUP_LEGACY_KEYS = {
         "timeout_seconds",
     ),
 }
-LEGACY_KEYS = frozenset(key for group_keys in GROUP_LEGACY_KEYS.values() for key in group_keys)
+LEGACY_KEYS = frozenset(
+    {
+        LEGACY_FALLBACK_FLAG,
+        *(key for group_keys in GROUP_LEGACY_KEYS.values() for key in group_keys),
+    }
+)
 
 
 def migrate_config_data(
     config: Mapping[str, Any],
     schema: Mapping[str, Any],
 ) -> tuple[dict[str, Any], bool]:
-    if not any(key in config for key in LEGACY_KEYS):
+    existing_model_config = config.get("model_and_access")
+    has_legacy_fallback_flag = LEGACY_FALLBACK_FLAG in config or (
+        isinstance(existing_model_config, Mapping)
+        and LEGACY_FALLBACK_FLAG in existing_model_config
+    )
+    if not any(key in config for key in LEGACY_KEYS) and not has_legacy_fallback_flag:
         return dict(config), False
 
     migrated = {
@@ -49,6 +60,7 @@ def migrate_config_data(
             continue
         existing = config.get(group_name)
         group_values = dict(existing) if isinstance(existing, Mapping) else {}
+        group_values.pop(LEGACY_FALLBACK_FLAG, None)
         for item_name, item_schema in group_schema["items"].items():
             if item_name in group_values:
                 continue
@@ -56,6 +68,8 @@ def migrate_config_data(
                 group_values[item_name] = config[item_name]
             else:
                 group_values[item_name] = item_schema.get("default")
+        if group_name == "model_and_access" and has_legacy_fallback_flag:
+            group_values["llm_fallback_provider_id"] = ""
         migrated[group_name] = group_values
     return migrated, True
 
