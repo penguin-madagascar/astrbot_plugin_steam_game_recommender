@@ -106,6 +106,61 @@ class UnplayedPickerTest(unittest.IsolatedAsyncioTestCase):
                 rng=random.Random(3),
             )
 
+    async def test_skips_non_game_details_before_returning_random_pick(self) -> None:
+        from astrbot_plugin_steam_game_recommender.services.unplayed_picker import (
+            pick_random_unplayed_game,
+        )
+
+        client = FakeSteamClient(
+            reviews={
+                5: FakeReview(total_reviews=500, positive_ratio=0.9),
+                6: FakeReview(total_reviews=500, positive_ratio=0.9),
+            },
+            app_types={5: "dlc", 6: "game"},
+        )
+
+        result = await pick_random_unplayed_game(
+            [
+                SteamOwnedGame(appid=5, name="Expansion", playtime_forever=0),
+                SteamOwnedGame(appid=6, name="Base Game", playtime_forever=0),
+            ],
+            client,
+            rng=NoShuffleRandom(),
+        )
+
+        self.assertEqual(result.game.appid, 6)
+        self.assertEqual(client.detail_appids, [5, 6])
+
+    async def test_compresses_owned_editions_before_checking_random_candidates(self) -> None:
+        from astrbot_plugin_steam_game_recommender.services.unplayed_picker import (
+            pick_random_unplayed_game,
+        )
+
+        client = FakeSteamClient(
+            reviews={
+                7: FakeReview(total_reviews=5, positive_ratio=0.9),
+                9: FakeReview(total_reviews=500, positive_ratio=0.9),
+            }
+        )
+
+        result = await pick_random_unplayed_game(
+            [
+                SteamOwnedGame(appid=7, name="Control", playtime_forever=0),
+                SteamOwnedGame(
+                    appid=8,
+                    name="Control Ultimate Edition",
+                    playtime_forever=0,
+                ),
+                SteamOwnedGame(appid=9, name="Portal 2", playtime_forever=0),
+            ],
+            client,
+            rng=NoShuffleRandom(),
+        )
+
+        self.assertEqual(result.game.appid, 9)
+        self.assertNotIn(8, client.review_appids)
+        self.assertNotIn(8, client.detail_appids)
+
 
 class FakeReview:
     def __init__(self, total_reviews: int, positive_ratio: float | None) -> None:
@@ -115,11 +170,18 @@ class FakeReview:
 
 
 class FakeSteamClient:
-    def __init__(self, reviews: dict[int, FakeReview]) -> None:
+    def __init__(
+        self,
+        reviews: dict[int, FakeReview],
+        app_types: dict[int, str | None] | None = None,
+    ) -> None:
         self.reviews = reviews
+        self.app_types = app_types or {}
+        self.review_appids: list[int] = []
         self.detail_appids: list[int] = []
 
     async def get_review_summary(self, appid: int) -> FakeReview:
+        self.review_appids.append(appid)
         return self.reviews[appid]
 
     async def get_game_detail(self, appid: int) -> GameCandidate:
@@ -127,6 +189,7 @@ class FakeSteamClient:
         return GameCandidate(
             title=game_title(appid),
             appid=appid,
+            app_type=self.app_types.get(appid, "game"),
             platforms=["PC"],
             genres=["Adventure"],
             tags=["Single-player"],
@@ -135,12 +198,22 @@ class FakeSteamClient:
         )
 
 
+class NoShuffleRandom:
+    def shuffle(self, values: list[SteamOwnedGame]) -> None:
+        del values
+
+
 def game_title(appid: int) -> str:
     names: dict[int, str] = {
         1: "First Candidate",
         2: "Random Winner",
         3: "Low Ratio",
         4: "Good Backlog",
+        5: "Expansion",
+        6: "Base Game",
+        7: "Control",
+        8: "Control Ultimate Edition",
+        9: "Portal 2",
     }
     return names.get(appid, f"App {appid}")
 

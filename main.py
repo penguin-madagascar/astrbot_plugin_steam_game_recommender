@@ -24,6 +24,7 @@ from .services.explanation_builder import (
     generate_unplayed_reason,
 )
 from .services.formatter import format_recommendation_messages_with_llm
+from .services.game_identity import is_confirmed_base_game
 from .services.message_delivery import build_forward_message_chain
 from .services.played_filter import (
     LIBRARY_FILTER_EXCLUDE_OWNED,
@@ -358,6 +359,7 @@ class SteamGameRecommenderPlugin(Star):
         profile_tag_weights: dict[str, float] | None = None,
         excluded_appids: list[int] | None = None,
         excluded_titles: list[str] | None = None,
+        preferred_appids: list[int] | None = None,
     ):
         ranked_games = await self.steam_index.recommend(
             preference,
@@ -365,6 +367,7 @@ class SteamGameRecommenderPlugin(Star):
             profile_tag_weights=profile_tag_weights,
             excluded_appids=excluded_appids,
             excluded_titles=excluded_titles,
+            preferred_appids=preferred_appids,
         )
         if ranked_games:
             return ranked_games
@@ -501,7 +504,15 @@ class SteamGameRecommenderPlugin(Star):
                 profile_tag_weights=profile_tag_weights,
                 excluded_appids=excluded_appids,
                 excluded_titles=excluded_titles,
+                preferred_appids=(
+                    [owned.appid for owned in owned_games if owned.appid]
+                    if preference.library_filter_mode == LIBRARY_FILTER_ONLY_OWNED
+                    else None
+                ),
             )
+            ranked_games = [
+                game for game in ranked_games if is_confirmed_base_game(game)
+            ]
             retrieved_count = len(ranked_games)
             finish_phase("recall_rank")
             if preference.library_filter_mode:

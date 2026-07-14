@@ -14,6 +14,7 @@ class SteamIndexModelTest(unittest.TestCase):
 
         for field in (
             "appid",
+            "app_type",
             "review_total",
             "review_positive_ratio",
             "review_recent_ratio",
@@ -399,6 +400,56 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
             ["Better Local Puzzle", "Generic High Review"],
         )
         self.assertIn("steam_index", ranked[0].internal_source_markers)
+
+    async def test_recommend_preferred_appid_selects_owned_edition(self) -> None:
+        cache = MemoryCache(
+            {
+                "steam_index:v3": [
+                    dump_model(
+                        GameCandidate(
+                            appid=1,
+                            title="Control",
+                            app_type="game",
+                            tags=["Action"],
+                            review_total=500,
+                            review_positive_ratio=0.8,
+                        )
+                    ),
+                    dump_model(
+                        GameCandidate(
+                            appid=2,
+                            title="Control Ultimate Edition",
+                            app_type="game",
+                            tags=["Action"],
+                            review_total=500,
+                            review_positive_ratio=0.8,
+                        )
+                    ),
+                    dump_model(
+                        GameCandidate(
+                            appid=3,
+                            title="Portal 2",
+                            app_type="game",
+                            tags=["Puzzle"],
+                            review_total=500,
+                            review_positive_ratio=0.8,
+                        )
+                    ),
+                ]
+            }
+        )
+        service = optional_import(
+            "astrbot_plugin_steam_game_recommender.services.steam_index"
+        ).SteamGameIndexService(NoLiveSearchSteamClient(), cache, min_review_count=0)
+
+        ranked = await service.recommend(
+            GamePreference(platforms=["steam"]),
+            limit=3,
+            preferred_appids=[2],
+        )
+
+        self.assertIn(2, [game.appid for game in ranked])
+        self.assertNotIn(1, [game.appid for game in ranked])
 
 
 def optional_import(module_name: str):

@@ -285,6 +285,59 @@ class RecommendationPipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plugin.steam_client.owned_calls, 1)
         self.assertEqual([game.title for game in run.ranked_games], ["Fresh Game"])
 
+    async def test_only_owned_passes_owned_appids_as_edition_preference(self) -> None:
+        plugin = object.__new__(SteamGameRecommenderPlugin)
+        plugin.enable_llm_fallback = False
+        plugin.provider_id = ""
+        plugin.context = FakeLlmContext("")
+        plugin.cache = BoundAccountCache()
+        plugin.steam_client = CountingOwnedGamesClient(
+            [
+                SteamOwnedGame(
+                    appid=2,
+                    name="Control Ultimate Edition",
+                    playtime_forever=0,
+                )
+            ]
+        )
+        index = OwnedEditionSteamIndex()
+        plugin.steam_index = index
+        plugin.price_bridge = IdentityPriceBridge()
+        prepared = PreparedRecommendation(
+            raw_query="仅查看已有的动作游戏",
+            preference=GamePreference(
+                platforms=["steam"],
+                genres_like=["action"],
+                library_filter_mode="only_owned",
+                result_count=2,
+            ),
+            result_limit=2,
+        )
+
+        run = await plugin._run_recommendation(FakeEvent(), prepared)
+
+        self.assertEqual(index.preferred_appids, [2])
+        self.assertEqual([game.appid for game in run.ranked_games], [2])
+
+    async def test_final_output_guard_drops_unconfirmed_or_non_game_candidates(self) -> None:
+        plugin = object.__new__(SteamGameRecommenderPlugin)
+        plugin.enable_llm_fallback = False
+        plugin.provider_id = ""
+        plugin.context = FakeLlmContext("")
+        plugin.cache = BoundAccountCache()
+        plugin.steam_client = CountingOwnedGamesClient([])
+        plugin.steam_index = TypeLeakingSteamIndex()
+        plugin.price_bridge = IdentityPriceBridge()
+        prepared = PreparedRecommendation(
+            raw_query="Steam 动作游戏",
+            preference=GamePreference(platforms=["steam"], genres_like=["action"]),
+            result_limit=3,
+        )
+
+        run = await plugin._run_recommendation(FakeEvent(), prepared)
+
+        self.assertEqual([game.title for game in run.ranked_games], ["Base Game"])
+
 
 class FakeEvent:
     unified_msg_origin = "qq:test"
@@ -339,25 +392,67 @@ class BoundAccountCache:
 
 
 class CountingOwnedGamesClient:
-    def __init__(self) -> None:
+    def __init__(self, games=None) -> None:
         self.owned_calls = 0
+        self.games = games or [
+            SteamOwnedGame(appid=1, name="Owned Game", playtime_forever=120)
+        ]
 
     def has_web_api_key(self) -> bool:
         return True
 
     async def get_owned_games(self, _account_id):
         self.owned_calls += 1
-        return [SteamOwnedGame(appid=1, name="Owned Game", playtime_forever=120)]
+        return self.games
 
 
 class OwnedAwareSteamIndex:
     async def load_entries(self):
-        return [GameCandidate(appid=1, title="Owned Game", tags=["Co-op"])]
+        return [
+            GameCandidate(
+                appid=1,
+                title="Owned Game",
+                app_type="game",
+                tags=["Co-op"],
+            )
+        ]
 
     async def recommend(self, _preference, **_kwargs):
         return [
-            RankedGame(appid=1, title="Owned Game", score=90),
-            RankedGame(appid=2, title="Fresh Game", score=80),
+            RankedGame(appid=1, title="Owned Game", app_type="game", score=90),
+            RankedGame(appid=2, title="Fresh Game", app_type="game", score=80),
+        ]
+
+
+class OwnedEditionSteamIndex:
+    def __init__(self) -> None:
+        self.preferred_appids = None
+
+    async def load_entries(self):
+        return []
+
+    async def recommend(self, _preference, **kwargs):
+        self.preferred_appids = kwargs.get("preferred_appids")
+        return [
+            RankedGame(appid=1, title="Control", app_type="game", score=90),
+            RankedGame(
+                appid=2,
+                title="Control Ultimate Edition",
+                app_type="game",
+                score=80,
+            ),
+        ]
+
+
+class TypeLeakingSteamIndex:
+    async def load_entries(self):
+        return []
+
+    async def recommend(self, _preference, **_kwargs):
+        return [
+            RankedGame(appid=1, title="Expansion", app_type="dlc", score=95),
+            RankedGame(appid=2, title="Unknown", score=90),
+            RankedGame(appid=3, title="Base Game", app_type="game", score=85),
         ]
 
 

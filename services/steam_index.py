@@ -16,7 +16,11 @@ from ..storage.models import (
     ResolvedReferenceGame,
     SteamSearchHit,
 )
-from .game_identity import is_confirmed_base_game
+from .game_identity import (
+    deduplicate_game_editions,
+    game_family_key,
+    is_confirmed_base_game,
+)
 from .similarity_ranker import (
     SteamTagProfile,
     build_profile_from_preference,
@@ -111,6 +115,7 @@ class SteamGameIndexService:
         profile_tag_weights: dict[str, float] | None = None,
         excluded_appids: list[int] | None = None,
         excluded_titles: list[str] | None = None,
+        preferred_appids: list[int] | None = None,
     ) -> list[RankedGame]:
         if preference.platforms and not has_supported_steam_platform(preference):
             return []
@@ -127,6 +132,7 @@ class SteamGameIndexService:
             positive_component_weights=self.positive_component_weights,
         )
         ranked = exclude_previously_shown(ranked, excluded_appids, excluded_titles)
+        ranked = deduplicate_game_editions(ranked, preferred_appids)
         quality_target = max(10, max(int(limit), 0) * 2)
         quality_count = sum(game.score >= USABLE_SCORE_THRESHOLD for game in ranked)
         if quality_count >= quality_target and references_are_resolved(preference):
@@ -148,6 +154,7 @@ class SteamGameIndexService:
             positive_component_weights=self.positive_component_weights,
         )
         ranked = exclude_previously_shown(ranked, excluded_appids, excluded_titles)
+        ranked = deduplicate_game_editions(ranked, preferred_appids)
         return ranked[:limit]
 
     async def ensure_steam_tag_aliases(self) -> bool:
@@ -515,15 +522,15 @@ def exclude_previously_shown(
     excluded_titles: list[str] | None,
 ) -> list[RankedGame]:
     appids = {int(appid) for appid in excluded_appids or []}
-    titles = {normalize_text(title) for title in excluded_titles or [] if title}
-    if not appids and not titles:
+    families = {game_family_key(title) for title in excluded_titles or [] if title}
+    if not appids and not families:
         return games
     return [
         game
         for game in games
         if not (
             (game.appid is not None and int(game.appid) in appids)
-            or normalize_text(game.title) in titles
+            or game_family_key(game.title) in families
         )
     ]
 
@@ -573,6 +580,7 @@ def matching_reference_candidates(
             not resolved_appids
             and any(
                 title_match_confidence(reference, entry.title) >= REFERENCE_MATCH_THRESHOLD
+                or game_family_key(reference) == game_family_key(entry.title)
                 for reference in references
             )
         )

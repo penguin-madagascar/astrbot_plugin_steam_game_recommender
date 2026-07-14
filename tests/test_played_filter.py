@@ -114,6 +114,49 @@ class LibraryFilterTest(unittest.TestCase):
         self.assertEqual([game.title for game in filtered], ["Played Game"])
         self.assertEqual(removed_count, 2)
 
+    def test_exclude_owned_removes_other_editions_of_owned_game(self) -> None:
+        games = [
+            RankedGame(title="Control", appid=1, score=10),
+            RankedGame(title="Portal 2", appid=2, score=9),
+        ]
+        owned_games = [
+            SteamOwnedGame(
+                appid=3,
+                name="Control Ultimate Edition",
+                playtime_forever=30,
+            )
+        ]
+
+        filtered, removed_count = filter_games_by_library_mode(
+            games,
+            owned_games,
+            "exclude_owned",
+        )
+
+        self.assertEqual([game.title for game in filtered], ["Portal 2"])
+        self.assertEqual(removed_count, 1)
+
+    def test_only_owned_still_matches_exact_appid_not_game_family(self) -> None:
+        games = [
+            RankedGame(title="Control", appid=1, score=10),
+            RankedGame(title="Control Ultimate Edition", appid=3, score=9),
+        ]
+        owned_games = [
+            SteamOwnedGame(
+                appid=3,
+                name="Control Ultimate Edition",
+                playtime_forever=0,
+            )
+        ]
+
+        filtered, _removed_count = filter_games_by_library_mode(
+            games,
+            owned_games,
+            "only_owned",
+        )
+
+        self.assertEqual([game.appid for game in filtered], [3])
+
 
 if __name__ == "__main__":
     unittest.main()

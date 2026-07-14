@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..storage.models import RankedGame, SteamOwnedGame
+from .game_identity import game_family_key
 
 LIBRARY_FILTER_EXCLUDE_OWNED = "exclude_owned"
 LIBRARY_FILTER_ONLY_OWNED = "only_owned"
@@ -89,7 +90,17 @@ def filter_games_by_library_mode(
 ) -> tuple[list[RankedGame], int]:
     owned_appids = {owned.appid for owned in owned_games if owned.appid}
     if mode == LIBRARY_FILTER_EXCLUDE_OWNED:
-        filtered = [game for game in games if game.appid is None or game.appid not in owned_appids]
+        owned_families = {
+            game_family_key(owned.name)
+            for owned in owned_games
+            if owned.name
+        }
+        filtered = [
+            game
+            for game in games
+            if (game.appid is None or game.appid not in owned_appids)
+            and game_family_key(game.title) not in owned_families
+        ]
     elif mode == LIBRARY_FILTER_ONLY_OWNED:
         filtered = [game for game in games if game.appid is not None and game.appid in owned_appids]
     else:

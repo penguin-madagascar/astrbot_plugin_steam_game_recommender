@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from ..storage.models import GameCandidate, SteamOwnedGame
+from .game_identity import game_family_key, is_confirmed_base_game, is_edition_title
 
 
 class UnplayedRecommendationError(ValueError):
@@ -31,7 +32,11 @@ async def pick_random_unplayed_game(
     min_positive_ratio: float = 0.65,
     rng: random.Random | None = None,
 ) -> UnplayedRecommendation:
-    candidates = [game for game in owned_games if game.appid and game.playtime_forever <= 0]
+    candidates = [
+        game
+        for game in deduplicate_owned_game_editions(owned_games)
+        if game.appid and game.playtime_forever <= 0
+    ]
     if not candidates:
         raise UnplayedRecommendationError("Steam 游戏库中没有未游玩过的游戏。")
 
@@ -50,6 +55,8 @@ async def pick_random_unplayed_game(
         if not review_passes(summary, min_count, min_ratio):
             continue
         game = await steam_client.get_game_detail(owned_game.appid)
+        if not is_confirmed_base_game(game):
+            continue
         return UnplayedRecommendation(
             game=attach_review_summary(game, owned_game, summary),
             owned_game=owned_game,
@@ -60,6 +67,21 @@ async def pick_random_unplayed_game(
         "没有找到未游玩且评价过线的游戏"
         f"（门槛：至少 {min_count} 条评测、好评率不低于 {min_ratio:.0%}）。"
     )
+
+
+def deduplicate_owned_game_editions(
+    owned_games: list[SteamOwnedGame],
+) -> list[SteamOwnedGame]:
+    selected: dict[str, SteamOwnedGame] = {}
+    for owned_game in owned_games:
+        title = owned_game.name or f"appid {owned_game.appid}"
+        family = game_family_key(title)
+        current = selected.get(family)
+        if current is None or (
+            is_edition_title(current.name or "") and not is_edition_title(title)
+        ):
+            selected[family] = owned_game
+    return list(selected.values())
 
 
 def review_passes(summary: Any, min_review_count: int, min_positive_ratio: float) -> bool:

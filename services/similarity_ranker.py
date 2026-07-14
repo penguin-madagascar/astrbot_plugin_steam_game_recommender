@@ -14,6 +14,7 @@ from ..storage.models import (
     ScoreBreakdown,
     split_language_list,
 )
+from .game_identity import game_family_key
 from .constraint_evaluator import ConstraintAssessment, evaluate_candidate_constraints
 from .tag_normalizer import (
     candidate_canonical_tags,
@@ -129,13 +130,19 @@ def rank_steam_candidates(
     idf = compute_tag_idf([ordered_tag_sequence(candidate) for candidate in candidates])
     review_prior = candidate_pool_review_prior(candidates)
     prior_strength = max(int(min_review_count), 50)
+    reference_appids = {*profile.reference_appids, *profile.reference_appids_dislike}
+    reference_titles = [
+        *profile.reference_titles,
+        *profile.reference_titles_dislike,
+        *(candidate.title for candidate in profile.positive_reference_candidates),
+        *(candidate.title for candidate in profile.negative_reference_candidates),
+    ]
     for candidate in candidates:
-        reference_appids = {*profile.reference_appids, *profile.reference_appids_dislike}
         if (
             candidate.appid is not None and int(candidate.appid) in reference_appids
         ) or is_reference_title(
             candidate.title,
-            [*profile.reference_titles, *profile.reference_titles_dislike],
+            reference_titles,
         ):
             continue
 
@@ -673,14 +680,10 @@ def copy_ranked_game(game: RankedGame, update: dict[str, Any]) -> RankedGame:
 
 
 def is_reference_title(title: str, reference_titles: list[str]) -> bool:
-    normalized = normalize_title(title)
+    family = game_family_key(title)
     return any(
-        normalized == normalize_title(reference) for reference in reference_titles if reference
+        family == game_family_key(reference) for reference in reference_titles if reference
     )
-
-
-def normalize_title(value: str) -> str:
-    return " ".join(str(value or "").lower().split())
 
 
 def release_year(value: str | None) -> int:

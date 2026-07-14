@@ -94,6 +94,7 @@ class UnplayedSteamClient:
         return GameCandidate(
             title="Backlog Game",
             appid=77,
+            app_type="game",
             genres=["Adventure"],
             tags=["Puzzle", "Story Rich"],
         )
