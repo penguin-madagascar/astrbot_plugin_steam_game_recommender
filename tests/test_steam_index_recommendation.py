@@ -340,7 +340,7 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
         index_module = optional_import("astrbot_plugin_steam_game_recommender.services.steam_index")
         cache = MemoryCache(
             {
-                "steam_index:v3": [
+                "steam_index:v4": [
                     dump_model(
                         steam_index_game(
                             "Generic Multiplayer",
@@ -381,7 +381,7 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
         index_module = optional_import("astrbot_plugin_steam_game_recommender.services.steam_index")
         cache = MemoryCache(
             {
-                "steam_index:v3": [
+                "steam_index:v4": [
                     dump_model(
                         steam_index_game(
                             "Generic High Review",
@@ -428,7 +428,7 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
     async def test_recommend_preferred_appid_selects_owned_edition(self) -> None:
         cache = MemoryCache(
             {
-                "steam_index:v3": [
+                "steam_index:v4": [
                     dump_model(
                         GameCandidate(
                             appid=1,
@@ -524,9 +524,9 @@ class MemoryCache:
 
     async def get_json(self, key: str, _ttl_hours: int) -> Any | None:
         payload = self.payloads.get(key)
-        if key == "steam_index:v3" and isinstance(payload, list):
+        if key == "steam_index:v4" and isinstance(payload, list):
             return {
-                "version": 3,
+                "version": 4,
                 "entries": [{"candidate": entry, "refreshed_at": 1.0} for entry in payload],
                 "search_coverage": {},
             }

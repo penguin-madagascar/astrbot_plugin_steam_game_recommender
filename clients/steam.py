@@ -555,6 +555,7 @@ def parse_steam_game(appid: int, data: dict[str, Any]) -> GameCandidate:
         metacritic=optional_int(metacritic.get("score")),
         released=release_date,
         release_date=release_date,
+        coming_soon=release.get("coming_soon") is True,
         stores=["Steam"],
         raw_url=f"{STEAM_STORE_BASE_URL}/{appid}/",
         supported_languages=languages,

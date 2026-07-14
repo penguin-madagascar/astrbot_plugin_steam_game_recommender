@@ -48,8 +48,8 @@ from .tag_normalizer import (
 
 logger = logging.getLogger(__name__)
 
-STEAM_INDEX_CACHE_KEY = "steam_index:v3"
-STEAM_INDEX_VERSION = 3
+STEAM_INDEX_CACHE_KEY = "steam_index:v4"
+STEAM_INDEX_VERSION = 4
 STEAM_INDEX_MAX_ENTRIES = 3_000
 STEAM_INDEX_MAX_SEARCH_TERMS = 256
 STEAM_INDEX_MAX_SEARCHES_PER_ROUND = 8

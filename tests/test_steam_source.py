@@ -3,11 +3,48 @@ from __future__ import annotations
 import unittest
 from typing import Any
 
-from astrbot_plugin_steam_game_recommender.clients.steam import SteamApiError, SteamClient
-from astrbot_plugin_steam_game_recommender.storage.models import SteamSearchHit
+from astrbot_plugin_steam_game_recommender.clients.steam import (
+    SteamApiError,
+    SteamClient,
+    parse_steam_game,
+)
+from astrbot_plugin_steam_game_recommender.storage.models import (
+    GameCandidate,
+    SteamSearchHit,
+)
 
 
 class SteamClientTest(unittest.IsolatedAsyncioTestCase):
+    def test_game_candidate_defaults_to_released(self) -> None:
+        candidate = GameCandidate(title="Released Game")
+
+        self.assertFalse(candidate.coming_soon)
+
+    def test_steam_detail_preserves_release_availability(self) -> None:
+        released_payload = steam_detail_payload()
+        coming_soon_payload = steam_detail_payload()
+        coming_soon_payload["release_date"] = {
+            "date": "即将推出",
+            "coming_soon": True,
+        }
+
+        released = parse_steam_game(1, released_payload)
+        coming_soon = parse_steam_game(2, coming_soon_payload)
+
+        self.assertFalse(released.coming_soon)
+        self.assertTrue(coming_soon.coming_soon)
+
+    def test_steam_detail_does_not_coerce_non_boolean_release_status(self) -> None:
+        payload = steam_detail_payload()
+        payload["release_date"] = {
+            "date": "即将推出",
+            "coming_soon": "true",
+        }
+
+        candidate = parse_steam_game(1, payload)
+
+        self.assertFalse(candidate.coming_soon)
+
     async def test_search_game_refs_returns_lightweight_hits_without_detail_calls(self) -> None:
         cache = MemoryCache()
         http_client = FakeHttpClient(

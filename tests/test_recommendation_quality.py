@@ -129,7 +129,7 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
     async def test_cached_index_orders_tag_coverage_before_reviews(self) -> None:
         cache = MemoryCache(
             {
-                "steam_index:v3": [
+                "steam_index:v4": [
                     dump_model(
                         steam_game(
                             "High Review Generic Co-op",
@@ -174,7 +174,7 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
     async def test_cached_index_defaults_to_strict_primary_ranking(self) -> None:
         cache = MemoryCache(
             {
-                "steam_index:v3": [
+                "steam_index:v4": [
                     dump_model(
                         steam_game("Farm Co-op A", ["Co-op", "Puzzle", "Farming", "Crafting"])
                     ),
@@ -208,7 +208,7 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
     async def test_cached_index_returns_continuous_score_order(self) -> None:
         cache = MemoryCache(
             {
-                "steam_index:v3": [
+                "steam_index:v4": [
                     dump_model(
                         steam_game("Farm Co-op A", ["Co-op", "Puzzle", "Farming", "Crafting"])
                     ),
@@ -295,9 +295,9 @@ class MemoryCache:
 
     async def get_json(self, key: str, _ttl_hours: int) -> Any | None:
         payload = self.payloads.get(key)
-        if key == "steam_index:v3" and isinstance(payload, list):
+        if key == "steam_index:v4" and isinstance(payload, list):
             return {
-                "version": 3,
+                "version": 4,
                 "entries": [{"candidate": entry, "refreshed_at": 1.0} for entry in payload],
                 "search_coverage": {},
             }

@@ -327,6 +327,7 @@ class GameCandidate(BaseModel):
     metacritic: int | None = None
     released: str | None = None
     release_date: str | None = None
+    coming_soon: bool = False
     playtime: int | None = None
     stores: list[str] = Field(default_factory=list)
     raw_url: str | None = None
