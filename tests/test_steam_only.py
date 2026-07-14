@@ -55,6 +55,12 @@ class SteamOnlyMetadataTest(unittest.TestCase):
         self.assertNotIn("/未玩推荐", readme)
         self.assertIn("-US", readme)
         self.assertIn("推荐分：86%", readme)
+        self.assertIn("搜索条目必须是 `app`", readme)
+        self.assertIn("详情类型必须是 `game`", readme)
+        self.assertIn("DLC、Demo、原声、工具和套餐", readme)
+        self.assertIn("同一作品只保留一款", readme)
+        self.assertIn("`llm_fallback_provider_id`", readme)
+        self.assertIn("⚠️ LLM 兜底建议", readme)
 
     def test_readme_is_a_user_facing_overview_with_combined_examples(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
