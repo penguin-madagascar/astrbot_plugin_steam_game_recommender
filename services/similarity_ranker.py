@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -22,11 +23,11 @@ from .tag_normalizer import (
 
 MULTIPLAYER_TAGS = {"co_op", "local_coop", "online_coop", "multiplayer"}
 POSITIVE_COMPONENT_WEIGHTS = {
-    "tag_coverage": 30.0,
+    "tag_coverage": 35.0,
     "positive_reference": 25.0,
     "library_profile": 5.0,
     "review_reputation": 20.0,
-    "popularity": 20.0,
+    "popularity": 15.0,
 }
 TAG_WEIGHTS = {
     "co_op": 1.5,
@@ -120,6 +121,7 @@ def rank_steam_candidates(
     min_review_count: int = 50,
     min_positive_ratio: float = 0.65,
     profile_tag_weights: dict[str, float] | None = None,
+    positive_component_weights: Mapping[str, Any] | None = None,
 ) -> list[RankedGame]:
     del min_positive_ratio
     ranked: list[RankedGame] = []
@@ -172,6 +174,7 @@ def rank_steam_candidates(
         popularity = popularity_score(candidate.review_total)
         language_adjustment = language_preference_adjustment(candidate, profile)
         positive_score = weighted_positive_score(
+            positive_component_weights=positive_component_weights,
             tag_coverage=tag_coverage,
             positive_reference=(
                 positive_reference if profile.positive_reference_candidates else None
@@ -183,10 +186,7 @@ def rank_steam_candidates(
         negative_penalty = min(max(negative_reference, 0.0), 1.0) * 20.0
         unknown_penalty = unknown_constraint_penalty(constraints, profile)
         score = clamp_score(
-            positive_score
-            - negative_penalty
-            - unknown_penalty
-            + language_adjustment
+            positive_score - negative_penalty - unknown_penalty + language_adjustment
         )
         breakdown = ScoreBreakdown(
             tag_coverage=tag_coverage,
@@ -236,12 +236,30 @@ def preference_coverage(
     return min(max(matched_weight / total_weight, 0.0), 1.0)
 
 
-def weighted_positive_score(**components: float | None) -> float:
-    available = [
-        (POSITIVE_COMPONENT_WEIGHTS[name], value)
-        for name, value in components.items()
-        if value is not None
-    ]
+def resolve_positive_component_weights(
+    weights: Mapping[str, Any] | None = None,
+) -> dict[str, float]:
+    source = weights or {}
+    resolved: dict[str, float] = {}
+    for name, default in POSITIVE_COMPONENT_WEIGHTS.items():
+        try:
+            value = float(source.get(name, default))
+        except (TypeError, ValueError):
+            value = default
+        if not math.isfinite(value):
+            value = default
+        resolved[name] = min(max(value, 0.0), 100.0)
+    if not any(resolved.values()):
+        return dict(POSITIVE_COMPONENT_WEIGHTS)
+    return resolved
+
+
+def weighted_positive_score(
+    positive_component_weights: Mapping[str, Any] | None = None,
+    **components: float | None,
+) -> float:
+    weights = resolve_positive_component_weights(positive_component_weights)
+    available = [(weights[name], value) for name, value in components.items() if value is not None]
     total_weight = sum(weight for weight, _value in available)
     if not total_weight:
         return 0.0

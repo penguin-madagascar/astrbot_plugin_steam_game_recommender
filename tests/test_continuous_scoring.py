@@ -9,6 +9,7 @@ from astrbot_plugin_steam_game_recommender.services.similarity_ranker import (
     popularity_score,
     rank_steam_candidates,
     ranked_game_sort_key,
+    resolve_positive_component_weights,
     weighted_positive_score,
 )
 from astrbot_plugin_steam_game_recommender.storage.models import (
@@ -24,11 +25,11 @@ class ContinuousScoringTest(unittest.TestCase):
         self.assertEqual(
             POSITIVE_COMPONENT_WEIGHTS,
             {
-                "tag_coverage": 30.0,
+                "tag_coverage": 35.0,
                 "positive_reference": 25.0,
                 "library_profile": 5.0,
                 "review_reputation": 20.0,
-                "popularity": 20.0,
+                "popularity": 15.0,
             },
         )
 
@@ -41,14 +42,14 @@ class ContinuousScoringTest(unittest.TestCase):
             "popularity": 0.7,
         }
 
-        self.assertAlmostEqual(weighted_positive_score(**components), 73.0)
+        self.assertAlmostEqual(weighted_positive_score(**components), 73.5)
         self.assertAlmostEqual(
             weighted_positive_score(**{**components, "library_profile": None}),
-            (30 * 0.8 + 25 * 0.6 + 20 * 0.9 + 20 * 0.7) / 95 * 100,
+            (35 * 0.8 + 25 * 0.6 + 20 * 0.9 + 15 * 0.7) / 95 * 100,
         )
         self.assertAlmostEqual(
             weighted_positive_score(**{**components, "positive_reference": None}),
-            (30 * 0.8 + 5 * 0.4 + 20 * 0.9 + 20 * 0.7) / 75 * 100,
+            (35 * 0.8 + 5 * 0.4 + 20 * 0.9 + 15 * 0.7) / 75 * 100,
         )
         self.assertAlmostEqual(
             weighted_positive_score(
@@ -58,7 +59,62 @@ class ContinuousScoringTest(unittest.TestCase):
                 review_reputation=0.9,
                 popularity=0.7,
             ),
-            (30 * 0.8 + 20 * 0.9 + 20 * 0.7) / 70 * 100,
+            (35 * 0.8 + 20 * 0.9 + 15 * 0.7) / 70 * 100,
+        )
+
+    def test_positive_weight_config_is_sanitized_and_all_zero_falls_back(self) -> None:
+        self.assertEqual(
+            resolve_positive_component_weights(
+                {
+                    "tag_coverage": 120,
+                    "positive_reference": -3,
+                    "library_profile": "invalid",
+                    "review_reputation": float("inf"),
+                    "popularity": "10",
+                }
+            ),
+            {
+                "tag_coverage": 100.0,
+                "positive_reference": 0.0,
+                "library_profile": 5.0,
+                "review_reputation": 20.0,
+                "popularity": 10.0,
+            },
+        )
+        self.assertEqual(
+            resolve_positive_component_weights(dict.fromkeys(POSITIVE_COMPONENT_WEIGHTS, 0)),
+            POSITIVE_COMPONENT_WEIGHTS,
+        )
+
+    def test_custom_positive_weights_are_used_with_dynamic_normalization(self) -> None:
+        weights = {
+            "tag_coverage": 60,
+            "positive_reference": 20,
+            "library_profile": 0,
+            "review_reputation": 10,
+            "popularity": 10,
+        }
+        components = {
+            "tag_coverage": 0.8,
+            "positive_reference": 0.6,
+            "library_profile": 0.4,
+            "review_reputation": 0.9,
+            "popularity": 0.7,
+        }
+
+        self.assertAlmostEqual(
+            weighted_positive_score(
+                positive_component_weights=weights,
+                **components,
+            ),
+            76.0,
+        )
+        self.assertAlmostEqual(
+            weighted_positive_score(
+                positive_component_weights=weights,
+                **{**components, "positive_reference": None},
+            ),
+            80.0,
         )
 
     def test_popularity_uses_logarithmic_review_count(self) -> None:
@@ -75,7 +131,7 @@ class ContinuousScoringTest(unittest.TestCase):
 
         game = ranked[0]
         popularity = min(math.log10(1_000) / 5, 1)
-        expected = round((30 * 1.0 + 20 * 0.8 + 20 * popularity) / 70 * 100)
+        expected = round((35 * 1.0 + 20 * 0.8 + 15 * popularity) / 70 * 100)
 
         self.assertEqual(game.score, expected)
         self.assertIsNone(game.score_breakdown.positive_reference)
@@ -96,6 +152,31 @@ class ContinuousScoringTest(unittest.TestCase):
             ranked[0].score_breakdown.tag_coverage,
             ranked[1].score_breakdown.tag_coverage,
         )
+
+    def test_ranker_uses_instance_weights_without_mutating_defaults(self) -> None:
+        candidates = [
+            candidate("Exact Small Match", ["Puzzle"], reviews=1, ratio=0.8),
+            candidate("Huge Wrong Match", ["Action"], reviews=1_000_000, ratio=0.8),
+        ]
+        profile = SteamTagProfile(include_tags=["puzzle"])
+
+        default_ranked = rank_steam_candidates(candidates, profile)
+        popularity_ranked = rank_steam_candidates(
+            candidates,
+            profile,
+            positive_component_weights={
+                "tag_coverage": 0,
+                "positive_reference": 0,
+                "library_profile": 0,
+                "review_reputation": 0,
+                "popularity": 100,
+            },
+        )
+
+        self.assertEqual(default_ranked[0].title, "Exact Small Match")
+        self.assertEqual(popularity_ranked[0].title, "Huge Wrong Match")
+        self.assertEqual(POSITIVE_COMPONENT_WEIGHTS["tag_coverage"], 35.0)
+        self.assertEqual(POSITIVE_COMPONENT_WEIGHTS["popularity"], 15.0)
 
     def test_negative_reference_penalty_is_capped_at_twenty_points(self) -> None:
         seed = candidate("Negative Seed", ["Management", "Casual"])

@@ -113,6 +113,32 @@ class UserProfileSteamIndexTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_recommend_uses_service_positive_component_weights(self) -> None:
+        service = SteamGameIndexService(
+            steam_client=NoLiveSearchSteamClient(),
+            cache=MemoryCache(
+                [
+                    steam_game(1, "Exact Small Match", ["Puzzle"], reviews=1),
+                    steam_game(2, "Huge Wrong Match", ["Action"], reviews=1_000_000),
+                ]
+            ),
+            positive_component_weights={
+                "tag_coverage": 0,
+                "positive_reference": 0,
+                "library_profile": 0,
+                "review_reputation": 0,
+                "popularity": 100,
+            },
+        )
+
+        ranked = await service.recommend(
+            GamePreference(platforms=["steam"], genres_like=["puzzle"]),
+            limit=2,
+        )
+
+        self.assertEqual(ranked[0].title, "Huge Wrong Match")
+        self.assertEqual(service.positive_component_weights["popularity"], 100.0)
+
 
 class BoundUserProfileLoaderTest(unittest.IsolatedAsyncioTestCase):
     async def test_loads_weights_for_bound_account_with_api_key(self) -> None:
@@ -173,14 +199,19 @@ class BoundUserProfileLoaderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(no_api_key, {})
 
 
-def steam_game(appid: int, title: str, tags: list[str]) -> GameCandidate:
+def steam_game(
+    appid: int,
+    title: str,
+    tags: list[str],
+    reviews: int = 500,
+) -> GameCandidate:
     return GameCandidate(
         title=title,
         appid=appid,
         platforms=["PC"],
         tags=tags,
         stores=["Steam"],
-        review_total=500,
+        review_total=reviews,
         review_positive_ratio=0.8,
     )
 

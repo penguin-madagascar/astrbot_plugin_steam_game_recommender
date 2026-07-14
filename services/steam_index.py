@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Any, Callable, Protocol
@@ -19,6 +20,7 @@ from .similarity_ranker import (
     SteamTagProfile,
     build_profile_from_preference,
     rank_steam_candidates,
+    resolve_positive_component_weights,
 )
 from .tag_normalizer import (
     canonical_tags_from_terms,
@@ -85,6 +87,7 @@ class SteamGameIndexService:
         min_positive_ratio: float = 0.65,
         page_size: int = STEAM_INDEX_SEARCH_RESULTS_PER_TERM,
         clock: Callable[[], float] = time.time,
+        positive_component_weights: Mapping[str, Any] | None = None,
     ) -> None:
         self.steam_client = steam_client
         self.cache = cache
@@ -93,6 +96,9 @@ class SteamGameIndexService:
         self.min_positive_ratio = min(max(float(min_positive_ratio), 0.0), 1.0)
         self.page_size = min(max(int(page_size), 1), STEAM_INDEX_SEARCH_RESULTS_PER_TERM)
         self.clock = clock
+        self.positive_component_weights = resolve_positive_component_weights(
+            positive_component_weights
+        )
         self._tag_aliases_attempted = False
         self._tag_aliases_loaded = False
         self._round_prefetched: dict[int, GameCandidate] = {}
@@ -117,6 +123,7 @@ class SteamGameIndexService:
             self.min_review_count,
             self.min_positive_ratio,
             profile_tag_weights=profile_tag_weights,
+            positive_component_weights=self.positive_component_weights,
         )
         ranked = exclude_previously_shown(ranked, excluded_appids, excluded_titles)
         quality_target = max(10, max(int(limit), 0) * 2)
@@ -137,6 +144,7 @@ class SteamGameIndexService:
             self.min_review_count,
             self.min_positive_ratio,
             profile_tag_weights=profile_tag_weights,
+            positive_component_weights=self.positive_component_weights,
         )
         ranked = exclude_previously_shown(ranked, excluded_appids, excluded_titles)
         return ranked[:limit]
@@ -463,6 +471,7 @@ def rank_entries(
     min_review_count: int,
     min_positive_ratio: float,
     profile_tag_weights: dict[str, float] | None = None,
+    positive_component_weights: Mapping[str, Any] | None = None,
 ) -> list[RankedGame]:
     profile = build_profile_from_preference(
         preference,
@@ -475,6 +484,7 @@ def rank_entries(
         min_review_count,
         min_positive_ratio,
         profile_tag_weights=profile_tag_weights,
+        positive_component_weights=positive_component_weights,
     )
 
 
