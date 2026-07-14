@@ -3,6 +3,13 @@ from __future__ import annotations
 import sys
 import types
 import unittest
+from unittest.mock import patch
+
+
+class FakeStar:
+    def __init__(self, context) -> None:
+        self.context = context
+
 
 api_module = types.ModuleType("astrbot.api")
 api_module.AstrBotConfig = dict
@@ -17,7 +24,7 @@ event_module.AstrMessageEvent = object
 event_module.filter = types.SimpleNamespace(command=lambda *_args, **_kwargs: lambda func: func)
 star_module = types.ModuleType("astrbot.api.star")
 star_module.Context = object
-star_module.Star = object
+star_module.Star = FakeStar
 star_module.StarTools = types.SimpleNamespace(get_data_dir=lambda _name: "/tmp")
 star_module.register = lambda *_args, **_kwargs: lambda cls: cls
 command_module = types.ModuleType("astrbot.core.star.filter.command")
@@ -41,6 +48,7 @@ command_stub = sys.modules.setdefault("astrbot.core.star.filter.command", comman
 command_stub.GreedyStr = getattr(command_stub, "GreedyStr", str)
 
 try:
+    from astrbot_plugin_steam_game_recommender import main as main_module
     from astrbot_plugin_steam_game_recommender.main import (
         PreparedRecommendation,
         SteamGameRecommenderPlugin,
@@ -68,6 +76,100 @@ class FakePreferenceParser:
     async def parse_preference(self, _event, text: str) -> GamePreference:
         self.seen_text = text
         return self.preference
+
+
+class PluginDashboardConfigTest(unittest.TestCase):
+    def test_nested_dashboard_config_is_wired_to_runtime_services(self) -> None:
+        config = {
+            "model_and_access": {
+                "llm_provider_id": "provider/nested",
+                "enable_llm_fallback": True,
+                "steam_api_key": "nested-steam-key",
+            },
+            "price_and_region": {
+                "default_region": "jp",
+            },
+            "recommendation_and_scoring": {
+                "max_results": 8,
+                "tag_coverage_weight": 45,
+                "positive_reference_weight": 20,
+                "library_profile_weight": 5,
+                "review_reputation_weight": 20,
+                "popularity_weight": 10,
+                "steam_index_ttl_hours": 96,
+                "steam_min_review_count": 80,
+                "steam_min_positive_ratio": 0.72,
+            },
+            "cache_and_network": {
+                "cache_ttl_hours": 48,
+                "timeout_seconds": 21,
+            },
+            "llm_provider_id": "provider/legacy-flat",
+            "default_region": "CN",
+            "max_results": 2,
+            "steam_api_key": "legacy-steam-key",
+            "timeout_seconds": 1,
+        }
+        http_client = object()
+        cache = object()
+
+        with (
+            patch.object(
+                main_module.httpx,
+                "AsyncClient",
+                return_value=http_client,
+            ) as async_client_class,
+            patch.object(
+                main_module,
+                "SQLiteCacheRepository",
+                return_value=cache,
+            ),
+            patch.object(main_module, "SteamClient") as steam_client_class,
+            patch.object(main_module, "PreferenceParser"),
+            patch.object(main_module, "SteamGameIndexService") as index_service_class,
+            patch.object(main_module, "SteamPriceBridge") as price_bridge_class,
+        ):
+            price_bridge_class.return_value.is_available.return_value = False
+            plugin = SteamGameRecommenderPlugin(object(), config)
+
+        self.assertEqual(plugin.provider_id, "provider/nested")
+        self.assertIs(plugin.enable_llm_fallback, True)
+        self.assertEqual(plugin.default_region, "JP")
+        self.assertEqual(plugin.max_results, 8)
+        self.assertEqual(plugin.steam_min_review_count, 80)
+        self.assertEqual(plugin.steam_min_positive_ratio, 0.72)
+        self.assertEqual(
+            async_client_class.call_args.kwargs["timeout"].connect,
+            21,
+        )
+        self.assertEqual(
+            steam_client_class.call_args.kwargs,
+            {
+                "client": http_client,
+                "cache": cache,
+                "cache_ttl_hours": 48,
+                "default_country": "JP",
+                "language": "schinese",
+                "steam_api_key": "nested-steam-key",
+            },
+        )
+        self.assertEqual(index_service_class.call_args.kwargs["ttl_hours"], 96)
+        self.assertEqual(index_service_class.call_args.kwargs["min_review_count"], 80)
+        self.assertEqual(index_service_class.call_args.kwargs["min_positive_ratio"], 0.72)
+        self.assertEqual(
+            index_service_class.call_args.kwargs["positive_component_weights"],
+            {
+                "tag_coverage": 45,
+                "positive_reference": 20,
+                "library_profile": 5,
+                "review_reputation": 20,
+                "popularity": 10,
+            },
+        )
+        price_bridge_class.assert_called_once_with(
+            http_client,
+            {"default_region": "JP"},
+        )
 
 
 class PrepareRecommendationLlmFallbackTest(unittest.IsolatedAsyncioTestCase):

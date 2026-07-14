@@ -25,7 +25,14 @@ class RandomRecommendationCommandTest(unittest.IsolatedAsyncioTestCase):
         plugin.steam_client = UnplayedSteamClient()
         plugin.context = ReasonContext()
         plugin.provider_id = "provider-1"
-        plugin.config = {"steam_min_review_count": 50, "steam_min_positive_ratio": 0.65}
+        plugin.recommendation_config = {
+            "steam_min_review_count": 50,
+            "steam_min_positive_ratio": 0.65,
+        }
+        plugin.config = {
+            "steam_min_review_count": 50_000,
+            "steam_min_positive_ratio": 0.99,
+        }
         event = PlainEvent()
 
         results = [item async for item in plugin.recommend_random_game(event)]

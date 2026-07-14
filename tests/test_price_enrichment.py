@@ -86,8 +86,9 @@ class CommandRegistrationTest(unittest.TestCase):
 
     def test_dashboard_hides_price_plugin_runtime_settings(self) -> None:
         schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        price_items = schema["price_and_region"]["items"]
 
-        self.assertIn("steam_price_heybox_notice", schema)
+        self.assertIn("steam_price_heybox_notice", price_items)
         for removed_key in (
             "itad" + "_api_key",
             "enable_steam_price_enrichment",
@@ -106,15 +107,19 @@ class CommandRegistrationTest(unittest.TestCase):
     def test_dashboard_schema_copy_and_order(self) -> None:
         schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
 
-        self.assertEqual(next(iter(schema)), "llm_provider_id")
-        for key, config in schema.items():
-            with self.subTest(key=key):
-                self.assertTrue(str(config.get("hint") or "").strip())
-                self.assertFalse(str(config.get("description") or "").endswith("。"))
+        self.assertEqual(next(iter(schema)), "model_and_access")
+        for group_key, group in schema.items():
+            with self.subTest(group=group_key):
+                self.assertTrue(str(group.get("hint") or "").strip())
+                self.assertFalse(str(group.get("description") or "").endswith("。"))
+            for key, config in group["items"].items():
+                with self.subTest(key=key):
+                    self.assertTrue(str(config.get("hint") or "").strip())
+                    self.assertFalse(str(config.get("description") or "").endswith("。"))
 
     def test_price_notice_is_readonly_obvious_text(self) -> None:
         schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
-        notice = schema["steam_price_heybox_notice"]
+        notice = schema["price_and_region"]["items"]["steam_price_heybox_notice"]
 
         self.assertEqual(notice["type"], "text")
         self.assertIs(notice["_readonly"], True)

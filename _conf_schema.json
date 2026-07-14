@@ -1,71 +1,139 @@
 {
-  "llm_provider_id": {
-    "type": "string",
-    "description": "用于偏好解析和推荐理由的 LLM 提供商",
-    "hint": "留空时尝试使用当前会话模型；偏好解析失败会降级为关键词规则，单款理由失败会降级为可信证据规则理由。",
-    "_special": "select_provider",
-    "default": ""
+  "model_and_access": {
+    "type": "object",
+    "description": "模型与鉴权",
+    "hint": "配置偏好解析、推荐兜底和 Steam 游戏库访问",
+    "items": {
+      "llm_provider_id": {
+        "type": "string",
+        "description": "‼️用于偏好解析和推荐理由的 LLM 提供商",
+        "hint": "留空时尝试使用当前会话模型；偏好解析失败会降级为关键词规则，单款理由失败会降级为可信证据规则理由。",
+        "_special": "select_provider",
+        "default": ""
+      },
+      "enable_llm_fallback": {
+        "type": "bool",
+        "description": "启用 LLM 空结果兜底",
+        "hint": "开启后，如果 Steam 索引和过滤后没有结果，或用户明确要求非 Steam 平台，会使用 LLM 生成已标注的未验证建议。",
+        "default": false
+      },
+      "steam_api_key": {
+        "type": "string",
+        "description": "Steam Web API Key",
+        "hint": "用于 /gamerec 的游戏库过滤和 /randomrec 调用 Steam GetOwnedGames；留空时账号绑定仍可用，但无法读取游戏库。可前往 [Steam Web API Key 申请页](https://steamcommunity.com/dev/apikey) 获取。",
+        "default": ""
+      }
+    }
   },
-  "enable_llm_fallback": {
-    "type": "bool",
-    "description": "启用 LLM 空结果兜底",
-    "hint": "开启后，如果 Steam 索引和过滤后没有结果，或用户明确要求非 Steam 平台，会使用 LLM 生成已标注的未验证建议。",
-    "default": false
+  "price_and_region": {
+    "type": "object",
+    "description": "价格与地区",
+    "hint": "配置 Steam 价格增强说明和默认查询地区",
+    "items": {
+      "steam_price_heybox_notice": {
+        "type": "text",
+        "description": "Steam 价格增强说明",
+        "hint": "这是提示信息，无需配置；安装 astrbot_plugin_steam_price_heybox 后会自动启用。",
+        "default": "无需配置。安装 astrbot_plugin_steam_price_heybox 后，本插件会自动启用指定区域价格查询，返回 Steam 当前价、历史最低和最近促销；未安装时仍可正常推荐游戏。",
+        "_readonly": true,
+        "obvious_hint": true
+      },
+      "default_region": {
+        "type": "string",
+        "description": "默认地区代码",
+        "hint": "未在命令中指定地区时使用；支持 CN、US、JP 等两字母代码，查询可用 -US、国区、美区、日区等覆盖。",
+        "default": "CN"
+      }
+    }
   },
-  "default_region": {
-    "type": "string",
-    "description": "默认地区代码",
-    "hint": "未在命令中指定地区时使用；支持 CN、US、JP 等两字母代码，查询可用 -US、国区、美区、日区等覆盖。",
-    "default": "CN"
+  "recommendation_and_scoring": {
+    "type": "object",
+    "description": "推荐与评分",
+    "hint": "配置推荐数量、正向评分权重和 Steam 推荐质量参数",
+    "items": {
+      "max_results": {
+        "type": "int",
+        "description": "默认推荐数量上限",
+        "hint": "每次默认返回的推荐条数，范围 1-10；用户明确要求数量时会优先采用用户数量但不超过该上限。",
+        "default": 5
+      },
+      "tag_coverage_weight": {
+        "type": "float",
+        "description": "标签覆盖权重",
+        "hint": "标签覆盖在正向评分中的相对权重；系统会按当前可用分量自动归一化，无需手工凑满 100。",
+        "default": 35.0,
+        "min": 0,
+        "max": 100
+      },
+      "positive_reference_weight": {
+        "type": "float",
+        "description": "正面参考权重",
+        "hint": "正面参考游戏相似度的相对权重；系统会按当前可用分量自动归一化，无需手工凑满 100。",
+        "default": 25.0,
+        "min": 0,
+        "max": 100
+      },
+      "library_profile_weight": {
+        "type": "float",
+        "description": "游戏库画像权重",
+        "hint": "Steam 游戏库画像匹配度的相对权重；系统会按当前可用分量自动归一化，无需手工凑满 100。",
+        "default": 5.0,
+        "min": 0,
+        "max": 100
+      },
+      "review_reputation_weight": {
+        "type": "float",
+        "description": "口碑权重",
+        "hint": "Steam 口碑评分的相对权重；系统会按当前可用分量自动归一化，无需手工凑满 100。",
+        "default": 20.0,
+        "min": 0,
+        "max": 100
+      },
+      "popularity_weight": {
+        "type": "float",
+        "description": "知名度权重",
+        "hint": "Steam 评测数量所反映知名度的相对权重；系统会按当前可用分量自动归一化，无需手工凑满 100。",
+        "default": 15.0,
+        "min": 0,
+        "max": 100
+      },
+      "steam_index_ttl_hours": {
+        "type": "int",
+        "description": "Steam 推荐索引缓存有效期（小时）",
+        "hint": "Steam 推荐会优先使用本地索引；超过该时间后会尝试用 Steam 公开数据刷新索引。",
+        "default": 168
+      },
+      "steam_min_review_count": {
+        "type": "int",
+        "description": "Steam 口碑先验强度",
+        "hint": "索引推荐使用该值（最低按 50）进行好评率贝叶斯平滑；/randomrec 仍将它作为最低评测数量。",
+        "default": 50
+      },
+      "steam_min_positive_ratio": {
+        "type": "float",
+        "description": "随机推荐最低好评率",
+        "hint": "仅用于 /randomrec 的评价门槛；索引推荐使用贝叶斯平滑口碑分，不按好评率直接删除候选。",
+        "default": 0.65
+      }
+    }
   },
-  "steam_api_key": {
-    "type": "string",
-    "description": "Steam Web API Key",
-    "hint": "用于 /gamerec 的游戏库过滤和 /randomrec 调用 Steam GetOwnedGames；留空时账号绑定仍可用，但无法读取游戏库。",
-    "default": ""
-  },
-  "steam_price_heybox_notice": {
-    "type": "text",
-    "description": "Steam 价格增强说明",
-    "hint": "这是提示信息，无需配置；安装 astrbot_plugin_steam_price_heybox 后会自动启用。",
-    "default": "无需配置。安装 astrbot_plugin_steam_price_heybox 后，本插件会自动启用指定区域价格查询，返回 Steam 当前价、历史最低和最近促销；未安装时仍可正常推荐游戏。",
-    "_readonly": true,
-    "obvious_hint": true
-  },
-  "max_results": {
-    "type": "int",
-    "description": "默认推荐数量上限",
-    "hint": "每次默认返回的推荐条数，范围 1-10；用户明确要求数量时会优先采用用户数量但不超过该上限。",
-    "default": 5
-  },
-  "steam_index_ttl_hours": {
-    "type": "int",
-    "description": "Steam 推荐索引缓存有效期（小时）",
-    "hint": "Steam 推荐会优先使用本地索引；超过该时间后会尝试用 Steam 公开数据刷新索引。",
-    "default": 168
-  },
-  "steam_min_review_count": {
-    "type": "int",
-    "description": "Steam 口碑先验强度",
-    "hint": "索引推荐使用该值（最低按 50）进行好评率贝叶斯平滑；/randomrec 仍将它作为最低评测数量。",
-    "default": 50
-  },
-  "steam_min_positive_ratio": {
-    "type": "float",
-    "description": "随机推荐最低好评率",
-    "hint": "仅用于 /randomrec 的评价门槛；索引推荐使用贝叶斯平滑口碑分，不按好评率直接删除候选。",
-    "default": 0.65
-  },
-  "cache_ttl_hours": {
-    "type": "int",
-    "description": "游戏数据查询缓存有效期（小时）",
-    "hint": "Steam 查询结果的缓存时间；调大可减少请求，调小可获得更新数据。",
-    "default": 24
-  },
-  "timeout_seconds": {
-    "type": "int",
-    "description": "HTTP 请求超时时间",
-    "hint": "Steam 和价格查询的单次 HTTP 请求超时时间，单位秒。",
-    "default": 15
+  "cache_and_network": {
+    "type": "object",
+    "description": "缓存与网络",
+    "hint": "配置 Steam 数据缓存和网络请求超时",
+    "items": {
+      "cache_ttl_hours": {
+        "type": "int",
+        "description": "游戏数据查询缓存有效期（小时）",
+        "hint": "Steam 查询结果的缓存时间；调大可减少请求，调小可获得更新数据。",
+        "default": 24
+      },
+      "timeout_seconds": {
+        "type": "int",
+        "description": "HTTP 请求超时时间",
+        "hint": "Steam 和价格查询的单次 HTTP 请求超时时间，单位秒。",
+        "default": 15
+      }
+    }
   }
 }

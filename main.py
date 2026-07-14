@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -100,11 +101,37 @@ class SteamGameRecommenderPlugin(Star):
         super().__init__(context)
         self.context = context
         self.config = config or {}
-        timeout = safe_int(self.config.get("timeout_seconds"), 15)
-        self.max_results = min(max(safe_int(self.config.get("max_results"), 5), 1), 10)
-        self.provider_id = str(self.config.get("llm_provider_id", "") or "").strip()
-        self.enable_llm_fallback = bool(self.config.get("enable_llm_fallback"))
-        self.default_region = normalize_region(str(self.config.get("default_region") or "CN"))
+        model_config = config_section(self.config, "model_and_access")
+        price_config = config_section(self.config, "price_and_region")
+        self.recommendation_config = config_section(
+            self.config,
+            "recommendation_and_scoring",
+        )
+        cache_config = config_section(self.config, "cache_and_network")
+
+        timeout = safe_int(cache_config.get("timeout_seconds"), 15)
+        self.max_results = min(
+            max(safe_int(self.recommendation_config.get("max_results"), 5), 1),
+            10,
+        )
+        self.provider_id = str(model_config.get("llm_provider_id", "") or "").strip()
+        self.enable_llm_fallback = bool(model_config.get("enable_llm_fallback"))
+        self.default_region = normalize_region(str(price_config.get("default_region") or "CN"))
+        self.steam_min_review_count = safe_int(
+            self.recommendation_config.get("steam_min_review_count"),
+            50,
+        )
+        self.steam_min_positive_ratio = safe_float(
+            self.recommendation_config.get("steam_min_positive_ratio"),
+            0.65,
+        )
+        positive_component_weights = {
+            "tag_coverage": self.recommendation_config.get("tag_coverage_weight"),
+            "positive_reference": self.recommendation_config.get("positive_reference_weight"),
+            "library_profile": self.recommendation_config.get("library_profile_weight"),
+            "review_reputation": self.recommendation_config.get("review_reputation_weight"),
+            "popularity": self.recommendation_config.get("popularity_weight"),
+        }
 
         self.http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout),
@@ -119,20 +146,27 @@ class SteamGameRecommenderPlugin(Star):
         self.steam_client = SteamClient(
             client=self.http_client,
             cache=self.cache,
-            cache_ttl_hours=safe_int(self.config.get("cache_ttl_hours"), 24),
+            cache_ttl_hours=safe_int(cache_config.get("cache_ttl_hours"), 24),
             default_country=self.default_region,
             language="schinese",
-            steam_api_key=str(self.config.get("steam_api_key") or ""),
+            steam_api_key=str(model_config.get("steam_api_key") or ""),
         )
         self.preference_parser = PreferenceParser(context, self.provider_id)
         self.steam_index = SteamGameIndexService(
             steam_client=self.steam_client,
             cache=self.cache,
-            ttl_hours=safe_int(self.config.get("steam_index_ttl_hours"), 168),
-            min_review_count=safe_int(self.config.get("steam_min_review_count"), 50),
-            min_positive_ratio=safe_float(self.config.get("steam_min_positive_ratio"), 0.65),
+            ttl_hours=safe_int(
+                self.recommendation_config.get("steam_index_ttl_hours"),
+                168,
+            ),
+            min_review_count=self.steam_min_review_count,
+            min_positive_ratio=self.steam_min_positive_ratio,
+            positive_component_weights=positive_component_weights,
         )
-        self.price_bridge = SteamPriceBridge(self.http_client, self.config)
+        self.price_bridge = SteamPriceBridge(
+            self.http_client,
+            {"default_region": self.default_region},
+        )
         if self.price_bridge.is_available():
             logger.info(
                 "Detected astrbot_plugin_steam_price_heybox; Steam price enrichment enabled."
@@ -275,8 +309,14 @@ class SteamGameRecommenderPlugin(Star):
                 yield event.plain_result("Steam 游戏库为空或不可见，无法进行随机推荐。")
                 return
 
-            min_review_count = safe_int(self.config.get("steam_min_review_count"), 50)
-            min_positive_ratio = safe_float(self.config.get("steam_min_positive_ratio"), 0.65)
+            min_review_count = safe_int(
+                self.recommendation_config.get("steam_min_review_count"),
+                50,
+            )
+            min_positive_ratio = safe_float(
+                self.recommendation_config.get("steam_min_positive_ratio"),
+                0.65,
+            )
             recommendation = await pick_random_unplayed_game(
                 owned_games,
                 self.steam_client,
@@ -677,6 +717,11 @@ def safe_float(value: Any, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def config_section(config: Mapping[str, Any], name: str) -> Mapping[str, Any]:
+    section = config.get(name)
+    return section if isinstance(section, Mapping) else {}
 
 
 def explicitly_changes_result_count(text: str) -> bool:
