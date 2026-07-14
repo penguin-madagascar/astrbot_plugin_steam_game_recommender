@@ -38,6 +38,7 @@ from .recommendation_scoring import (
     semantic_score,
     wilson_lower_bound,
 )
+from .ranking_precedence import ranked_game_precedence_prefix
 from .tag_normalizer import (
     canonical_tags_from_terms,
     normalize_tag,
@@ -590,28 +591,8 @@ def language_label(language: str) -> str:
 
 
 def ranked_game_sort_key(game: RankedGame) -> tuple[Any, ...]:
-    tier_order = {
-        RelevanceTier.A.value: 0,
-        RelevanceTier.BROAD.value: 0,
-        RelevanceTier.B.value: 1,
-        RelevanceTier.C.value: 2,
-    }
-    breakdown = game.score_breakdown
-    raw_layer = float(breakdown.layer_score)
-    has_scored_layer = raw_layer != 0.0
-    if not has_scored_layer and game.score:
-        raw_layer = float(game.score) / 100.0
-    effective_layer = (
-        raw_layer + float(breakdown.budget_adjustment) / 100.0
-        if has_scored_layer
-        else raw_layer
-    )
-    retrieval_rank = int(breakdown.retrieval_rank)
     return (
-        tier_order.get(breakdown.relevance_tier, 3),
-        -effective_layer,
-        -raw_layer,
-        retrieval_rank if retrieval_rank > 0 else 1_000_000_000,
+        *ranked_game_precedence_prefix(game),
         -int(game.review_total or 0),
         -release_year(game.release_date or game.released),
         game.title.casefold(),

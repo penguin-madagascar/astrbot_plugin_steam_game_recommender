@@ -161,7 +161,10 @@ class ContinuousScoringTest(unittest.TestCase):
                 title="Tier A",
                 score=10,
                 score_breakdown=ScoreBreakdown(
-                    relevance_tier="A", layer_score=0.10, retrieval_rank=1
+                    relevance_tier="A",
+                    layer_score=0.10,
+                    retrieval_rank=1,
+                    language_adjustment=-10,
                 ),
             ),
             RankedGame(
@@ -192,6 +195,126 @@ class ContinuousScoringTest(unittest.TestCase):
 
 
 class LanguageScoringTest(unittest.TestCase):
+    def test_language_adjustment_applies_to_zero_layer_ranker_results(self) -> None:
+        ranked = rank_steam_candidates(
+            [
+                candidate(
+                    "A Unsupported Zero",
+                    [],
+                    reviews=None,
+                    ratio=None,
+                    supported_languages=["tchinese"],
+                    language_data_available=True,
+                ),
+                candidate(
+                    "Z Supported Zero",
+                    [],
+                    reviews=None,
+                    ratio=None,
+                    supported_languages=["schinese"],
+                    language_data_available=True,
+                ),
+            ],
+            SteamTagProfile(required_languages=["schinese"]),
+        )
+
+        self.assertEqual(
+            [game.title for game in ranked],
+            ["Z Supported Zero", "A Unsupported Zero"],
+        )
+        self.assertTrue(all(game.score == 0 for game in ranked))
+        self.assertTrue(
+            all(game.score_breakdown.retrieval_rank > 0 for game in ranked)
+        )
+
+    def test_language_adjustment_changes_order_within_the_same_tier(self) -> None:
+        cases = (
+            (
+                "unknown",
+                SteamTagProfile(
+                    include_tags=["puzzle"],
+                    preferred_languages=["schinese"],
+                ),
+                candidate("A Unknown", ["Puzzle"]),
+                -2,
+            ),
+            (
+                "preferred",
+                SteamTagProfile(
+                    include_tags=["puzzle"],
+                    preferred_languages=["schinese"],
+                ),
+                candidate(
+                    "A Preferred Mismatch",
+                    ["Puzzle"],
+                    supported_languages=["tchinese"],
+                    language_data_available=True,
+                ),
+                -5,
+            ),
+            (
+                "required",
+                SteamTagProfile(
+                    include_tags=["puzzle"],
+                    required_languages=["schinese"],
+                ),
+                candidate(
+                    "A Required Mismatch",
+                    ["Puzzle"],
+                    supported_languages=["tchinese"],
+                    language_data_available=True,
+                ),
+                -10,
+            ),
+        )
+        for name, profile, mismatch, expected_adjustment in cases:
+            with self.subTest(name=name):
+                supported = candidate(
+                    "Z Supported",
+                    ["Puzzle"],
+                    supported_languages=["schinese"],
+                    language_data_available=True,
+                )
+                ranked = rank_steam_candidates([mismatch, supported], profile)
+
+                self.assertEqual(
+                    [game.title for game in ranked],
+                    ["Z Supported", mismatch.title],
+                )
+                self.assertEqual(
+                    ranked[1].score_breakdown.language_adjustment,
+                    expected_adjustment,
+                )
+
+    def test_language_adjustment_cannot_cross_anchor_tiers(self) -> None:
+        ranked = rank_steam_candidates(
+            [
+                candidate(
+                    "A Lower Tier Supported",
+                    ["Puzzle"],
+                    supported_languages=["schinese"],
+                    language_data_available=True,
+                ),
+                candidate(
+                    "Z Higher Tier Unsupported",
+                    ["Puzzle", "Strategy"],
+                    supported_languages=["tchinese"],
+                    language_data_available=True,
+                ),
+            ],
+            SteamTagProfile(
+                include_tags=["puzzle", "strategy"],
+                required_languages=["schinese"],
+            ),
+        )
+
+        self.assertEqual(
+            [game.title for game in ranked],
+            ["Z Higher Tier Unsupported", "A Lower Tier Supported"],
+        )
+        self.assertEqual(ranked[0].score_breakdown.relevance_tier, "A")
+        self.assertEqual(ranked[1].score_breakdown.relevance_tier, "B")
+
     def test_required_language_uses_penalty_without_filtering(self) -> None:
         ranked = rank_steam_candidates(
             [
@@ -218,7 +341,7 @@ class LanguageScoringTest(unittest.TestCase):
 
         self.assertEqual(
             [game.title for game in ranked],
-            ["Simplified", "Traditional Only", "Unknown"],
+            ["Simplified", "Unknown", "Traditional Only"],
         )
         by_title = {game.title: game for game in ranked}
         self.assertEqual(by_title["Simplified"].score_breakdown.language_adjustment, 0)
@@ -282,6 +405,25 @@ class LanguageScoringTest(unittest.TestCase):
         )[0]
 
         self.assertFalse(any(item.category == "language" for item in game.recommendation_evidence))
+
+    def test_legacy_score_only_records_do_not_double_apply_adjustments(self) -> None:
+        games = [
+            RankedGame(
+                title="Higher Legacy Score",
+                score=80,
+                score_breakdown=ScoreBreakdown(language_adjustment=-10),
+            ),
+            RankedGame(
+                title="Lower Legacy Score",
+                score=79,
+                score_breakdown=ScoreBreakdown(),
+            ),
+        ]
+
+        self.assertEqual(
+            [game.title for game in sorted(games, key=ranked_game_sort_key)],
+            ["Higher Legacy Score", "Lower Legacy Score"],
+        )
 
 
 def candidate(

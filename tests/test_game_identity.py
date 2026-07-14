@@ -65,6 +65,64 @@ class GameFamilyKeyTest(unittest.TestCase):
 
 
 class EditionDeduplicationTest(unittest.TestCase):
+    def test_language_adjustment_selects_zero_layer_ranker_editions(self) -> None:
+        games = [
+            RankedGame(
+                appid=1,
+                title="Skyrim Special Edition",
+                score=0,
+                score_breakdown=ScoreBreakdown(
+                    relevance_tier="A",
+                    layer_score=0.0,
+                    retrieval_rank=1,
+                    language_adjustment=-10,
+                ),
+            ),
+            RankedGame(
+                appid=2,
+                title="Skyrim VR",
+                score=0,
+                score_breakdown=ScoreBreakdown(
+                    relevance_tier="A",
+                    layer_score=0.0,
+                    retrieval_rank=2,
+                    language_adjustment=0,
+                ),
+            ),
+        ]
+
+        selected = deduplicate_game_editions(games)
+
+        self.assertEqual([game.appid for game in selected], [2])
+
+    def test_language_adjustment_selects_between_same_tier_editions(self) -> None:
+        games = [
+            RankedGame(
+                appid=1,
+                title="Skyrim Special Edition",
+                score=70,
+                score_breakdown=ScoreBreakdown(
+                    relevance_tier="A",
+                    layer_score=0.70,
+                    language_adjustment=-10,
+                ),
+            ),
+            RankedGame(
+                appid=2,
+                title="Skyrim VR",
+                score=70,
+                score_breakdown=ScoreBreakdown(
+                    relevance_tier="A",
+                    layer_score=0.70,
+                    language_adjustment=0,
+                ),
+            ),
+        ]
+
+        selected = deduplicate_game_editions(games)
+
+        self.assertEqual([game.appid for game in selected], [2])
+
     def test_never_replaces_a_higher_tier_edition_with_lower_tier_standard_game(self) -> None:
         games = [
             RankedGame(

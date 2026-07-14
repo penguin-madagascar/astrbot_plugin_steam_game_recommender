@@ -4,6 +4,7 @@ import re
 import unicodedata
 
 from ..storage.models import GameCandidate, RankedGame
+from .ranking_precedence import ranked_game_precedence_prefix
 
 ENGLISH_EDITION_SUFFIXES = (
     "digital deluxe edition",
@@ -84,23 +85,8 @@ def deduplicate_game_editions(
 
 
 def ranked_game_precedence_key(game: RankedGame) -> tuple[float | int | str, ...]:
-    tier_order = {"A": 0, "broad": 0, "B": 1, "C": 2}
-    breakdown = game.score_breakdown
-    raw_layer = float(breakdown.layer_score)
-    has_scored_layer = raw_layer != 0.0
-    if not has_scored_layer and game.score:
-        raw_layer = float(game.score) / 100.0
-    effective_layer = (
-        raw_layer + float(breakdown.budget_adjustment) / 100.0
-        if has_scored_layer
-        else raw_layer
-    )
-    retrieval_rank = int(breakdown.retrieval_rank)
     return (
-        tier_order.get(breakdown.relevance_tier, 3),
-        -effective_layer,
-        -raw_layer,
-        retrieval_rank if retrieval_rank > 0 else 1_000_000_000,
+        *ranked_game_precedence_prefix(game),
         game.title.casefold(),
     )
 
