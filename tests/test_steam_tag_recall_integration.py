@@ -8,8 +8,12 @@ from unittest.mock import patch
 
 from astrbot_plugin_steam_game_recommender.clients.steam import SteamStorefrontPage
 from astrbot_plugin_steam_game_recommender.services import tag_normalizer
+from astrbot_plugin_steam_game_recommender.services.steam_recall import (
+    RecallUnavailableError,
+)
 from astrbot_plugin_steam_game_recommender.services.steam_index import (
     STEAM_INDEX_CACHE_KEY,
+    STEAM_INDEX_SCHEMA_VERSION,
     STEAM_TAG_RECALL_DEGRADED_WARNING,
     SteamGameIndexService,
 )
@@ -70,7 +74,7 @@ class SteamTagRecallIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("anchors=['soulslike', 'dark_fantasy']", rank_logs[-1])
         self.assertEqual(
             client.tag_calls,
-            [(1, 20), (2, 20), (3, 20), (4, 20), (5, 20)],
+            [(1, 40), (2, 40), (3, 40), (4, 40), (5, 40)],
         )
         self.assertTrue({game.appid for game in ranked} <= {3_001, 3_002, 4_001, 4_002, 4_003})
         self.assertFalse({1_001, 2_001, 5_001} & set(client.detail_calls))
@@ -107,9 +111,9 @@ class SteamTagRecallIntegrationTest(unittest.IsolatedAsyncioTestCase):
         ):
             ranked = await service.recommend(preference, limit=5)
 
-        self.assertEqual(client.tag_calls.count((11, 20)), 1)
-        self.assertEqual(client.text_calls, [("action", 20)])
-        self.assertEqual({game.appid for game in ranked}, {11_001, 12_001})
+        self.assertEqual(client.tag_calls.count((11, 40)), 1)
+        self.assertEqual(client.text_calls, [])
+        self.assertNotIn(11_001, {game.appid for game in ranked})
         self.assertEqual(
             preference.parse_warnings.count(STEAM_TAG_RECALL_DEGRADED_WARNING),
             1,
@@ -137,7 +141,7 @@ class SteamTagRecallIntegrationTest(unittest.IsolatedAsyncioTestCase):
             ranked = await service.recommend(preference, limit=5)
 
         self.assertEqual(ranked, [])
-        self.assertEqual(client.text_calls, [("precision duel", 20)])
+        self.assertEqual(client.text_calls, [("precision duel", 40)])
         self.assertIn(STEAM_TAG_RECALL_DEGRADED_WARNING, preference.parse_warnings)
 
     async def test_missing_vocabulary_preserves_canonical_exclusion_tag(self) -> None:
@@ -203,7 +207,7 @@ class SteamTagRecallIntegrationTest(unittest.IsolatedAsyncioTestCase):
             limit=3,
         )
 
-        self.assertEqual(client.tag_calls, [(1, 20), (2, 20), (3, 20)])
+        self.assertEqual(client.tag_calls, [(1, 40), (2, 40), (3, 40)])
         self.assertEqual(client.text_calls, [])
         self.assertEqual(client.top_seller_calls, [])
 
@@ -224,7 +228,7 @@ class SteamTagRecallIntegrationTest(unittest.IsolatedAsyncioTestCase):
         normal_client = RecallSteamClient()
         normal = SteamGameIndexService(normal_client, MemoryCache())
         await normal.recommend(GamePreference(), limit=1)
-        self.assertEqual(normal_client.top_seller_calls, [])
+        self.assertEqual(normal_client.top_seller_calls, [60])
 
     async def test_missing_tag_id_falls_back_to_that_tag_alone(self) -> None:
         client = RecallSteamClient(
@@ -241,7 +245,7 @@ class SteamTagRecallIntegrationTest(unittest.IsolatedAsyncioTestCase):
         ) as logs:
             await service.recommend(preference, limit=1)
 
-        self.assertEqual(client.text_calls, [("soulslike", 20)])
+        self.assertEqual(client.text_calls, [("soulslike", 40)])
         self.assertEqual(client.tag_calls, [])
         self.assertEqual(
             preference.parse_warnings.count(STEAM_TAG_RECALL_DEGRADED_WARNING),
@@ -255,7 +259,9 @@ class SteamTagRecallIntegrationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(any("degraded=True" in line for line in logs.output))
 
-    async def test_missing_storefront_method_uses_text_and_marks_degraded(self) -> None:
+    async def test_known_tag_without_storefront_is_unavailable_without_title_fallback(
+        self,
+    ) -> None:
         client = RecallSteamClient(
             tag_ids={"Action": 11},
             text_results={
@@ -266,13 +272,11 @@ class SteamTagRecallIntegrationTest(unittest.IsolatedAsyncioTestCase):
         preference = GamePreference(genres_like=["action"])
         service = SteamGameIndexService(client, MemoryCache())
 
-        await service.recommend(preference, limit=1)
+        with self.assertRaises(RecallUnavailableError):
+            await service.recommend(preference, limit=1)
 
-        self.assertEqual(client.text_calls, [("action", 20)])
-        self.assertEqual(
-            preference.parse_warnings.count(STEAM_TAG_RECALL_DEGRADED_WARNING),
-            1,
-        )
+        self.assertEqual(client.text_calls, [])
+        self.assertNotIn(STEAM_TAG_RECALL_DEGRADED_WARNING, preference.parse_warnings)
 
     async def test_one_failed_tag_keeps_other_sources_and_warns_once(self) -> None:
         client = RecallSteamClient(
@@ -294,7 +298,7 @@ class SteamTagRecallIntegrationTest(unittest.IsolatedAsyncioTestCase):
         ) as logs:
             ranked = await service.recommend(preference, limit=2)
 
-        self.assertEqual({game.appid for game in ranked}, {401, 402})
+        self.assertEqual({game.appid for game in ranked}, {402})
         self.assertEqual(
             preference.parse_warnings.count(STEAM_TAG_RECALL_DEGRADED_WARNING),
             1,
@@ -312,13 +316,13 @@ class SteamTagRecallIntegrationTest(unittest.IsolatedAsyncioTestCase):
 
         await service.recommend(GamePreference(genres_like=["puzzle"]), limit=3)
 
-        self.assertEqual(client.tag_calls, [(3, 20)])
+        self.assertEqual(client.tag_calls, [(3, 40)])
 
         broad_client = RecallSteamClient()
         broad = SteamGameIndexService(broad_client, MemoryCache(snapshot(cached)))
         await broad.recommend(GamePreference(), limit=3)
         self.assertEqual(broad_client.tag_calls, [])
-        self.assertEqual(broad_client.top_seller_calls, [])
+        self.assertEqual(broad_client.top_seller_calls, [60])
         self.assertEqual(broad_client.text_calls, [])
 
     async def test_validation_pool_is_capped_and_dlc_is_discarded(self) -> None:
@@ -461,10 +465,10 @@ class SteamTagRecallIntegrationTest(unittest.IsolatedAsyncioTestCase):
             second_preference = GamePreference(genres_like=["expiry probe"])
             second = await service.recommend(second_preference, limit=1)
 
-        self.assertEqual([game.appid for game in first], [801])
-        self.assertEqual([game.appid for game in second], [802])
-        self.assertEqual(client.tag_calls, [(99_999, 20)])
-        self.assertEqual(client.text_calls, [("expiry probe", 20)])
+        self.assertEqual(first, [])
+        self.assertEqual(second, [])
+        self.assertEqual(client.tag_calls, [(99_999, 40)])
+        self.assertEqual(client.text_calls, [("expiry probe", 40)])
         self.assertIn(STEAM_TAG_RECALL_DEGRADED_WARNING, second_preference.parse_warnings)
 
     async def test_service_instances_keep_independent_dynamic_tag_ids(self) -> None:
@@ -499,8 +503,8 @@ class SteamTagRecallIntegrationTest(unittest.IsolatedAsyncioTestCase):
             cross_preference = GamePreference(genres_like=["beta dynamic"])
             await alpha.recommend(cross_preference, limit=1)
 
-        self.assertEqual(alpha_client.tag_calls, [(71, 20), (71, 20)])
-        self.assertEqual(beta_client.tag_calls, [(72, 20)])
+        self.assertEqual(alpha_client.tag_calls, [(71, 40), (71, 40)])
+        self.assertEqual(beta_client.tag_calls, [(72, 40)])
         self.assertIn(STEAM_TAG_RECALL_DEGRADED_WARNING, cross_preference.parse_warnings)
 
     async def test_cancelling_one_alias_waiter_keeps_shared_load_alive(self) -> None:
@@ -581,7 +585,7 @@ class SteamTagRecallIntegrationTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             sorted(client.tag_calls),
-            [(tag_id, 20) for tag_id in range(21, 26)],
+            [(tag_id, 40) for tag_id in range(21, 26)],
         )
 
 
@@ -816,7 +820,7 @@ def candidate(
 
 def snapshot(candidates: list[GameCandidate]) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": STEAM_INDEX_SCHEMA_VERSION,
         "entries": [
             {
                 "candidate": (

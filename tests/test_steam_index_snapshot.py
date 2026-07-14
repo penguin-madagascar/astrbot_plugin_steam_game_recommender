@@ -84,7 +84,7 @@ class SteamIndexSnapshotTest(unittest.IsolatedAsyncioTestCase):
 
     def test_current_snapshot_keeps_only_confirmed_base_games(self) -> None:
         payload = {
-            "schema_version": 1,
+            "schema_version": STEAM_INDEX_SCHEMA_VERSION,
             "entries": [
                 {
                     "candidate": dump_model(game(1, "Base Game", ["Co-op"])),
@@ -177,7 +177,7 @@ class SteamIndexSnapshotTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ranked), 3)
         self.assertTrue(client.search_queries)
         self.assertLessEqual(len(client.search_queries), 8)
-        self.assertTrue(all(page_size == 20 for page_size in client.search_page_sizes))
+        self.assertTrue(all(page_size == 40 for page_size in client.search_page_sizes))
         self.assertEqual(len(client.detail_appids), len(set(client.detail_appids)))
         self.assertLessEqual(len(client.detail_appids), 60)
         self.assertLessEqual(client.max_active_searches, 6)
@@ -273,7 +273,7 @@ class SteamIndexSnapshotTest(unittest.IsolatedAsyncioTestCase):
         cache = MemoryCache(
             {
                 STEAM_INDEX_CACHE_KEY: {
-                    "schema_version": 1,
+                    "schema_version": STEAM_INDEX_SCHEMA_VERSION,
                     "entries": [],
                     "search_coverage": covered,
                 }

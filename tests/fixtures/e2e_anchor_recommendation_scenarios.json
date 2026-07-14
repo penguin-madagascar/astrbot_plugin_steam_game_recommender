@@ -59,6 +59,20 @@
     "602": {"total_count": 450000, "appids": [611, 612, 613, 110, 115]},
     "603": {"total_count": 300000, "appids": [610, 611, 612, 615, 113]}
   },
+  "more_like_results": {
+    "100": {"released": [{"appid": 100, "title": "DARK SOULS: REMASTERED", "tag_ids": [103, 101, 102, 104, 105]}, {"appid": 118, "title": "Mortal Shell Soundtrack", "tag_ids": [103, 104]}, {"appid": 110, "title": "ELDEN RING", "tag_ids": [103, 104, 101, 102, 602]}, {"appid": 111, "title": "Lies of P", "tag_ids": [103, 104, 101, 102, 105]}, {"appid": 112, "title": "Nioh 2", "tag_ids": [103, 104, 101, 102, 105]}], "upcoming": [{"appid": 116, "title": "Unreleased Souls Adventure", "tag_ids": [103, 104, 101]}]},
+    "200": {"released": [{"appid": 200, "title": "Gray Zone Warfare", "tag_ids": [201, 202, 203, 204, 205]}, {"appid": 210, "title": "Escape from Tarkov", "tag_ids": [201, 202, 203, 204, 205]}, {"appid": 211, "title": "Arena Breakout: Infinite", "tag_ids": [201, 202, 204, 203]}, {"appid": 212, "title": "Incursion Red River", "tag_ids": [201, 202, 205, 204, 203]}], "upcoming": [{"appid": 216, "title": "Upcoming Extraction", "tag_ids": [201, 202, 204]}]},
+    "300": {"released": [{"appid": 300, "title": "Hollow Knight", "tag_ids": [301, 302, 303, 101, 304]}, {"appid": 310, "title": "Ori and the Will of the Wisps", "tag_ids": [301, 302, 303, 101, 304]}, {"appid": 311, "title": "Bloodstained: Ritual of the Night", "tag_ids": [301, 302, 101, 102, 303]}, {"appid": 312, "title": "Nine Sols", "tag_ids": [301, 302, 101, 304, 105]}], "upcoming": [{"appid": 316, "title": "Upcoming Metroidvania", "tag_ids": [301, 302]}]},
+    "400": {"released": [{"appid": 400, "title": "Slay the Spire", "tag_ids": [401, 402, 403, 404, 405]}, {"appid": 410, "title": "Monster Train", "tag_ids": [401, 402, 403, 404, 405]}, {"appid": 411, "title": "Wildfrost", "tag_ids": [401, 402, 403, 404, 405]}, {"appid": 412, "title": "Across the Obelisk", "tag_ids": [401, 402, 403, 404]}], "upcoming": [{"appid": 416, "title": "Upcoming Deckbuilder", "tag_ids": [401, 402]}]},
+    "500": {"released": [{"appid": 500, "title": "RimWorld", "tag_ids": [501, 502, 503, 504, 404]}, {"appid": 510, "title": "Oxygen Not Included", "tag_ids": [501, 502, 503, 504, 404]}, {"appid": 511, "title": "Going Medieval", "tag_ids": [501, 502, 503, 504, 404]}, {"appid": 512, "title": "Dwarf Fortress", "tag_ids": [501, 502, 503, 504, 404]}], "upcoming": [{"appid": 516, "title": "Upcoming Colony Sim", "tag_ids": [501, 502]}]}
+  },
+  "storefront_intersection_results": {
+    "103,104": {"total_count": 1200, "hits": [{"appid": 100, "title": "DARK SOULS: REMASTERED", "tag_ids": [103, 104, 101, 102, 105]}, {"appid": 119, "title": "Souls-like Art Book", "tag_ids": [103, 104]}, {"appid": 110, "title": "ELDEN RING", "tag_ids": [103, 104, 101, 102, 602]}, {"appid": 111, "title": "Lies of P", "tag_ids": [103, 104, 101, 102, 105]}, {"appid": 112, "title": "Nioh 2", "tag_ids": [103, 104, 101, 102, 105]}]},
+    "201,202": {"total_count": 400, "hits": [{"appid": 200, "title": "Gray Zone Warfare", "tag_ids": [201, 202, 203, 204, 205]}, {"appid": 210, "title": "Escape from Tarkov", "tag_ids": [201, 202, 203, 204, 205]}, {"appid": 211, "title": "Arena Breakout: Infinite", "tag_ids": [201, 202, 204, 203]}, {"appid": 212, "title": "Incursion Red River", "tag_ids": [201, 202, 205, 204, 203]}]},
+    "301,302": {"total_count": 3500, "hits": [{"appid": 300, "title": "Hollow Knight", "tag_ids": [301, 302, 303, 101, 304]}, {"appid": 310, "title": "Ori and the Will of the Wisps", "tag_ids": [301, 302, 303, 101, 304]}, {"appid": 311, "title": "Bloodstained: Ritual of the Night", "tag_ids": [301, 302, 101, 102, 303]}, {"appid": 312, "title": "Nine Sols", "tag_ids": [301, 302, 101, 304, 105]}]},
+    "401,402": {"total_count": 2000, "hits": [{"appid": 400, "title": "Slay the Spire", "tag_ids": [401, 402, 403, 404, 405]}, {"appid": 410, "title": "Monster Train", "tag_ids": [401, 402, 403, 404, 405]}, {"appid": 411, "title": "Wildfrost", "tag_ids": [401, 402, 403, 404, 405]}, {"appid": 412, "title": "Across the Obelisk", "tag_ids": [401, 402, 403, 404]}]},
+    "501,502": {"total_count": 800, "hits": [{"appid": 500, "title": "RimWorld", "tag_ids": [501, 502, 503, 504, 404]}, {"appid": 510, "title": "Oxygen Not Included", "tag_ids": [501, 502, 503, 504, 404]}, {"appid": 511, "title": "Going Medieval", "tag_ids": [501, 502, 503, 504, 404]}, {"appid": 512, "title": "Dwarf Fortress", "tag_ids": [501, 502, 503, 504, 404]}]}
+  },
   "top_seller_appids": [613, 614, 610, 615, 611, 612, 616, 617],
   "reference_search": {
     "dark souls": [
@@ -98,6 +112,8 @@
     {"appid": 115, "title": "Generic Action RPG", "ordered_tags": ["Action", "RPG", "Open World"], "review_total": 350000, "review_positive_ratio": 0.94},
     {"appid": 116, "title": "Unreleased Souls Adventure", "ordered_tags": ["Souls-like", "Dark Fantasy", "Action"], "review_total": 0, "review_positive_ratio": null, "coming_soon": true},
     {"appid": 117, "title": "Souls Soundtrack", "ordered_tags": ["Souls-like"], "review_total": 500, "review_positive_ratio": 0.95, "app_type": "dlc"},
+    {"appid": 118, "title": "Mortal Shell Soundtrack", "ordered_tags": ["Souls-like", "Dark Fantasy"], "review_total": 120, "review_positive_ratio": 0.91, "app_type": "dlc"},
+    {"appid": 119, "title": "Souls-like Art Book", "ordered_tags": ["Souls-like", "Dark Fantasy"], "review_total": 80, "review_positive_ratio": 0.92, "app_type": "dlc"},
 
     {"appid": 200, "title": "Gray Zone Warfare", "ordered_tags": ["Extraction Shooter", "Tactical", "Military", "Shooter", "PvE"], "review_total": 70000, "review_positive_ratio": 0.69},
     {"appid": 210, "title": "Escape from Tarkov", "ordered_tags": ["Extraction Shooter", "Tactical", "Military", "Shooter", "PvE"], "review_total": 350000, "review_positive_ratio": 0.82},

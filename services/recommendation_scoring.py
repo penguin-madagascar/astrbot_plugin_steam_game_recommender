@@ -43,7 +43,10 @@ def relevance_tier(
     coverage = anchor_coverage(intent, evidence)
     if coverage >= 0.60:
         return RelevanceTier.A
-    if coverage > 0.0:
+    if any(
+        evidence.direct.get(tag, 0.0) >= 0.60
+        for tag in _anchor_weights(intent)
+    ):
         return RelevanceTier.B
     return RelevanceTier.C
 
@@ -140,8 +143,8 @@ def layer_score(
     semantic_component = _unit_interval(semantic)
     quality_component = _unit_interval(quality)
     if QualityIntent(quality_intent) == QualityIntent.MAINSTREAM:
-        return 0.55 * semantic_component + 0.45 * quality_component
-    return 0.70 * semantic_component + 0.30 * quality_component
+        return 0.65 * semantic_component + 0.35 * quality_component
+    return 0.80 * semantic_component + 0.20 * quality_component
 
 
 def _anchor_weights(intent: RecommendationIntent) -> dict[str, float]:

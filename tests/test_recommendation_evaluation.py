@@ -8,6 +8,7 @@ from astrbot_plugin_steam_game_recommender.services.recommendation_evaluation im
     hit_at_k,
     ndcg_at_k,
     pairwise_accuracy,
+    policy_pairwise_accuracy,
     recall_at_k,
 )
 
@@ -89,6 +90,17 @@ class RecommendationEvaluationTest(unittest.TestCase):
 
         self.assertAlmostEqual(pairwise_accuracy(ranking, pairs), 1 / 3)
         self.assertEqual(pairwise_accuracy(ranking, []), 0.0)
+
+    def test_policy_pairwise_counts_filtered_comparison_below_selected_preferred(self) -> None:
+        ranking = ["core-a", "broad-a", "core-b"]
+        pairs = [
+            ("core-a", "broad-a"),
+            ("core-b", "filtered-broad"),
+            ("missing-core", "broad-a"),
+        ]
+
+        self.assertAlmostEqual(policy_pairwise_accuracy(ranking, pairs), 2 / 3)
+        self.assertEqual(policy_pairwise_accuracy(ranking, []), 0.0)
 
 
 if __name__ == "__main__":

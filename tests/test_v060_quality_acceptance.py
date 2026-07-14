@@ -20,7 +20,7 @@ from astrbot_plugin_steam_game_recommender.services.recommendation_evaluation im
     fill_rate,
     hit_at_k,
     ndcg_at_k,
-    pairwise_accuracy,
+    policy_pairwise_accuracy,
     recall_at_k,
 )
 from astrbot_plugin_steam_game_recommender.services.tag_normalizer import (
@@ -156,6 +156,7 @@ class V060EndToEndQualityAcceptanceTest(unittest.IsolatedAsyncioTestCase):
         for run in evaluated:
             scenario = run.scenario
             ranking = [str(appid) for appid in run.ranking]
+            retrieved = [str(appid) for appid in run.retrieved_appids]
             relevance = {
                 str(appid): int(value)
                 for appid, value in scenario["relevance"].items()
@@ -167,15 +168,18 @@ class V060EndToEndQualityAcceptanceTest(unittest.IsolatedAsyncioTestCase):
                 (str(core_appid), str(broad_appid))
                 for core_appid, broad_appid in scenario["pairwise"]
             ]
-            recall = recall_at_k(ranking, relevance, k=50)
+            self.assertTrue(
+                all(comparison in retrieved for _preferred, comparison in pairs),
+                scenario["id"],
+            )
+            recall = recall_at_k(retrieved, relevance, k=100)
             current_ndcg = ndcg_at_k(ranking, relevance, k=5)
             baseline_ndcg = ndcg_at_k(baseline, relevance, k=5)
             delta = current_ndcg - baseline_ndcg
 
             recalls.append(recall)
             hits.append(hit_at_k(ranking, strong_ids, k=20))
-            if pairs:
-                pairwise.append(pairwise_accuracy(ranking, pairs))
+            pairwise.append(policy_pairwise_accuracy(ranking, pairs))
             ndcg_deltas.append(delta)
             slice_recalls[scenario["slice"]].append(recall)
             slice_deltas[scenario["slice"]].append(delta)
@@ -187,6 +191,10 @@ class V060EndToEndQualityAcceptanceTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertTrue(
                 all(not game.coming_soon for game in run.ranked),
+                scenario["id"],
+            )
+            self.assertTrue(
+                all(game.score_breakdown.relevance_tier != "C" for game in run.ranked),
                 scenario["id"],
             )
             selected = ranking[: int(scenario["target_count"])]
@@ -249,6 +257,33 @@ class V060EndToEndQualityAcceptanceTest(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_recall_boundary_excludes_reference_resolution_detail(self) -> None:
+        run = await run_e2e_scenario(
+            self.fixture,
+            self.scenarios["souls_cn_original"],
+        )
+
+        self.assertIn(100, run.client.detail_calls)
+        self.assertNotIn(100, run.retrieved_appids)
+        self.assertLessEqual(len(run.retrieved_appids), 100)
+
+    async def test_multisource_hits_reach_actual_validation_boundary(self) -> None:
+        run = await run_e2e_scenario(
+            self.fixture,
+            self.scenarios["souls_cn_original"],
+        )
+
+        self.assertEqual(
+            run.client.more_like_calls,
+            [(100, False)],
+        )
+        self.assertEqual(
+            run.client.storefront_intersection_calls,
+            [((103, 104), 40)],
+        )
+        self.assertIn(118, run.retrieved_appids)
+        self.assertIn(119, run.retrieved_appids)
+
     async def test_all_aliases_fail_once_without_false_resolution(self) -> None:
         run = await run_e2e_scenario(
             self.fixture,
@@ -256,6 +291,7 @@ class V060EndToEndQualityAcceptanceTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(run.ranking, [])
+        self.assertEqual(run.client.top_seller_calls, 0)
         self.assertTrue(run.preference.resolved_reference_games)
         self.assertIsNone(run.preference.resolved_reference_games[0].appid)
         warnings = [

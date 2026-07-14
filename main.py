@@ -340,6 +340,7 @@ class SteamGameRecommenderPlugin(Star):
         self,
         preference,
         limit: int,
+        requested_limit: int | None = None,
         profile_tag_weights: dict[str, float] | None = None,
         excluded_appids: list[int] | None = None,
         excluded_titles: list[str] | None = None,
@@ -352,6 +353,7 @@ class SteamGameRecommenderPlugin(Star):
             excluded_appids=excluded_appids,
             excluded_titles=excluded_titles,
             preferred_appids=preferred_appids,
+            requested_limit=requested_limit,
         )
         if ranked_games:
             return ranked_games
@@ -485,6 +487,7 @@ class SteamGameRecommenderPlugin(Star):
             ranked_games = await self._recommend_with_steam_index(
                 preference,
                 limit=candidate_pool_size,
+                requested_limit=result_limit,
                 profile_tag_weights=profile_tag_weights,
                 excluded_appids=excluded_appids,
                 excluded_titles=excluded_titles,

@@ -6,6 +6,8 @@ import unicodedata
 from ..storage.models import GameCandidate, RankedGame
 from .ranking_precedence import ranked_game_precedence_prefix
 
+STEAM_SOFTWARE_GENRE_IDS = frozenset(range(50, 61))
+
 ENGLISH_EDITION_SUFFIXES = (
     "digital deluxe edition",
     "game of the year edition",
@@ -35,7 +37,10 @@ CHINESE_EDITION_SUFFIXES = (
 
 
 def is_confirmed_base_game(candidate: GameCandidate) -> bool:
-    return candidate.app_type == "game"
+    return (
+        candidate.app_type == "game"
+        and not STEAM_SOFTWARE_GENRE_IDS.intersection(candidate.genre_ids)
+    )
 
 
 def game_family_key(title: str) -> str:

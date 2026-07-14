@@ -68,7 +68,7 @@ class ContinuousScoringTest(unittest.TestCase):
         )
 
         game = ranked[0]
-        expected_layer = 0.70 * (0.70 * 0.65) + 0.30 * quality_score(0.8, 999)
+        expected_layer = 0.80 * (0.70 * 0.65) + 0.20 * quality_score(0.8, 999)
 
         self.assertEqual(game.score, round(expected_layer * 100))
         self.assertIsNone(game.score_breakdown.positive_reference)
@@ -220,7 +220,7 @@ class LanguageScoringTest(unittest.TestCase):
 
         self.assertEqual(
             [game.title for game in ranked],
-            ["Z Supported Zero", "A Unsupported Zero"],
+            ["A Unsupported Zero", "Z Supported Zero"],
         )
         self.assertTrue(all(game.score == 0 for game in ranked))
         self.assertTrue(

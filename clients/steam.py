@@ -7,7 +7,7 @@ import json
 import math
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
@@ -26,6 +26,7 @@ STEAM_OWNED_GAMES_URL = "https://api.steampowered.com/IPlayerService/GetOwnedGam
 STEAM_STORE_BASE_URL = "https://store.steampowered.com/app"
 STEAM_POPULAR_TAGS_URL = "https://store.steampowered.com/tagdata/populartags/english"
 STEAM_STOREFRONT_SEARCH_URL = "https://store.steampowered.com/search/results"
+STEAM_MORE_LIKE_URL = "https://store.steampowered.com/recommended/morelike/app/{appid}/"
 STOREFRONT_FRESH_TTL_HOURS = 24
 STOREFRONT_STALE_TTL_HOURS = 24 * 7
 STORE_PAGE_TAG_CACHE_VERSION = 1
@@ -100,6 +101,19 @@ class SteamStorefrontPage:
     hits: tuple[SteamSearchHit, ...]
     total_count: int
     start: int
+    stale: bool = False
+
+
+@dataclass(frozen=True)
+class SteamMoreLikeSections:
+    released: tuple[SteamSearchHit, ...]
+    upcoming: tuple[SteamSearchHit, ...]
+
+
+@dataclass(frozen=True)
+class SteamMoreLikeResult:
+    hits: tuple[SteamSearchHit, ...]
+    stale: bool = False
 
 
 @dataclass(frozen=True)
@@ -226,6 +240,30 @@ class SteamClient:
             }
         )
         return page
+
+    async def search_storefront_tags(
+        self,
+        tag_ids: list[int] | tuple[int, ...],
+        page_size: int = 40,
+        start: int = 0,
+    ) -> SteamStorefrontPage:
+        resolved = tuple(int(tag_id) for tag_id in tag_ids)
+        if len(resolved) != 2 or len(set(resolved)) != 2 or any(
+            tag_id <= 0 for tag_id in resolved
+        ):
+            raise ValueError("Steam tag intersection requires two distinct IDs.")
+        return await self._get_storefront_page(
+            {
+                "ignore_preferences": 1,
+                "tags": ",".join(str(tag_id) for tag_id in resolved),
+                "ndl": 1,
+                "l": "english",
+                "cc": self.default_country,
+                "start": max(int(start), 0),
+                "count": min(max(int(page_size), 1), 40),
+                "infinite": 1,
+            }
+        )
 
     async def search_storefront_term(
         self,
@@ -368,6 +406,78 @@ class SteamClient:
     def _tag_snapshot_age(self, snapshot: SteamTagVocabularySnapshot) -> float:
         return max(float(self.clock()) - snapshot.fetched_at, 0.0)
 
+    async def get_more_like(
+        self,
+        appid: int,
+        *,
+        allow_unreleased: bool = False,
+    ) -> SteamMoreLikeResult:
+        resolved_appid = int(appid)
+        if resolved_appid <= 0:
+            raise ValueError("Steam AppID must be positive.")
+        url = STEAM_MORE_LIKE_URL.format(appid=resolved_appid)
+        cache_key = f"{self._cache_key(url, {'l': 'english'})}:v1"
+        fresh_key = f"{cache_key}:fresh"
+        stale_key = f"{cache_key}:stale"
+        fresh = await self.cache.get_json(fresh_key, STOREFRONT_FRESH_TTL_HOURS)
+        if fresh is not None:
+            try:
+                sections, fetched_at = parse_more_like_snapshot(fresh)
+                if self._snapshot_age(fetched_at) <= STOREFRONT_FRESH_TTL_HOURS * 3600:
+                    return select_more_like_hits(
+                        sections,
+                        resolved_appid,
+                        allow_unreleased=allow_unreleased,
+                    )
+            except SteamApiError:
+                pass
+
+        error: SteamApiError
+        try:
+            response = await self._request_get(
+                url,
+                {"l": "english"},
+                cookies=STEAM_AGE_COOKIES,
+            )
+            html_text = response.text
+            sections = parse_more_like_html(html_text)
+        except SteamApiError as exc:
+            error = exc
+        except (AttributeError, TypeError):
+            error = SteamApiError("Steam 相似游戏页面返回了无效内容。")
+        else:
+            snapshot = {
+                "html": html_text,
+                "fetched_at": float(self.clock()),
+            }
+            await self.cache.set_json(fresh_key, snapshot)
+            await self.cache.set_json(stale_key, snapshot)
+            return select_more_like_hits(
+                sections,
+                resolved_appid,
+                allow_unreleased=allow_unreleased,
+            )
+
+        stale = await self.cache.get_json(stale_key, STOREFRONT_STALE_TTL_HOURS)
+        if stale is not None:
+            try:
+                sections, fetched_at = parse_more_like_snapshot(stale)
+                if self._snapshot_age(fetched_at) <= STOREFRONT_STALE_TTL_HOURS * 3600:
+                    return replace(
+                        select_more_like_hits(
+                            sections,
+                            resolved_appid,
+                            allow_unreleased=allow_unreleased,
+                        ),
+                        stale=True,
+                    )
+            except SteamApiError:
+                pass
+        raise error
+
+    def _snapshot_age(self, fetched_at: float) -> float:
+        return max(float(self.clock()) - fetched_at, 0.0)
+
     async def get_store_page_tags(self, appid: int) -> list[str]:
         resolved_appid = int(appid)
         cache_key = (
@@ -487,7 +597,7 @@ class SteamClient:
         stale = await self.cache.get_json(stale_key, STOREFRONT_STALE_TTL_HOURS)
         if stale is not None:
             try:
-                return parse_storefront_page(stale)
+                return replace(parse_storefront_page(stale), stale=True)
             except SteamApiError:
                 pass
         raise error
@@ -657,6 +767,55 @@ def parse_storefront_results_html(value: str) -> list[SteamSearchHit]:
     return parser.hits
 
 
+def parse_more_like_snapshot(
+    payload: Any,
+) -> tuple[SteamMoreLikeSections, float]:
+    if not isinstance(payload, dict) or not isinstance(payload.get("html"), str):
+        raise SteamApiError("Steam 相似游戏缓存无效。")
+    fetched_at = payload.get("fetched_at")
+    if (
+        isinstance(fetched_at, bool)
+        or not isinstance(fetched_at, (int, float))
+        or not math.isfinite(float(fetched_at))
+        or float(fetched_at) < 0
+    ):
+        raise SteamApiError("Steam 相似游戏缓存时间无效。")
+    return parse_more_like_html(payload["html"]), float(fetched_at)
+
+
+def parse_more_like_html(value: str) -> SteamMoreLikeSections:
+    if not isinstance(value, str):
+        raise SteamApiError("Steam 相似游戏页面返回了无效内容。")
+    parser = _MoreLikeParser()
+    parser.feed(value)
+    parser.close()
+    if "released" not in parser.seen_sections:
+        raise SteamApiError("Steam 相似游戏页面缺少 released 区段。")
+    return SteamMoreLikeSections(
+        released=tuple(parser.hits["released"]),
+        upcoming=tuple(parser.hits["upcoming"]),
+    )
+
+
+def select_more_like_hits(
+    sections: SteamMoreLikeSections,
+    reference_appid: int,
+    *,
+    allow_unreleased: bool,
+) -> SteamMoreLikeResult:
+    selected = [*sections.released[:20]]
+    if allow_unreleased:
+        selected.extend(sections.upcoming[:20])
+    hits: list[SteamSearchHit] = []
+    seen: set[int] = set()
+    for hit in selected:
+        if hit.appid == reference_appid or hit.appid in seen:
+            continue
+        hits.append(hit)
+        seen.add(hit.appid)
+    return SteamMoreLikeResult(hits=tuple(hits))
+
+
 def parse_storefront_tag_ids(value: Any) -> list[int]:
     if not isinstance(value, str):
         return []
@@ -732,8 +891,112 @@ class _StorefrontResultParser(HTMLParser):
         self._title_parts = []
 
 
+class _MoreLikeParser(HTMLParser):
+    _TITLE_CLASSES = {
+        "title",
+        "tab_item_name",
+        "similar_grid_item_name",
+        "similar_grid_item_title",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.hits: dict[str, list[SteamSearchHit]] = {
+            "released": [],
+            "upcoming": [],
+        }
+        self.seen_sections: set[str] = set()
+        self._stack: list[tuple[str, str | None]] = []
+        self._appid: int | None = None
+        self._tag_ids: list[int] = []
+        self._title_parts: list[str] = []
+        self._collect_title = False
+        self._anchor_section: str | None = None
+        self._seen_appids: dict[str, set[int]] = {
+            "released": set(),
+            "upcoming": set(),
+        }
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        inherited = self._stack[-1][1] if self._stack else None
+        detected = section_name(attributes)
+        section = inherited or detected
+        self._stack.append((tag, section))
+        if detected is not None and inherited is None:
+            self.seen_sections.add(detected)
+
+        if tag == "a" and section in self.hits:
+            appid = optional_int(attributes.get("data-ds-appid"))
+            if appid is None or appid <= 0:
+                return
+            self._appid = appid
+            self._tag_ids = parse_storefront_tag_ids(attributes.get("data-ds-tagids"))
+            self._title_parts = []
+            self._collect_title = False
+            self._anchor_section = section
+            return
+
+        if self._appid is not None:
+            classes = set(str(attributes.get("class") or "").split())
+            if classes & self._TITLE_CLASSES:
+                self._collect_title = True
+
+    def handle_data(self, data: str) -> None:
+        if self._collect_title:
+            self._title_parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._collect_title and tag in {"span", "div"}:
+            self._collect_title = False
+        if tag == "a" and self._appid is not None and self._anchor_section is not None:
+            title = " ".join("".join(self._title_parts).split())
+            seen = self._seen_appids[self._anchor_section]
+            if title and self._appid not in seen:
+                self.hits[self._anchor_section].append(
+                    SteamSearchHit(
+                        appid=self._appid,
+                        title=title,
+                        store_url=f"{STEAM_STORE_BASE_URL}/{self._appid}/",
+                        tag_ids=self._tag_ids,
+                    )
+                )
+                seen.add(self._appid)
+            self._appid = None
+            self._tag_ids = []
+            self._title_parts = []
+            self._collect_title = False
+            self._anchor_section = None
+
+        matching_index = next(
+            (
+                index
+                for index in range(len(self._stack) - 1, -1, -1)
+                if self._stack[index][0] == tag
+            ),
+            None,
+        )
+        if matching_index is not None:
+            del self._stack[matching_index:]
+
+
+def section_name(attributes: dict[str, str | None]) -> str | None:
+    marker = " ".join(
+        str(attributes.get(name) or "").casefold()
+        for name in ("id", "class", "data-section")
+    )
+    tokens = set(re.split(r"[^a-z0-9]+", marker))
+    compact = re.sub(r"[^a-z]", "", marker)
+    if "upcoming" in tokens or "comingsoon" in compact:
+        return "upcoming"
+    if "released" in tokens:
+        return "released"
+    return None
+
+
 def parse_steam_game(appid: int, data: dict[str, Any]) -> GameCandidate:
     genres = description_list(data.get("genres"))
+    genre_ids = id_list(data.get("genres"))
     categories = description_list(data.get("categories"))
     languages = parse_languages(data.get("supported_languages"))
     metacritic = data.get("metacritic") if isinstance(data.get("metacritic"), dict) else {}
@@ -745,6 +1008,7 @@ def parse_steam_game(appid: int, data: dict[str, Any]) -> GameCandidate:
         app_type=optional_text(data.get("type")),
         platforms=parse_platforms(data.get("platforms")),
         genres=genres,
+        genre_ids=genre_ids,
         tags=categories,
         metacritic=optional_int(metacritic.get("score")),
         released=release_date,
@@ -780,6 +1044,17 @@ def description_list(value: Any) -> list[str]:
         if isinstance(item, dict) and item.get("description"):
             descriptions.append(str(item["description"]))
     return unique_texts(descriptions)
+
+
+def id_list(value: Any) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    result: list[int] = []
+    for item in value:
+        identifier = optional_int(item.get("id")) if isinstance(item, dict) else None
+        if identifier is not None and identifier > 0 and identifier not in result:
+            result.append(identifier)
+    return result
 
 
 def parse_languages(value: Any) -> list[str]:

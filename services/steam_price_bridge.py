@@ -18,6 +18,7 @@ from ..storage.models import (
     ScoreBreakdown,
 )
 from .region_query import normalize_region, region_currency
+from .ranking_precedence import effective_score
 from .similarity_ranker import clamp_score, ranked_game_sort_key
 
 logger = logging.getLogger(__name__)
@@ -360,11 +361,15 @@ def attach_price_summary(
             )
             evidence.append(budget_item)
 
-    data["score"] = clamp_score(game.score + adjustment)
-    data["score_breakdown"] = copy_score_breakdown(
-        game.score_breakdown,
+    base_breakdown = materialize_legacy_score(game)
+    breakdown = copy_score_breakdown(
+        base_breakdown,
         budget_adjustment=adjustment,
     )
+    data["score"] = clamp_score(
+        effective_score(breakdown, fallback_score=game.score)
+    )
+    data["score_breakdown"] = breakdown
     data["recommendation_evidence"] = evidence
     return validate_ranked_game(data)
 
@@ -418,11 +423,15 @@ def attach_missing_price_warning(game: RankedGame) -> RankedGame:
             "Steam 价格未获取到，预算匹配无法确认",
         )
     )
-    data["score"] = clamp_score(game.score - 2)
-    data["score_breakdown"] = copy_score_breakdown(
-        game.score_breakdown,
+    base_breakdown = materialize_legacy_score(game)
+    breakdown = copy_score_breakdown(
+        base_breakdown,
         budget_adjustment=-2.0,
     )
+    data["score"] = clamp_score(
+        effective_score(breakdown, fallback_score=game.score)
+    )
+    data["score_breakdown"] = breakdown
     data["recommendation_evidence"] = evidence
     return validate_ranked_game(data)
 
@@ -450,6 +459,15 @@ def copy_score_breakdown(
     if copier:
         return copier(update={"budget_adjustment": budget_adjustment})
     return breakdown.copy(update={"budget_adjustment": budget_adjustment})
+
+
+def materialize_legacy_score(game: RankedGame) -> ScoreBreakdown:
+    breakdown = game.score_breakdown
+    if breakdown.layer_score != 0.0 or breakdown.retrieval_rank > 0:
+        return breakdown
+    copier = getattr(breakdown, "model_copy", None)
+    update = {"layer_score": min(max(float(game.score) / 100.0, 0.0), 1.0)}
+    return copier(update=update) if copier else breakdown.copy(update=update)
 
 
 def normalize_country(value: str) -> str:

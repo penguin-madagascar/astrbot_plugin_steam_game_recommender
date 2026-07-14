@@ -95,7 +95,7 @@ class AnchorCoverageTest(unittest.TestCase):
 
         cases = (
             (0.0, RelevanceTier.C),
-            (0.599999, RelevanceTier.B),
+            (0.599999, RelevanceTier.C),
             (0.60, RelevanceTier.A),
             (0.600001, RelevanceTier.A),
         )
@@ -296,16 +296,16 @@ class CompositeScoringTest(unittest.TestCase):
 
         self.assertAlmostEqual(
             layer_score(semantic, quality, QualityIntent.NORMAL),
-            0.70 * semantic + 0.30 * quality,
+            0.80 * semantic + 0.20 * quality,
         )
         self.assertAlmostEqual(
             layer_score(semantic, quality, QualityIntent.MAINSTREAM),
-            0.55 * semantic + 0.45 * quality,
+            0.65 * semantic + 0.35 * quality,
         )
 
     def test_layer_score_clamps_components(self) -> None:
-        self.assertEqual(layer_score(2.0, -1.0, "normal"), 0.70)
-        self.assertEqual(layer_score(math.nan, math.inf, "mainstream"), 0.45)
+        self.assertEqual(layer_score(2.0, -1.0, "normal"), 0.80)
+        self.assertEqual(layer_score(math.nan, math.inf, "mainstream"), 0.35)
 
 
 if __name__ == "__main__":

@@ -91,6 +91,25 @@ def pairwise_accuracy(
     return correct / len(preferred_pairs)
 
 
+def policy_pairwise_accuracy(
+    ranking: Sequence[str],
+    preferred_pairs: Sequence[tuple[str, str]],
+) -> float:
+    """Measure pairwise quality when policy-filtered comparisons rank last."""
+    if not preferred_pairs:
+        return 0.0
+    positions = {item_id: index for index, item_id in enumerate(_unique_ids(ranking))}
+    correct = 0
+    for preferred_id, comparison_id in preferred_pairs:
+        preferred_position = positions.get(preferred_id)
+        comparison_position = positions.get(comparison_id)
+        if preferred_position is not None and (
+            comparison_position is None or preferred_position < comparison_position
+        ):
+            correct += 1
+    return correct / len(preferred_pairs)
+
+
 def _unique_ids(ranking: Sequence[str]) -> list[str]:
     return list(dict.fromkeys(ranking))
 

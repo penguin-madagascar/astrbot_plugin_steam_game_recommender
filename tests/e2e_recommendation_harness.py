@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from astrbot_plugin_steam_game_recommender.clients.steam import (
+    SteamMoreLikeResult,
     SteamReviewSummary,
     SteamStorefrontPage,
 )
@@ -15,8 +16,11 @@ from astrbot_plugin_steam_game_recommender.services.preference_parser import (
     PreferenceParser,
 )
 from astrbot_plugin_steam_game_recommender.services.steam_index import (
+    RecallValidationBatch,
     SteamGameIndexService,
+    SteamIndexEntry,
 )
+from astrbot_plugin_steam_game_recommender.services.steam_recall import CandidateHit
 from astrbot_plugin_steam_game_recommender.storage.models import (
     GameCandidate,
     GamePreference,
@@ -35,10 +39,37 @@ class E2ERun:
     ranked: tuple[RankedGame, ...]
     client: "FrozenSteamClient"
     llm_prompts: tuple[str, ...]
+    validation_appids: tuple[int, ...]
 
     @property
     def ranking(self) -> list[int]:
         return [int(game.appid) for game in self.ranked if game.appid is not None]
+
+    @property
+    def retrieved_appids(self) -> list[int]:
+        """Return the exact first-60/optional-second-40 validation input order."""
+        return list(self.validation_appids)
+
+
+class RecordingSteamGameIndexService(SteamGameIndexService):
+    """Test-only index service that records the real recall quality boundary."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.validation_appids: list[int] = []
+
+    async def _validate_recall_hits(
+        self,
+        hits: tuple[CandidateHit, ...],
+        records: dict[str, SteamIndexEntry],
+        prefetched: dict[int, GameCandidate],
+    ) -> RecallValidationBatch:
+        self.validation_appids.extend(
+            int(hit.candidate.appid)
+            for hit in hits
+            if hit.candidate.appid is not None
+        )
+        return await super()._validate_recall_hits(hits, records, prefetched)
 
 
 class MemoryIndexCache:
@@ -81,11 +112,16 @@ class FrozenSteamClient:
         self.tag_by_id = {
             int(item["tagid"]): str(item["name"]) for item in fixture["tags"]
         }
+        self.tag_id_by_name = {
+            name.casefold(): tag_id for tag_id, name in self.tag_by_id.items()
+        }
         self.detail_calls: list[int] = []
         self.store_tag_calls: list[int] = []
         self.review_calls: list[int] = []
         self.reference_calls: list[tuple[str, str]] = []
         self.storefront_tag_calls: list[int] = []
+        self.more_like_calls: list[tuple[int, bool]] = []
+        self.storefront_intersection_calls: list[tuple[tuple[int, int], int]] = []
         self.top_seller_calls = 0
 
     async def get_popular_tags(self) -> list[dict[str, Any]]:
@@ -130,6 +166,56 @@ class FrozenSteamClient:
             total_count=total_count,
             start=max(int(start), 0),
         )
+
+    async def search_storefront_tags(
+        self,
+        tag_ids: list[int] | tuple[int, ...],
+        page_size: int = 40,
+        start: int = 0,
+    ) -> SteamStorefrontPage:
+        resolved = tuple(int(tag_id) for tag_id in tag_ids)
+        if len(resolved) != 2 or len(set(resolved)) != 2 or any(
+            tag_id <= 0 for tag_id in resolved
+        ):
+            raise ValueError("Steam tag intersection requires two distinct IDs.")
+        self.storefront_intersection_calls.append((resolved, int(page_size)))
+        response = self.fixture["storefront_intersection_results"].get(
+            ",".join(str(tag_id) for tag_id in resolved)
+        )
+        if response is None:
+            hits: list[SteamSearchHit] = []
+            total_count = 0
+        else:
+            hits = [self._fixture_hit(item) for item in response.get("hits", [])]
+            total_count = int(response["total_count"])
+        resolved_start = max(int(start), 0)
+        return SteamStorefrontPage(
+            hits=tuple(hits[resolved_start : resolved_start + page_size]),
+            total_count=total_count,
+            start=resolved_start,
+        )
+
+    async def get_more_like(
+        self,
+        appid: int,
+        *,
+        allow_unreleased: bool = False,
+    ) -> SteamMoreLikeResult:
+        resolved = int(appid)
+        self.more_like_calls.append((resolved, bool(allow_unreleased)))
+        response = self.fixture["more_like_results"].get(str(resolved), {})
+        items = list(response.get("released", []))[:20]
+        if allow_unreleased:
+            items.extend(response.get("upcoming", [])[:20])
+        hits: list[SteamSearchHit] = []
+        seen: set[int] = {resolved}
+        for item in items:
+            hit = self._fixture_hit(item)
+            if hit.appid in seen:
+                continue
+            seen.add(hit.appid)
+            hits.append(hit)
+        return SteamMoreLikeResult(hits=tuple(hits), stale=False)
 
     async def browse_top_sellers(
         self,
@@ -184,6 +270,23 @@ class FrozenSteamClient:
             appid=int(appid),
             title=item["title"],
             store_url=f"https://store.steampowered.com/app/{int(appid)}/",
+            tag_ids=tuple(
+                tag_id
+                for tag in item.get("ordered_tags", [])
+                if (tag_id := self.tag_id_by_name.get(str(tag).casefold())) is not None
+            ),
+        )
+
+    def _fixture_hit(self, item: dict[str, Any]) -> SteamSearchHit:
+        appid = int(item["appid"])
+        tag_ids = tuple(int(tag_id) for tag_id in item["tag_ids"])
+        if not str(item.get("title") or "").strip() or not tag_ids:
+            raise AssertionError("frozen storefront hit requires title and ordered tag_ids")
+        return SteamSearchHit(
+            appid=appid,
+            title=str(item["title"]),
+            store_url=f"https://store.steampowered.com/app/{appid}/",
+            tag_ids=tag_ids,
         )
 
 
@@ -201,18 +304,19 @@ async def run_e2e_scenario(
     parser = PreferenceParser(llm_context, provider_id="frozen-e2e")
     preference = await parser.parse_preference(object(), str(scenario["query"]))
     client = FrozenSteamClient(fixture)
-    index = SteamGameIndexService(
+    index = RecordingSteamGameIndexService(
         client,
         MemoryIndexCache(),
         clock=lambda: 1_700_000_000.0,
     )
     ranked = await index.recommend(preference, limit=limit)
     return E2ERun(
-        scenario,
-        preference,
-        tuple(ranked),
-        client,
-        tuple(llm_context.prompts),
+        scenario=scenario,
+        preference=preference,
+        ranked=tuple(ranked),
+        client=client,
+        llm_prompts=tuple(llm_context.prompts),
+        validation_appids=tuple(index.validation_appids),
     )
 
 

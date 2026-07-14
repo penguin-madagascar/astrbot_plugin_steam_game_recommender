@@ -648,7 +648,9 @@ class MemoryCache:
         payload = self.payloads.get(key)
         if key == "steam_index" and isinstance(payload, list):
             return {
-                "schema_version": 1,
+                "schema_version": optional_import(
+                    "astrbot_plugin_steam_game_recommender.services.steam_index"
+                ).STEAM_INDEX_SCHEMA_VERSION,
                 "entries": [{"candidate": entry, "refreshed_at": 1.0} for entry in payload],
                 "search_coverage": {},
             }

@@ -65,7 +65,7 @@ class GameFamilyKeyTest(unittest.TestCase):
 
 
 class EditionDeduplicationTest(unittest.TestCase):
-    def test_language_adjustment_selects_zero_layer_ranker_editions(self) -> None:
+    def test_clamped_zero_layer_editions_fall_back_to_retrieval_rank(self) -> None:
         games = [
             RankedGame(
                 appid=1,
@@ -93,7 +93,7 @@ class EditionDeduplicationTest(unittest.TestCase):
 
         selected = deduplicate_game_editions(games)
 
-        self.assertEqual([game.appid for game in selected], [2])
+        self.assertEqual([game.appid for game in selected], [1])
 
     def test_language_adjustment_selects_between_same_tier_editions(self) -> None:
         games = [

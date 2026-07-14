@@ -26,7 +26,11 @@ from astrbot_plugin_steam_game_recommender.services.reference_matching import (
 from astrbot_plugin_steam_game_recommender.services.tag_normalizer import normalize_tag
 from astrbot_plugin_steam_game_recommender.services.steam_index import (
     STEAM_INDEX_CACHE_KEY,
+    STEAM_INDEX_SCHEMA_VERSION,
     SteamGameIndexService,
+)
+from astrbot_plugin_steam_game_recommender.services.steam_recall import (
+    RecallUnavailableError,
 )
 from astrbot_plugin_steam_game_recommender.storage.models import (
     GameCandidate,
@@ -505,8 +509,56 @@ class BootstrapAndMigrationRegressionTest(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual([entry.candidate.appid for entry in snapshot.entries], [legacy_version])
                 self.assertTrue(snapshot.entries[0].needs_revalidation)
-                self.assertEqual(cache.payloads[STEAM_INDEX_CACHE_KEY]["schema_version"], 1)
+                self.assertEqual(
+                    cache.payloads[STEAM_INDEX_CACHE_KEY]["schema_version"],
+                    STEAM_INDEX_SCHEMA_VERSION,
+                )
                 self.assertIs(cache.payloads[legacy_key], legacy_payload)
+
+    async def test_v1_snapshot_migrates_to_v2_and_revalidates_preserved_candidate(
+        self,
+    ) -> None:
+        previous = game(98, "Previous Stable RPG", ["RPG"])
+        cache = MemoryCache(
+            {
+                STEAM_INDEX_CACHE_KEY: {
+                    "schema_version": 1,
+                    "entries": [
+                        {
+                            "candidate": dump_model(previous),
+                            "refreshed_at": 900.0,
+                            "needs_revalidation": False,
+                        }
+                    ],
+                    "search_coverage": {"rpg": 900.0},
+                }
+            }
+        )
+        client = PreviousSnapshotValidationClient()
+        service = SteamGameIndexService(client, cache, clock=lambda: 1_000.0)
+
+        migrated = await service.load_snapshot()
+
+        self.assertEqual([entry.candidate.appid for entry in migrated.entries], [98])
+        self.assertTrue(migrated.entries[0].needs_revalidation)
+        self.assertEqual(migrated.search_coverage, {})
+        self.assertEqual(
+            cache.payloads[STEAM_INDEX_CACHE_KEY]["schema_version"],
+            STEAM_INDEX_SCHEMA_VERSION,
+        )
+
+        entries = await service.refresh_entries(
+            GamePreference(genres_like=["RPG"]),
+            [],
+            target_pool=1,
+            snapshot=migrated,
+        )
+        persisted = await service.load_snapshot()
+
+        self.assertEqual([candidate.appid for candidate in entries], [98])
+        self.assertEqual(client.detail_appids, [98])
+        self.assertEqual(client.detail_bypass_cache, [True])
+        self.assertFalse(persisted.entries[0].needs_revalidation)
 
     async def test_migrated_candidate_is_revalidated_before_reference_resolution(self) -> None:
         legacy = game(99, "Legacy Seed", ["RPG"])
@@ -579,12 +631,12 @@ class BootstrapAndMigrationRegressionTest(unittest.IsolatedAsyncioTestCase):
         client = FailingLegacyValidationClient()
         service = SteamGameIndexService(client, cache, clock=lambda: 1_000.0)
 
-        ranked = await service.recommend(
-            GamePreference(genres_like=["RPG"]),
-            limit=3,
-        )
+        with self.assertRaises(RecallUnavailableError):
+            await service.recommend(
+                GamePreference(genres_like=["RPG"]),
+                limit=3,
+            )
 
-        self.assertEqual(ranked, [])
         self.assertEqual(client.detail_appids, [99])
 
 
@@ -689,7 +741,7 @@ def legacy_snapshot_payload(
 
 def current_snapshot_payload(candidate: GameCandidate) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": STEAM_INDEX_SCHEMA_VERSION,
         "entries": [
             {
                 "candidate": dump_model(candidate),
@@ -919,6 +971,11 @@ class LegacyReferenceClient(VocabularyClient):
 
     async def get_store_page_tags(self, _appid: int) -> list[str]:
         return []
+
+
+class PreviousSnapshotValidationClient(LegacyReferenceClient):
+    async def search_game_refs(self, **_kwargs: Any) -> list[SteamSearchHit]:
+        return [SteamSearchHit(appid=98, title="Previous Stable RPG")]
 
 
 class FailingLegacyValidationClient(VocabularyClient):

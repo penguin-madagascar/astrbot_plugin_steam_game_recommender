@@ -11,6 +11,7 @@ from typing import Any, Callable, Protocol
 
 import httpx
 
+from ..clients.steam import SteamApiError
 from ..storage.models import (
     GameCandidate,
     GamePreference,
@@ -42,6 +43,11 @@ from .similarity_ranker import (
 from .steam_recall import (
     CandidateHit,
     CandidateRecallResult,
+    RecallHealth,
+    RecallSource,
+    RecallSourceHealth,
+    RecallSourceStatus,
+    RecallUnavailableError,
     merge_candidate_sources,
     select_recall_seeds,
 )
@@ -57,7 +63,7 @@ from .tag_normalizer import (
 logger = logging.getLogger(__name__)
 
 STEAM_INDEX_CACHE_KEY = "steam_index"
-STEAM_INDEX_SCHEMA_VERSION = 1
+STEAM_INDEX_SCHEMA_VERSION = 2
 STEAM_INDEX_LEGACY_CACHE_KEYS = ("steam_index:v4", "steam_index:v3")
 STEAM_INDEX_MAX_ENTRIES = 3_000
 STEAM_INDEX_MAX_SEARCH_TERMS = 256
@@ -124,6 +130,21 @@ class ReferenceSearchOutcome:
     validation_failures: tuple[ReferenceSearchFailure, ...] = ()
 
 
+@dataclass(frozen=True)
+class RecallSourceFetch:
+    source: RecallSource
+    health: RecallSourceHealth
+    total_count: int = 0
+
+
+@dataclass(frozen=True)
+class RecallValidationBatch:
+    hits: tuple[CandidateHit, ...]
+    attempts: int
+    transient_failures: int
+    contract_failures: int
+
+
 class SteamIndexCache(Protocol):
     async def get_json(self, key: str, ttl_hours: int) -> Any | None: ...
 
@@ -161,8 +182,12 @@ class SteamGameIndexService:
         self._bootstrap_lock = asyncio.Lock()
         self._bootstrap_task: asyncio.Task[None] | None = None
         self._steam_semaphore = asyncio.Semaphore(STEAM_HTTP_CONCURRENCY)
-        self._storefront_tag_tasks: dict[int, asyncio.Task[Any]] = {}
+        self._storefront_tag_tasks: dict[tuple[int, int], asyncio.Task[Any]] = {}
         self._storefront_tag_tasks_lock = asyncio.Lock()
+        self._intersection_tasks: dict[tuple[tuple[int, int], int], asyncio.Task[Any]] = {}
+        self._intersection_tasks_lock = asyncio.Lock()
+        self._more_like_tasks: dict[tuple[int, bool], asyncio.Task[Any]] = {}
+        self._more_like_tasks_lock = asyncio.Lock()
 
     async def recommend(
         self,
@@ -172,6 +197,7 @@ class SteamGameIndexService:
         excluded_appids: list[int] | None = None,
         excluded_titles: list[str] | None = None,
         preferred_appids: list[int] | None = None,
+        requested_limit: int | None = None,
     ) -> list[RankedGame]:
         if preference.platforms and not has_supported_steam_platform(preference):
             return []
@@ -192,71 +218,39 @@ class SteamGameIndexService:
             if STEAM_TAG_RECALL_DEGRADED_WARNING not in preference.parse_warnings:
                 preference.parse_warnings.append(STEAM_TAG_RECALL_DEGRADED_WARNING)
         snapshot = await self.load_snapshot()
-        entries = [
-            record.candidate
-            for record in snapshot.entries
-            if entry_is_validated(record)
-        ]
-        intent = build_recommendation_intent(preference)
-        specific_intent = bool(
-            select_recall_seeds(intent)
-            or intent.references
-            or intent.quality_intent is QualityIntent.MAINSTREAM
-        )
-        if specific_intent:
-            recall, reference_entries, recall_intent = (
-                await self._recall_specific_candidates(
-                    preference,
-                    snapshot,
-                    excluded_appids=excluded_appids,
-                )
-            )
-            ranking_entries = dedupe_entries(
-                [*reference_entries, *recall.candidates]
-            )
-            ranked = rank_entries(
-                ranking_entries,
+        recall, reference_entries, recall_intent = (
+            await self._recall_specific_candidates(
                 preference,
-                profile_tag_weights=profile_tag_weights,
-                retrieval_ranks={
-                    int(hit.candidate.appid): hit.retrieval_rank
-                    for hit in recall.hits
-                    if hit.candidate.appid is not None
-                },
-                intent=recall_intent,
+                snapshot,
+                excluded_appids=excluded_appids,
+                excluded_titles=excluded_titles,
+                requested_limit=(
+                    max(int(requested_limit), 0)
+                    if requested_limit is not None
+                    else max(int(limit), 0)
+                ),
             )
-            ranked = exclude_previously_shown(
-                ranked,
-                excluded_appids,
-                excluded_titles,
-            )
-            ranked = deduplicate_game_editions(ranked, preferred_appids)
-            return ranked[:limit]
-
-        ranked = rank_entries(
-            entries,
-            preference,
-            profile_tag_weights=profile_tag_weights,
         )
-        ranked = exclude_previously_shown(ranked, excluded_appids, excluded_titles)
-        ranked = deduplicate_game_editions(ranked, preferred_appids)
-        quality_target = max(10, max(int(limit), 0) * 2)
-        if len(ranked) >= quality_target:
-            return ranked[:limit]
-
-        target_pool = min(60, max(30, max(int(limit), 0) * 6))
-        refreshed = await self.refresh_entries(
-            preference,
-            entries,
-            target_pool=target_pool,
-            snapshot=snapshot,
+        ranking_entries = dedupe_entries(
+            [*reference_entries, *recall.candidates]
         )
         ranked = rank_entries(
-            refreshed,
+            ranking_entries,
             preference,
             profile_tag_weights=profile_tag_weights,
+            retrieval_ranks={
+                int(hit.candidate.appid): hit.retrieval_rank
+                for hit in recall.hits
+                if hit.candidate.appid is not None
+            },
+            intent=recall_intent,
         )
         ranked = exclude_previously_shown(ranked, excluded_appids, excluded_titles)
+        ranked = [
+            game
+            for game in ranked
+            if game.score_breakdown.relevance_tier != "C"
+        ]
         ranked = deduplicate_game_editions(ranked, preferred_appids)
         return ranked[:limit]
 
@@ -266,6 +260,8 @@ class SteamGameIndexService:
         snapshot: SteamIndexSnapshot,
         *,
         excluded_appids: list[int] | None = None,
+        excluded_titles: list[str] | None = None,
+        requested_limit: int,
     ) -> tuple[
         CandidateRecallResult,
         list[GameCandidate],
@@ -273,11 +269,6 @@ class SteamGameIndexService:
     ]:
         now = float(self.clock())
         prefetched: dict[int, GameCandidate] = {}
-        preference.parse_warnings = [
-            warning
-            for warning in preference.parse_warnings
-            if warning != STEAM_TAG_RECALL_DEGRADED_WARNING
-        ]
         records = {
             entry_key(record.candidate): record
             for record in snapshot.entries
@@ -293,12 +284,33 @@ class SteamGameIndexService:
 
         record_candidates = [record.candidate for record in records.values()]
         positive_references = reference_candidates(preference, record_candidates)
+        initial_intent = build_recommendation_intent(preference)
+        has_positive_reference_query = any(
+            reference.polarity is ReferencePolarity.POSITIVE
+            for reference in initial_intent.references
+        )
+        has_non_reference_positive_signal = any(
+            intent_tag.role
+            in {
+                IntentTagRole.REQUIRED,
+                IntentTagRole.ANCHOR,
+                IntentTagRole.SUPPORTING,
+            }
+            for intent_tag in initial_intent.tags
+        )
+        if (
+            has_positive_reference_query
+            and not positive_references
+            and not has_non_reference_positive_signal
+        ):
+            return CandidateRecallResult(hits=()), [], initial_intent
+
         prefetched_tag_sources, reference_tag_counts, count_prefetch_degraded = (
             await self._prefetch_reference_tag_sources(
                 positive_references,
+                prefetched,
             )
         )
-        initial_intent = build_recommendation_intent(preference)
         intent = expand_intent_with_reference_tags(
             initial_intent,
             positive_references,
@@ -310,25 +322,52 @@ class SteamGameIndexService:
             intent=intent,
         )
         seeds = select_recall_seeds(intent)
-        source_results = await asyncio.gather(
-            *(
-                self._fetch_tag_source(
-                    seed.tag,
-                    prefetched,
-                    prefetched_tag_sources,
+        tag_fetches = list(
+            await asyncio.gather(
+                *(
+                    self._fetch_tag_source(
+                        seed.tag,
+                        prefetched,
+                        prefetched_tag_sources,
+                    )
+                    for seed in seeds
                 )
-                for seed in seeds
             )
         )
-        sources = [source for source, _failed in source_results]
-        degraded = count_prefetch_degraded or any(
-            failed for _source, failed in source_results
+        weighted_tag_fetches = [
+            replace(
+                fetch,
+                source=replace(fetch.source, weight=seed.weight),
+            )
+            for seed, fetch in zip(seeds, tag_fetches)
+        ]
+        more_like_fetches = list(
+            await asyncio.gather(
+                *(
+                    self._fetch_more_like_source(
+                        reference,
+                        allow_unreleased=intent.allow_unreleased,
+                    )
+                    for reference in positive_references
+                    if reference.appid is not None
+                )
+            )
         )
+        intersection_fetch = await self._fetch_intersection_source(intent)
+        source_fetches = [*more_like_fetches]
+        if intersection_fetch is not None:
+            source_fetches.append(intersection_fetch)
+        source_fetches.extend(weighted_tag_fetches)
 
-        if intent.quality_intent is QualityIntent.MAINSTREAM:
-            top_source, top_failed = await self._fetch_top_sellers()
-            sources.append(top_source)
-            degraded = degraded or top_failed
+        has_anchor = any(
+            intent_tag.role is IntentTagRole.ANCHOR
+            for intent_tag in intent.tags
+        )
+        if (
+            intent.quality_intent is QualityIntent.MAINSTREAM
+            or not has_anchor
+        ):
+            source_fetches.append(await self._fetch_top_sellers())
 
         seed_appids = {
             int(item.appid)
@@ -337,47 +376,118 @@ class SteamGameIndexService:
             and item.confidence >= REFERENCE_MATCH_THRESHOLD
         }
         excluded = seed_appids | {int(appid) for appid in excluded_appids or []}
-        filtered_sources = [
-            (
-                source_kind,
-                source_tag,
-                [
-                    candidate
-                    for candidate in candidates
-                    if candidate.appid is not None
-                    and int(candidate.appid) not in excluded
-                ],
+        filtered_fetches = [
+            replace(
+                fetch,
+                source=replace(
+                    fetch.source,
+                    candidates=tuple(
+                        candidate
+                        for candidate in fetch.source.candidates
+                        if candidate.appid is not None
+                        and int(candidate.appid) not in excluded
+                    ),
+                ),
             )
-            for source_kind, source_tag, candidates in sources
+            for fetch in source_fetches
         ]
-        filtered_sources.append(
-            (
-                "index",
-                None,
-                [
-                    candidate
-                    for candidate in ranked_index_candidates
-                    if candidate.appid is not None
-                    and int(candidate.appid) not in excluded
-                ],
-            )
+        index_candidates = tuple(
+            candidate
+            for candidate in ranked_index_candidates
+            if candidate.appid is not None
+            and int(candidate.appid) not in excluded
         )
+        index_source = RecallSource(
+            source_id="index",
+            source_kind="index",
+            source_tag=None,
+            candidates=index_candidates,
+            weight=0.35,
+        )
+        index_health = RecallSourceHealth(
+            source_id=index_source.source_id,
+            critical=False,
+            status=(
+                RecallSourceStatus.SUCCESS
+                if index_candidates
+                else RecallSourceStatus.EMPTY
+            ),
+            candidate_count=len(index_candidates),
+        )
+        filtered_fetches.append(RecallSourceFetch(index_source, index_health))
+        degraded = count_prefetch_degraded or any(
+            fetch.health.status
+            in {
+                RecallSourceStatus.STALE,
+                RecallSourceStatus.TRANSIENT_FAILURE,
+                RecallSourceStatus.CONTRACT_FAILURE,
+            }
+            for fetch in filtered_fetches
+        ) or any(
+            fetch.source.source_kind == "tag_text"
+            for fetch in filtered_fetches
+        )
+        source_health = tuple(fetch.health for fetch in filtered_fetches)
         merged = merge_candidate_sources(
-            filtered_sources,
+            [fetch.source for fetch in filtered_fetches],
             seeds=seeds,
             warnings=(STEAM_TAG_RECALL_DEGRADED_WARNING,) if degraded else (),
             degraded=degraded,
+            health=RecallHealth(sources=source_health),
         )
-        verified_hits = await self._validate_recall_hits(
-            merged.hits,
+        first_batch = await self._validate_recall_hits(
+            merged.hits[:60],
             records,
             prefetched,
         )
+        verified_hits = list(first_batch.hits)
+        first_eligible = self._eligible_recall_count(
+            verified_hits,
+            preference,
+            intent,
+            excluded_appids,
+            excluded_titles,
+        )
+        validation_attempts = first_batch.attempts
+        transient_failures = first_batch.transient_failures
+        contract_failures = first_batch.contract_failures
+        if (
+            first_eligible < 2 * max(int(requested_limit), 0)
+            and len(merged.hits) > 60
+        ):
+            second_batch = await self._validate_recall_hits(
+                merged.hits[60:100],
+                records,
+                prefetched,
+            )
+            verified_hits.extend(second_batch.hits)
+            validation_attempts += second_batch.attempts
+            transient_failures += second_batch.transient_failures
+            contract_failures += second_batch.contract_failures
+
+        eligible = self._eligible_recall_count(
+            verified_hits,
+            preference,
+            intent,
+            excluded_appids,
+            excluded_titles,
+        )
+        health = RecallHealth(
+            sources=source_health,
+            validation_attempts=validation_attempts,
+            validation_transient_failures=transient_failures,
+            validation_contract_failures=contract_failures,
+            verified=len(verified_hits),
+            eligible=eligible,
+        )
+        if health.unavailable(limit=requested_limit):
+            raise RecallUnavailableError(health)
         verified = CandidateRecallResult(
             hits=tuple(verified_hits),
             seeds=merged.seeds,
             warnings=merged.warnings,
             degraded=merged.degraded,
+            health=health,
         )
 
         if degraded and STEAM_TAG_RECALL_DEGRADED_WARNING not in preference.parse_warnings:
@@ -402,7 +512,14 @@ class SteamGameIndexService:
             [self._usable_steam_tag_id_for(seed.tag) for seed in seeds],
             {
                 f"{kind}:{tag or '-'}": len(candidates)
-                for kind, tag, candidates in filtered_sources
+                for kind, tag, candidates in (
+                    (
+                        fetch.source.source_kind,
+                        fetch.source.source_tag,
+                        fetch.source.candidates,
+                    )
+                    for fetch in filtered_fetches
+                )
             },
             len(verified.hits),
             degraded,
@@ -413,34 +530,91 @@ class SteamGameIndexService:
         self,
         tag: str,
         prefetched: dict[int, GameCandidate],
-        prefetched_tag_sources: dict[
-            str,
-            tuple[str, str | None, list[GameCandidate]] | None,
-        ] | None = None,
-    ) -> tuple[tuple[str, str | None, list[GameCandidate]], bool]:
+        prefetched_tag_sources: dict[str, RecallSourceFetch] | None = None,
+    ) -> RecallSourceFetch:
         if prefetched_tag_sources is not None and tag in prefetched_tag_sources:
-            prefetched_source = prefetched_tag_sources[tag]
-            if prefetched_source is not None:
-                return prefetched_source, False
-            fallback, _fallback_failed = await self._search_tag_text(tag, prefetched)
-            return ("tag_text", tag, fallback), True
+            return prefetched_tag_sources[tag]
 
-        source = await self._fetch_storefront_tag_source(tag)
-        if source is not None:
-            return source[0], False
+        tag_id = self._usable_steam_tag_id_for(tag)
+        source_id = f"tag:{tag}"
+        if tag_id is not None:
+            search_storefront = getattr(
+                self.steam_client,
+                "search_storefront_tag",
+                None,
+            )
+            if search_storefront is None:
+                return failed_source_fetch(
+                    source_id,
+                    "tag",
+                    tag,
+                    1.0,
+                    RuntimeError("Steam storefront tag search is unavailable."),
+                )
+            try:
+                page = await self._shared_storefront_tag_page(
+                    tag_id,
+                    search_storefront,
+                    page_size=40,
+                )
+            except Exception as exc:
+                # A known tag ID must never degrade into a title query.
+                return failed_source_fetch(
+                    source_id,
+                    "tag",
+                    tag,
+                    1.0,
+                    exc,
+                )
+            candidates = tuple(
+                self._candidate_from_storefront_hit(hit)
+                for hit in page.hits[:40]
+            )
+            return successful_source_fetch(
+                RecallSource(
+                    source_id=source_id,
+                    source_kind="tag",
+                    source_tag=tag,
+                    candidates=candidates,
+                    weight=1.0,
+                ),
+                stale=bool(getattr(page, "stale", False)),
+                total_count=int(page.total_count),
+            )
 
-        fallback, _fallback_failed = await self._search_tag_text(tag, prefetched)
-        return (
-            "tag_text",
-            tag,
-            fallback,
-        ), True
+        query = tag.replace("_", " ")
+        try:
+            hits = await self._search_refs(
+                query,
+                page_size=40,
+                prefetched=prefetched,
+            )
+        except Exception as exc:
+            return failed_source_fetch(
+                source_id,
+                "tag_text",
+                tag,
+                1.0,
+                exc,
+            )
+        candidates = tuple(candidate_from_search_hit(hit) for hit in hits[:40])
+        return successful_source_fetch(
+            RecallSource(
+                source_id=source_id,
+                source_kind="tag_text",
+                source_tag=tag,
+                candidates=candidates,
+                weight=1.0,
+            ),
+            total_count=len(candidates),
+        )
 
     async def _prefetch_reference_tag_sources(
         self,
         references: list[GameCandidate],
+        prefetched: dict[int, GameCandidate],
     ) -> tuple[
-        dict[str, tuple[str, str | None, list[GameCandidate]] | None],
+        dict[str, RecallSourceFetch],
         dict[str, int],
         bool,
     ]:
@@ -461,128 +635,327 @@ class SteamGameIndexService:
         if not tags:
             return {}, {}, degraded
 
-        sources = await asyncio.gather(
-            *(self._fetch_storefront_tag_source(tag) for tag in tags)
+        fetches = await asyncio.gather(
+            *(self._fetch_tag_source(tag, prefetched) for tag in tags)
         )
-        source_by_tag = {
-            tag: source[0] if source is not None else None
-            for tag, source in zip(tags, sources)
-        }
+        source_by_tag = dict(zip(tags, fetches))
         counts_by_tag = {
-            tag: source[1]
-            for tag, source in zip(tags, sources)
-            if source is not None
+            tag: fetch.total_count
+            for tag, fetch in zip(tags, fetches)
+            if fetch.health.status
+            not in {
+                RecallSourceStatus.TRANSIENT_FAILURE,
+                RecallSourceStatus.CONTRACT_FAILURE,
+            }
         }
         return (
             source_by_tag,
             counts_by_tag,
-            degraded or any(source is None for source in sources),
-        )
-
-    async def _fetch_storefront_tag_source(
-        self,
-        tag: str,
-    ) -> tuple[
-        tuple[str, str | None, list[GameCandidate]],
-        int,
-    ] | None:
-        tag_id = self._usable_steam_tag_id_for(tag)
-        search_storefront = getattr(self.steam_client, "search_storefront_tag", None)
-        if tag_id is None or search_storefront is None:
-            return None
-        try:
-            page = await self._shared_storefront_tag_page(
-                tag_id,
-                search_storefront,
-            )
-        except Exception:
-            return None
-        return (
-            (
-                "tag",
-                tag,
-                [candidate_from_search_hit(hit) for hit in page.hits],
+            degraded
+            or any(
+                fetch.health.status
+                in {
+                    RecallSourceStatus.STALE,
+                    RecallSourceStatus.TRANSIENT_FAILURE,
+                    RecallSourceStatus.CONTRACT_FAILURE,
+                }
+                for fetch in fetches
             ),
-            page.total_count,
         )
 
     async def _shared_storefront_tag_page(
         self,
         tag_id: int,
         search_storefront: Callable[..., Any],
+        page_size: int = 20,
     ) -> Any:
+        key = (int(tag_id), int(page_size))
         async with self._storefront_tag_tasks_lock:
-            task = self._storefront_tag_tasks.get(tag_id)
+            task = self._storefront_tag_tasks.get(key)
             if task is None:
                 task = asyncio.create_task(
                     self._run_storefront_tag_task(
                         tag_id,
                         search_storefront,
+                        page_size,
                     )
                 )
-                self._storefront_tag_tasks[tag_id] = task
+                self._storefront_tag_tasks[key] = task
         return await asyncio.shield(task)
 
     async def _run_storefront_tag_task(
         self,
         tag_id: int,
         search_storefront: Callable[..., Any],
+        page_size: int,
     ) -> Any:
         task = asyncio.current_task()
+        key = (int(tag_id), int(page_size))
         try:
             return await self._request_storefront_tag_page(
                 tag_id,
                 search_storefront,
+                page_size,
             )
         finally:
             async with self._storefront_tag_tasks_lock:
-                if self._storefront_tag_tasks.get(tag_id) is task:
-                    self._storefront_tag_tasks.pop(tag_id, None)
+                if self._storefront_tag_tasks.get(key) is task:
+                    self._storefront_tag_tasks.pop(key, None)
 
     async def _request_storefront_tag_page(
         self,
         tag_id: int,
         search_storefront: Callable[..., Any],
+        page_size: int,
     ) -> Any:
         async with self._steam_semaphore:
-            return await search_storefront(tag_id, page_size=20)
-
-    async def _search_tag_text(
-        self,
-        tag: str,
-        prefetched: dict[int, GameCandidate],
-    ) -> tuple[list[GameCandidate], bool]:
-        query = tag.replace("_", " ")
-        try:
-            hits = await self._search_refs(
-                query,
-                page_size=20,
-                prefetched=prefetched,
-            )
-        except Exception:
-            return [], True
-        return [candidate_from_search_hit(hit) for hit in hits], False
+            return await search_storefront(tag_id, page_size=page_size)
 
     async def _fetch_top_sellers(
         self,
-    ) -> tuple[tuple[str, str | None, list[GameCandidate]], bool]:
+    ) -> RecallSourceFetch:
+        source_id = "top_seller"
         browser = getattr(self.steam_client, "browse_top_sellers", None)
         if browser is None:
-            return ("top_seller", None, []), True
+            return failed_source_fetch(
+                source_id,
+                "top_seller",
+                None,
+                0.5,
+                RuntimeError("Steam top-seller browsing is unavailable."),
+            )
         try:
             async with self._steam_semaphore:
                 page = await browser(page_size=60)
-            candidates = [candidate_from_search_hit(hit) for hit in page.hits[:60]]
-        except Exception:
-            return ("top_seller", None, []), True
-        return ("top_seller", None, candidates), False
+            candidates = tuple(
+                self._candidate_from_storefront_hit(hit)
+                for hit in page.hits[:60]
+            )
+        except Exception as exc:
+            return failed_source_fetch(
+                source_id,
+                "top_seller",
+                None,
+                0.5,
+                exc,
+            )
+        return successful_source_fetch(
+            RecallSource(
+                source_id=source_id,
+                source_kind="top_seller",
+                source_tag=None,
+                candidates=candidates,
+                weight=0.5,
+            ),
+            stale=bool(getattr(page, "stale", False)),
+            total_count=int(page.total_count),
+        )
+
+    async def _fetch_intersection_source(
+        self,
+        intent: RecommendationIntent,
+    ) -> RecallSourceFetch | None:
+        components: list[tuple[str, int]] = []
+        seen_ids: set[int] = set()
+        for role in (IntentTagRole.REQUIRED, IntentTagRole.ANCHOR):
+            for intent_tag in intent.tags:
+                if intent_tag.role is not role:
+                    continue
+                tag_id = self._usable_steam_tag_id_for(intent_tag.tag)
+                if tag_id is None or tag_id in seen_ids:
+                    continue
+                components.append((intent_tag.tag, tag_id))
+                seen_ids.add(tag_id)
+                if len(components) == 2:
+                    break
+            if len(components) == 2:
+                break
+        if len(components) < 2:
+            return None
+
+        component_tags = tuple(tag for tag, _tag_id in components)
+        tag_ids = tuple(tag_id for _tag, tag_id in components)
+        source_id = f"intersection:{tag_ids[0]},{tag_ids[1]}"
+        search = getattr(self.steam_client, "search_storefront_tags", None)
+        if search is None:
+            return failed_source_fetch(
+                source_id,
+                "intersection",
+                None,
+                1.3,
+                RuntimeError("Steam tag intersection search is unavailable."),
+                component_tags=component_tags,
+            )
+        try:
+            page = await self._shared_intersection_page(
+                tag_ids,
+                search,
+                page_size=40,
+            )
+            candidates = tuple(
+                self._candidate_from_storefront_hit(hit)
+                for hit in page.hits[:40]
+            )
+        except Exception as exc:
+            return failed_source_fetch(
+                source_id,
+                "intersection",
+                None,
+                1.3,
+                exc,
+                component_tags=component_tags,
+            )
+        return successful_source_fetch(
+            RecallSource(
+                source_id=source_id,
+                source_kind="intersection",
+                source_tag=None,
+                candidates=candidates,
+                weight=1.3,
+                component_tags=component_tags,
+            ),
+            stale=bool(getattr(page, "stale", False)),
+            total_count=int(page.total_count),
+        )
+
+    async def _shared_intersection_page(
+        self,
+        tag_ids: tuple[int, int],
+        search: Callable[..., Any],
+        *,
+        page_size: int,
+    ) -> Any:
+        key = (tag_ids, int(page_size))
+        async with self._intersection_tasks_lock:
+            task = self._intersection_tasks.get(key)
+            if task is None:
+                task = asyncio.create_task(
+                    self._run_intersection_task(key, search)
+                )
+                self._intersection_tasks[key] = task
+        return await asyncio.shield(task)
+
+    async def _run_intersection_task(
+        self,
+        key: tuple[tuple[int, int], int],
+        search: Callable[..., Any],
+    ) -> Any:
+        task = asyncio.current_task()
+        tag_ids, page_size = key
+        try:
+            async with self._steam_semaphore:
+                return await search(list(tag_ids), page_size=page_size)
+        finally:
+            async with self._intersection_tasks_lock:
+                if self._intersection_tasks.get(key) is task:
+                    self._intersection_tasks.pop(key, None)
+
+    async def _fetch_more_like_source(
+        self,
+        reference: GameCandidate,
+        *,
+        allow_unreleased: bool,
+    ) -> RecallSourceFetch:
+        appid = int(reference.appid or 0)
+        source_id = f"more_like:{appid}"
+        getter = getattr(self.steam_client, "get_more_like", None)
+        if getter is None:
+            return failed_source_fetch(
+                source_id,
+                "more_like",
+                None,
+                1.2,
+                RuntimeError("Steam More Like This is unavailable."),
+            )
+        try:
+            page = await self._shared_more_like_page(
+                appid,
+                allow_unreleased,
+                getter,
+            )
+            candidates = tuple(
+                self._candidate_from_storefront_hit(hit)
+                for hit in page.hits
+                if hit.appid != appid
+            )
+        except Exception as exc:
+            return failed_source_fetch(
+                source_id,
+                "more_like",
+                None,
+                1.2,
+                exc,
+            )
+        return successful_source_fetch(
+            RecallSource(
+                source_id=source_id,
+                source_kind="more_like",
+                source_tag=None,
+                candidates=candidates,
+                weight=1.2,
+            ),
+            stale=bool(getattr(page, "stale", False)),
+            total_count=len(candidates),
+        )
+
+    async def _shared_more_like_page(
+        self,
+        appid: int,
+        allow_unreleased: bool,
+        getter: Callable[..., Any],
+    ) -> Any:
+        key = (int(appid), bool(allow_unreleased))
+        async with self._more_like_tasks_lock:
+            task = self._more_like_tasks.get(key)
+            if task is None:
+                task = asyncio.create_task(
+                    self._run_more_like_task(key, getter)
+                )
+                self._more_like_tasks[key] = task
+        return await asyncio.shield(task)
+
+    async def _run_more_like_task(
+        self,
+        key: tuple[int, bool],
+        getter: Callable[..., Any],
+    ) -> Any:
+        task = asyncio.current_task()
+        appid, allow_unreleased = key
+        try:
+            async with self._steam_semaphore:
+                return await getter(
+                    appid,
+                    allow_unreleased=allow_unreleased,
+                )
+        finally:
+            async with self._more_like_tasks_lock:
+                if self._more_like_tasks.get(key) is task:
+                    self._more_like_tasks.pop(key, None)
+
+    def _candidate_from_storefront_hit(
+        self,
+        hit: SteamSearchHit,
+    ) -> GameCandidate:
+        candidate = candidate_from_search_hit(hit)
+        ordered = dedupe_texts(
+            [
+                canonical
+                for tag_id in hit.tag_ids
+                if (canonical := self._canonical_tag_by_id.get(int(tag_id)))
+            ]
+        )
+        if not ordered:
+            return candidate
+        data = dump_model(candidate)
+        data["ordered_tags"] = ordered
+        return validate_candidate(data)
 
     async def _validate_recall_hits(
         self,
         hits: tuple[CandidateHit, ...],
         records: dict[str, SteamIndexEntry],
         prefetched: dict[int, GameCandidate],
-    ) -> list[CandidateHit]:
+    ) -> RecallValidationBatch:
         existing = {
             int(record.candidate.appid): record.candidate
             for record in records.values()
@@ -595,21 +968,66 @@ class SteamGameIndexService:
             if record.candidate.appid is not None and record.needs_revalidation
         }
 
-        async def validate(hit: CandidateHit) -> CandidateHit | None:
+        async def validate(
+            hit: CandidateHit,
+        ) -> tuple[CandidateHit | None, RecallSourceStatus | None]:
             appid = int(hit.candidate.appid or 0)
             candidate = existing.get(appid)
             if candidate is None:
-                candidate = await self._load_candidate(
-                    appid,
-                    prefetched,
-                    bypass_cache=appid in legacy_appids,
-                )
+                try:
+                    candidate = await self._fetch_candidate(
+                        appid,
+                        prefetched,
+                        bypass_cache=appid in legacy_appids,
+                    )
+                except Exception as exc:
+                    return None, failure_status(exc)
             if candidate is None or not is_confirmed_base_game(candidate):
-                return None
-            return replace(hit, candidate=candidate)
+                return None, None
+            candidate = merge_recall_candidate_evidence(candidate, hit.candidate)
+            return replace(hit, candidate=candidate), None
 
         validated = await asyncio.gather(*(validate(hit) for hit in hits))
-        return [hit for hit in validated if hit is not None]
+        return RecallValidationBatch(
+            hits=tuple(hit for hit, _failure in validated if hit is not None),
+            attempts=len(hits),
+            transient_failures=sum(
+                failure is RecallSourceStatus.TRANSIENT_FAILURE
+                for _hit, failure in validated
+            ),
+            contract_failures=sum(
+                failure is RecallSourceStatus.CONTRACT_FAILURE
+                for _hit, failure in validated
+            ),
+        )
+
+    def _eligible_recall_count(
+        self,
+        hits: list[CandidateHit],
+        preference: GamePreference,
+        intent: RecommendationIntent,
+        excluded_appids: list[int] | None,
+        excluded_titles: list[str] | None,
+    ) -> int:
+        ranked = rank_entries(
+            [hit.candidate for hit in hits],
+            preference,
+            retrieval_ranks={
+                int(hit.candidate.appid): hit.retrieval_rank
+                for hit in hits
+                if hit.candidate.appid is not None
+            },
+            intent=intent,
+        )
+        ranked = exclude_previously_shown(
+            ranked,
+            excluded_appids,
+            excluded_titles,
+        )
+        return sum(
+            game.score_breakdown.relevance_tier != "C"
+            for game in ranked
+        )
 
     async def ensure_steam_tag_aliases(self) -> bool:
         getter = getattr(self.steam_client, "get_popular_tags_snapshot", None)
@@ -804,6 +1222,17 @@ class SteamGameIndexService:
         )
         if is_current_snapshot_payload(payload):
             return parse_snapshot(payload)
+        if is_previous_snapshot_payload(payload):
+            migrated = parse_snapshot_records(
+                payload,
+                needs_revalidation=True,
+                preserve_coverage=False,
+            )
+            await self.cache.set_json(
+                STEAM_INDEX_CACHE_KEY,
+                snapshot_payload(migrated),
+            )
+            return migrated
 
         for legacy_key in STEAM_INDEX_LEGACY_CACHE_KEYS:
             legacy_payload = await self.cache.get_json(
@@ -2015,6 +2444,14 @@ def is_current_snapshot_payload(payload: Any) -> bool:
     )
 
 
+def is_previous_snapshot_payload(payload: Any) -> bool:
+    return (
+        isinstance(payload, dict)
+        and type(payload.get("schema_version")) is int
+        and payload.get("schema_version") == 1
+    )
+
+
 def is_legacy_snapshot_payload(payload: Any) -> bool:
     return (
         isinstance(payload, dict)
@@ -2108,6 +2545,83 @@ def candidate_from_search_hit(hit: SteamSearchHit) -> GameCandidate:
         appid=hit.appid,
         raw_url=hit.store_url,
     )
+
+
+def successful_source_fetch(
+    source: RecallSource,
+    *,
+    stale: bool = False,
+    total_count: int = 0,
+) -> RecallSourceFetch:
+    status = (
+        RecallSourceStatus.STALE
+        if stale
+        else RecallSourceStatus.SUCCESS
+        if source.candidates
+        else RecallSourceStatus.EMPTY
+    )
+    return RecallSourceFetch(
+        source=source,
+        health=RecallSourceHealth(
+            source_id=source.source_id,
+            critical=source.source_kind != "index",
+            status=status,
+            candidate_count=len(source.candidates),
+        ),
+        total_count=max(int(total_count), 0),
+    )
+
+
+def failed_source_fetch(
+    source_id: str,
+    source_kind: str,
+    source_tag: str | None,
+    weight: float,
+    exc: Exception,
+    *,
+    component_tags: tuple[str, ...] = (),
+) -> RecallSourceFetch:
+    source = RecallSource(
+        source_id=source_id,
+        source_kind=source_kind,
+        source_tag=source_tag,
+        candidates=(),
+        weight=weight,
+        component_tags=component_tags,
+    )
+    return RecallSourceFetch(
+        source=source,
+        health=RecallSourceHealth(
+            source_id=source_id,
+            critical=True,
+            status=failure_status(exc),
+        ),
+    )
+
+
+def failure_status(exc: Exception) -> RecallSourceStatus:
+    transient = bool(getattr(exc, "transient", False)) or isinstance(
+        exc,
+        (httpx.TimeoutException, httpx.NetworkError),
+    )
+    return (
+        RecallSourceStatus.TRANSIENT_FAILURE
+        if transient
+        else RecallSourceStatus.CONTRACT_FAILURE
+    )
+
+
+def merge_recall_candidate_evidence(
+    candidate: GameCandidate,
+    recalled: GameCandidate,
+) -> GameCandidate:
+    if not recalled.ordered_tags:
+        return candidate
+    data = dump_model(candidate)
+    data["ordered_tags"] = dedupe_texts(
+        [*recalled.ordered_tags, *(data.get("ordered_tags") or [])]
+    )
+    return validate_candidate(data)
 
 
 def mark_reference_query(

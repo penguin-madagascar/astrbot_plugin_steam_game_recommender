@@ -246,7 +246,9 @@ class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
 
         actual = await failing.search_storefront_tag(29482)
 
-        self.assertEqual(actual, expected)
+        self.assertEqual(actual.hits, expected.hits)
+        self.assertEqual(actual.total_count, expected.total_count)
+        self.assertTrue(actual.stale)
         self.assertIn(168, cache.requested_ttls)
 
     async def test_live_failure_without_stale_cache_raises(self) -> None:

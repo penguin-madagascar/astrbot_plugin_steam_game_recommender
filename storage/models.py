@@ -369,6 +369,7 @@ class GameCandidate(BaseModel):
     app_type: str | None = None
     platforms: list[str] = Field(default_factory=list)
     genres: list[str] = Field(default_factory=list)
+    genre_ids: list[int] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     ordered_tags: list[str] = Field(default_factory=list)
     inferred_tags: list[str] = Field(default_factory=list)
@@ -398,6 +399,22 @@ class GameCandidate(BaseModel):
     )
     def _normalize_lists(cls, value: Any) -> list[str]:
         return split_text_list(value)
+
+    @validator("genre_ids", pre=True)
+    def _normalize_genre_ids(cls, value: Any) -> list[int]:
+        if not isinstance(value, (list, tuple)):
+            return []
+        result: list[int] = []
+        for item in value:
+            if isinstance(item, bool):
+                continue
+            try:
+                genre_id = int(item)
+            except (TypeError, ValueError):
+                continue
+            if genre_id > 0 and genre_id not in result:
+                result.append(genre_id)
+        return result
 
     @validator("internal_source_markers", pre=True)
     def _normalize_internal_markers(cls, value: Any) -> list[str]:

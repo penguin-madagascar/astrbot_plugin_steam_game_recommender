@@ -38,7 +38,7 @@ from .recommendation_scoring import (
     semantic_score,
     wilson_lower_bound,
 )
-from .ranking_precedence import ranked_game_precedence_prefix
+from .ranking_precedence import effective_score, ranked_game_precedence_prefix
 from .tag_normalizer import (
     canonical_tags_from_terms,
     normalize_tag,
@@ -248,7 +248,7 @@ def rank_steam_candidates(
         ranked.append(
             RankedGame.from_candidate(
                 mark_index_source(candidate),
-                clamp_score(layer_value * 100),
+                clamp_score(effective_score(breakdown)),
                 breakdown,
                 explanation,
             )

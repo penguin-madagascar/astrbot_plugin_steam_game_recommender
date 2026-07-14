@@ -13,7 +13,10 @@ from astrbot_plugin_steam_game_recommender.services.recommendation_memory import
     recommendation_memory_key,
     save_recommendation_memory,
 )
-from astrbot_plugin_steam_game_recommender.services.steam_index import SteamGameIndexService
+from astrbot_plugin_steam_game_recommender.services.steam_index import (
+    STEAM_INDEX_SCHEMA_VERSION,
+    SteamGameIndexService,
+)
 from astrbot_plugin_steam_game_recommender.storage.models import GamePreference, RankedGame
 
 
@@ -214,7 +217,7 @@ class IndexCache:
 
     async def get_json(self, _key: str, _ttl_hours: int) -> Any:
         return {
-            "schema_version": 1,
+            "schema_version": STEAM_INDEX_SCHEMA_VERSION,
             "entries": [
                 {"candidate": entry.model_dump(), "refreshed_at": 1.0} for entry in self.entries
             ],

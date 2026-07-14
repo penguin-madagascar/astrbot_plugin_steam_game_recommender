@@ -7,7 +7,10 @@ from astrbot_plugin_steam_game_recommender.services.similarity_ranker import (
     build_profile_from_preference,
     rank_steam_candidates,
 )
-from astrbot_plugin_steam_game_recommender.services.steam_index import SteamGameIndexService
+from astrbot_plugin_steam_game_recommender.services.steam_index import (
+    STEAM_INDEX_SCHEMA_VERSION,
+    SteamGameIndexService,
+)
 from astrbot_plugin_steam_game_recommender.storage.models import GameCandidate, GamePreference
 
 
@@ -299,7 +302,7 @@ class MemoryCache:
         payload = self.payloads.get(key)
         if key == "steam_index" and isinstance(payload, list):
             return {
-                "schema_version": 1,
+                "schema_version": STEAM_INDEX_SCHEMA_VERSION,
                 "entries": [{"candidate": entry, "refreshed_at": 1.0} for entry in payload],
                 "search_coverage": {},
             }

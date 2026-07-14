@@ -86,7 +86,7 @@ class RecallSeedSelectionTest(unittest.TestCase):
 
 
 class CandidateSourceMergeTest(unittest.TestCase):
-    def test_round_robins_sources_and_keeps_first_provenance_for_duplicates(self) -> None:
+    def test_weighted_rrf_keeps_all_provenance_for_duplicates(self) -> None:
         result = merge_candidate_sources(
             [
                 ("tag", "first_tag", [_candidate(1), _candidate(2), _candidate(3)]),
@@ -97,15 +97,17 @@ class CandidateSourceMergeTest(unittest.TestCase):
 
         self.assertEqual(
             [hit.candidate.appid for hit in result.hits],
-            [1, 2, 6, 4, 3, 5, 7],
+            [2, 1, 4, 3, 5, 6, 7],
         )
         self.assertEqual(
             [hit.retrieval_rank for hit in result.hits],
             list(range(1, 8)),
         )
         app_two = next(hit for hit in result.hits if hit.candidate.appid == 2)
-        self.assertEqual(app_two.source_tag, "second_tag")
-        self.assertEqual(app_two.source_rank, 1)
+        self.assertEqual(
+            [(source.source_tag, source.source_rank) for source in app_two.source_hits],
+            [("first_tag", 2), ("second_tag", 1)],
+        )
         app_four = next(hit for hit in result.hits if hit.candidate.appid == 4)
         self.assertEqual(app_four.source_rank, 2)
 
@@ -150,11 +152,11 @@ class CandidateSourceMergeTest(unittest.TestCase):
 
         self.assertEqual(len(result.hits), 100)
         tag_hits = [hit for hit in result.hits if hit.source_tag is not None]
-        self.assertEqual(len(tag_hits), 60)
+        self.assertEqual(len(tag_hits), 75)
         for source_tag in ("tag_0", "tag_1", "tag_2"):
             self.assertEqual(
                 sum(hit.source_tag == source_tag for hit in tag_hits),
-                20,
+                25,
             )
 
     def test_custom_caps_are_applied_without_mutating_inputs(self) -> None:
