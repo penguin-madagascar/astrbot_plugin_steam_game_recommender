@@ -136,8 +136,6 @@ class PluginDashboardConfigTest(unittest.TestCase):
         self.assertEqual(plugin.fallback_provider_id, "provider/fallback")
         self.assertEqual(plugin.default_region, "JP")
         self.assertEqual(plugin.max_results, 8)
-        self.assertEqual(plugin.steam_min_review_count, 80)
-        self.assertEqual(plugin.steam_min_positive_ratio, 0.72)
         self.assertEqual(
             async_client_class.call_args.kwargs["timeout"].connect,
             21,
@@ -154,17 +152,9 @@ class PluginDashboardConfigTest(unittest.TestCase):
             },
         )
         self.assertEqual(index_service_class.call_args.kwargs["ttl_hours"], 96)
-        self.assertEqual(index_service_class.call_args.kwargs["min_review_count"], 80)
-        self.assertEqual(index_service_class.call_args.kwargs["min_positive_ratio"], 0.72)
         self.assertEqual(
-            index_service_class.call_args.kwargs["positive_component_weights"],
-            {
-                "tag_coverage": 45,
-                "positive_reference": 20,
-                "library_profile": 5,
-                "review_reputation": 20,
-                "popularity": 10,
-            },
+            set(index_service_class.call_args.kwargs),
+            {"steam_client", "cache", "ttl_hours"},
         )
         price_bridge_class.assert_called_once_with(
             http_client,

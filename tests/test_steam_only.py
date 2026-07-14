@@ -87,16 +87,20 @@ class SteamOnlyMetadataTest(unittest.TestCase):
         ):
             self.assertIn(example, readme)
         self.assertIn("游戏库过滤参数必须位于需求开头", readme)
+        self.assertIn("参考游戏只排除精确种子 AppID", readme)
+        self.assertIn("其续作、同系列和其他版本仍可参与推荐", readme)
+        self.assertNotIn("换一批、参考游戏和“排除已有”会排除整个作品族", readme)
         for scoring_detail in (
-            "标签覆盖 | 35%",
-            "正向参考 | 25%",
-            "游戏库画像 | 5%",
-            "口碑 | 20%",
-            "知名度 | 15%",
-            "两项都不可用 | 50%",
-            "数据完整度不再作为独立评分项",
-            "上限为 20 分",
-            "上限为 15 分",
+            "固定的锚点分层策略",
+            "A 层满足硬约束且核心覆盖率至少为 0.60",
+            "C 层满足硬约束但没有命中核心锚点",
+            "有核心锚点：语义分 = 70% × 核心覆盖率 + 30% × 辅助标签相似度",
+            "Wilson 好评率下界（z=1.96）",
+            "普通查询：层内分 = 70% × 语义分 + 30% × 质量分",
+            "高知名度/大作倾向：层内分 = 55% × 语义分 + 45% × 质量分",
+            "评测缺失或为零时质量分为 0",
+            "负向参考相似度按 0.25 系数从语义分扣除",
+            "不会再作为独立分量重复计分",
             "普通语言偏好不支持时为 -5",
             "强制措辞而不支持时为 -10",
             "当前价不高于预算时为 +5",
@@ -111,11 +115,13 @@ class SteamOnlyMetadataTest(unittest.TestCase):
             "推荐与评分",
             "缓存与网络",
             "https://steamcommunity.com/dev/apikey",
-            "五项正向权重",
-            "无需手工凑满 100",
+            "仅供 `/randomrec` 使用",
+            "旧的五项评分权重会被清除",
             "旧版平铺配置会在首次加载时自动迁移",
         ):
             self.assertIn(config_detail, readme)
+
+        self.assertNotIn("无需手工凑满 100", readme)
 
         for implementation_detail in (
             "## 评分规则",

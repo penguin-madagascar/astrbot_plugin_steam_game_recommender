@@ -196,7 +196,6 @@ class ExcludedRecommendationTest(unittest.IsolatedAsyncioTestCase):
                     ),
                 ]
             ),
-            min_review_count=0,
         )
 
         ranked = await service.recommend(

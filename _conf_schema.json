@@ -50,53 +50,13 @@
   "recommendation_and_scoring": {
     "type": "object",
     "description": "推荐与评分",
-    "hint": "配置推荐数量、正向评分权重和 Steam 推荐质量参数",
+    "hint": "配置推荐数量和索引缓存；/gamerec 使用固定的锚点分层、Wilson 口碑与评测规模评分，随机推荐门槛仅供 /randomrec 使用。",
     "items": {
       "max_results": {
         "type": "int",
         "description": "默认推荐数量上限",
         "hint": "每次默认返回的推荐条数，范围 1-10；用户明确要求数量时会优先采用用户数量但不超过该上限。",
         "default": 5
-      },
-      "tag_coverage_weight": {
-        "type": "float",
-        "description": "标签覆盖权重",
-        "hint": "标签覆盖在正向评分中的相对权重；系统会按当前可用分量自动归一化，无需手工凑满 100。",
-        "default": 35.0,
-        "min": 0,
-        "max": 100
-      },
-      "positive_reference_weight": {
-        "type": "float",
-        "description": "正面参考权重",
-        "hint": "正面参考游戏相似度的相对权重；系统会按当前可用分量自动归一化，无需手工凑满 100。",
-        "default": 25.0,
-        "min": 0,
-        "max": 100
-      },
-      "library_profile_weight": {
-        "type": "float",
-        "description": "游戏库画像权重",
-        "hint": "Steam 游戏库画像匹配度的相对权重；系统会按当前可用分量自动归一化，无需手工凑满 100。",
-        "default": 5.0,
-        "min": 0,
-        "max": 100
-      },
-      "review_reputation_weight": {
-        "type": "float",
-        "description": "口碑权重",
-        "hint": "Steam 口碑评分的相对权重；系统会按当前可用分量自动归一化，无需手工凑满 100。",
-        "default": 20.0,
-        "min": 0,
-        "max": 100
-      },
-      "popularity_weight": {
-        "type": "float",
-        "description": "知名度权重",
-        "hint": "Steam 评测数量所反映知名度的相对权重；系统会按当前可用分量自动归一化，无需手工凑满 100。",
-        "default": 15.0,
-        "min": 0,
-        "max": 100
       },
       "steam_index_ttl_hours": {
         "type": "int",
@@ -106,14 +66,14 @@
       },
       "steam_min_review_count": {
         "type": "int",
-        "description": "Steam 口碑先验强度",
-        "hint": "索引推荐使用该值（最低按 50）进行好评率贝叶斯平滑；/randomrec 仍将它作为最低评测数量。",
+        "description": "随机推荐最低评测数量",
+        "hint": "仅用于 /randomrec 的最低 Steam 评测数量门槛。",
         "default": 50
       },
       "steam_min_positive_ratio": {
         "type": "float",
         "description": "随机推荐最低好评率",
-        "hint": "仅用于 /randomrec 的评价门槛；索引推荐使用贝叶斯平滑口碑分，不按好评率直接删除候选。",
+        "hint": "仅用于 /randomrec 的最低 Steam 好评率门槛。",
         "default": 0.65
       }
     }

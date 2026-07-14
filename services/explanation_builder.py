@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..storage.models import GameCandidate, RankedGame, RecommendationEvidence
-from .similarity_ranker import popularity_score
+from .recommendation_scoring import popularity
 
 logger = logging.getLogger(__name__)
 
@@ -327,7 +327,7 @@ def build_unplayed_evidence(game: GameCandidate) -> list[RecommendationEvidence]
                 evidence_id="popularity",
                 category="popularity",
                 sentiment="positive",
-                text=f"评测规模对应的知名度指标为 {popularity_score(game.review_total):.0%}",
+                text=f"评测规模对应的知名度指标为 {popularity(game.review_total):.0%}",
             )
         )
     return evidence

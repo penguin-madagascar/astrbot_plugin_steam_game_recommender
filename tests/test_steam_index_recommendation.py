@@ -139,8 +139,6 @@ class SimilarityRankerTest(unittest.TestCase):
         ranked = ranker.rank_steam_candidates(
             candidates,
             profile,
-            min_review_count=50,
-            min_positive_ratio=0.65,
         )
 
         self.assertEqual(
@@ -172,8 +170,6 @@ class SimilarityRankerTest(unittest.TestCase):
         ranked = ranker.rank_steam_candidates(
             candidates,
             profile,
-            min_review_count=50,
-            min_positive_ratio=0.65,
         )
 
         self.assertEqual([game.title for game in ranked], ["Safe Co-op Puzzle"])
@@ -226,8 +222,6 @@ class SimilarityRankerTest(unittest.TestCase):
                 ),
             ],
             profile,
-            min_review_count=50,
-            min_positive_ratio=0.65,
         )
 
         self.assertEqual(
@@ -256,7 +250,6 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
         service = index_module.SteamGameIndexService(
             steam_client=NoLiveSearchSteamClient(),
             cache=MemoryCache({}),
-            min_review_count=0,
         )
 
         enriched = await service.enrich_candidate(
@@ -287,7 +280,6 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
         service = index_module.SteamGameIndexService(
             steam_client=NoLiveSearchSteamClient(),
             cache=MemoryCache({}),
-            min_review_count=0,
         )
 
         enriched = await service.enrich_candidate(
@@ -317,7 +309,6 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
         service = index_module.SteamGameIndexService(
             steam_client=TagAwareSteamClient(),
             cache=MemoryCache({}),
-            min_review_count=0,
         )
 
         enriched = await service.enrich_candidate(
@@ -363,8 +354,6 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
         service = index_module.SteamGameIndexService(
             steam_client=TagAwareSteamClient(),
             cache=cache,
-            min_review_count=50,
-            min_positive_ratio=0.65,
         )
 
         ranked = await service.recommend(
@@ -405,8 +394,6 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
             steam_client=NoLiveSearchSteamClient(),
             cache=cache,
             ttl_hours=168,
-            min_review_count=50,
-            min_positive_ratio=0.65,
         )
 
         ranked = await service.recommend(
@@ -464,7 +451,7 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
         )
         service = optional_import(
             "astrbot_plugin_steam_game_recommender.services.steam_index"
-        ).SteamGameIndexService(NoLiveSearchSteamClient(), cache, min_review_count=0)
+        ).SteamGameIndexService(NoLiveSearchSteamClient(), cache)
 
         ranked = await service.recommend(
             GamePreference(platforms=["steam"]),

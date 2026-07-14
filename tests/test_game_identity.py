@@ -144,7 +144,6 @@ class EditionDeduplicationTest(unittest.TestCase):
                 candidate(3, "Portal 2"),
             ],
             SteamTagProfile(reference_titles=["Control"], reference_appids=[1]),
-            min_review_count=0,
         )
 
         self.assertEqual(
@@ -163,7 +162,6 @@ class EditionDeduplicationTest(unittest.TestCase):
                 reference_appids=[1],
                 positive_reference_candidates=[candidate(1, "Control")],
             ),
-            min_review_count=0,
         )
 
         self.assertEqual(

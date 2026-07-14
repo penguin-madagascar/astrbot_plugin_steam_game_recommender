@@ -40,7 +40,7 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
                 "adventure": [steam_game("Adventure Game", ["Adventure", "Singleplayer"])],
             }
         )
-        service = SteamGameIndexService(steam, cache, min_review_count=50)
+        service = SteamGameIndexService(steam, cache)
 
         ranked = await service.recommend(
             GamePreference(
@@ -77,7 +77,7 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
                 "rpg": [steam_game("RPG Only", ["RPG"])],
             }
         )
-        service = SteamGameIndexService(steam, cache, min_review_count=50)
+        service = SteamGameIndexService(steam, cache)
 
         ranked = await service.recommend(
             GamePreference(
@@ -108,7 +108,7 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
                 ],
             }
         )
-        service = SteamGameIndexService(steam, MemoryCache(), min_review_count=50)
+        service = SteamGameIndexService(steam, MemoryCache())
 
         ranked = await service.recommend(
             GamePreference(

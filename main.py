@@ -121,22 +121,6 @@ class SteamGameRecommenderPlugin(Star):
             model_config.get("llm_fallback_provider_id", "") or ""
         ).strip()
         self.default_region = normalize_region(str(price_config.get("default_region") or "CN"))
-        self.steam_min_review_count = safe_int(
-            self.recommendation_config.get("steam_min_review_count"),
-            50,
-        )
-        self.steam_min_positive_ratio = safe_float(
-            self.recommendation_config.get("steam_min_positive_ratio"),
-            0.65,
-        )
-        positive_component_weights = {
-            "tag_coverage": self.recommendation_config.get("tag_coverage_weight"),
-            "positive_reference": self.recommendation_config.get("positive_reference_weight"),
-            "library_profile": self.recommendation_config.get("library_profile_weight"),
-            "review_reputation": self.recommendation_config.get("review_reputation_weight"),
-            "popularity": self.recommendation_config.get("popularity_weight"),
-        }
-
         self.http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout),
             follow_redirects=True,
@@ -163,9 +147,6 @@ class SteamGameRecommenderPlugin(Star):
                 self.recommendation_config.get("steam_index_ttl_hours"),
                 168,
             ),
-            min_review_count=self.steam_min_review_count,
-            min_positive_ratio=self.steam_min_positive_ratio,
-            positive_component_weights=positive_component_weights,
         )
         self.price_bridge = SteamPriceBridge(
             self.http_client,

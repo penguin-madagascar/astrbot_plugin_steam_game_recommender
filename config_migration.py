@@ -9,6 +9,15 @@ from typing import Any
 
 PLUGIN_NAME = "astrbot_plugin_steam_game_recommender"
 LEGACY_FALLBACK_FLAG = "enable_llm_fallback"
+OBSOLETE_SCORING_WEIGHT_KEYS = frozenset(
+    {
+        "tag_coverage_weight",
+        "positive_reference_weight",
+        "library_profile_weight",
+        "review_reputation_weight",
+        "popularity_weight",
+    }
+)
 GROUP_LEGACY_KEYS = {
     "model_and_access": (
         "llm_provider_id",
@@ -47,13 +56,33 @@ def migrate_config_data(
         isinstance(existing_model_config, Mapping)
         and LEGACY_FALLBACK_FLAG in existing_model_config
     )
-    if not any(key in config for key in LEGACY_KEYS) and not has_legacy_fallback_flag:
+    existing_scoring_config = config.get("recommendation_and_scoring")
+    has_obsolete_scoring_weights = any(
+        key in config for key in OBSOLETE_SCORING_WEIGHT_KEYS
+    ) or (
+        isinstance(existing_scoring_config, Mapping)
+        and any(key in existing_scoring_config for key in OBSOLETE_SCORING_WEIGHT_KEYS)
+    )
+    has_legacy_values = any(key in config for key in LEGACY_KEYS)
+    if not has_legacy_values and not has_legacy_fallback_flag:
+        if has_obsolete_scoring_weights:
+            cleaned = dict(config)
+            for key in OBSOLETE_SCORING_WEIGHT_KEYS:
+                cleaned.pop(key, None)
+            if isinstance(existing_scoring_config, Mapping):
+                scoring_config = dict(existing_scoring_config)
+                for key in OBSOLETE_SCORING_WEIGHT_KEYS:
+                    scoring_config.pop(key, None)
+                cleaned["recommendation_and_scoring"] = scoring_config
+            return cleaned, True
         return dict(config), False
 
     migrated = {
         key: value
         for key, value in config.items()
-        if key not in LEGACY_KEYS and key not in GROUP_LEGACY_KEYS
+        if key not in LEGACY_KEYS
+        and key not in GROUP_LEGACY_KEYS
+        and key not in OBSOLETE_SCORING_WEIGHT_KEYS
     }
     for group_name, group_schema in schema.items():
         if group_name not in GROUP_LEGACY_KEYS:
@@ -61,6 +90,9 @@ def migrate_config_data(
         existing = config.get(group_name)
         group_values = dict(existing) if isinstance(existing, Mapping) else {}
         group_values.pop(LEGACY_FALLBACK_FLAG, None)
+        if group_name == "recommendation_and_scoring":
+            for key in OBSOLETE_SCORING_WEIGHT_KEYS:
+                group_values.pop(key, None)
         for item_name, item_schema in group_schema["items"].items():
             if item_name in group_values:
                 continue

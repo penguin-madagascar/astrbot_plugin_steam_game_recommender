@@ -116,8 +116,6 @@ class ConstraintAwareRankerTest(unittest.TestCase):
                 ),
             ],
             profile,
-            min_review_count=50,
-            min_positive_ratio=0.65,
         )
 
         self.assertEqual(
@@ -146,8 +144,6 @@ class ConstraintAwareRankerTest(unittest.TestCase):
                 )
             ],
             SteamTagProfile(include_tags=["co_op", "puzzle"], exclude_tags=["horror"]),
-            min_review_count=50,
-            min_positive_ratio=0.65,
         )
 
         self.assertEqual([game.title for game in ranked], ["Description Only"])

@@ -31,7 +31,6 @@ from .similarity_ranker import (
     SteamTagProfile,
     build_profile_from_preference,
     rank_steam_candidates,
-    resolve_positive_component_weights,
 )
 from .steam_recall import (
     CandidateHit,
@@ -101,22 +100,14 @@ class SteamGameIndexService:
         steam_client: SteamIndexClient,
         cache: SteamIndexCache,
         ttl_hours: int = 168,
-        min_review_count: int = 50,
-        min_positive_ratio: float = 0.65,
         page_size: int = STEAM_INDEX_SEARCH_RESULTS_PER_TERM,
         clock: Callable[[], float] = time.time,
-        positive_component_weights: Mapping[str, Any] | None = None,
     ) -> None:
         self.steam_client = steam_client
         self.cache = cache
         self.ttl_hours = max(int(ttl_hours), 1)
-        self.min_review_count = max(int(min_review_count), 0)
-        self.min_positive_ratio = min(max(float(min_positive_ratio), 0.0), 1.0)
         self.page_size = min(max(int(page_size), 1), STEAM_INDEX_SEARCH_RESULTS_PER_TERM)
         self.clock = clock
-        self.positive_component_weights = resolve_positive_component_weights(
-            positive_component_weights
-        )
         self._tag_aliases_loaded = False
         self._tag_aliases_lock = asyncio.Lock()
         self._tag_aliases_task: asyncio.Task[bool] | None = None
@@ -147,10 +138,7 @@ class SteamGameIndexService:
         ranked = rank_entries(
             entries,
             preference,
-            self.min_review_count,
-            self.min_positive_ratio,
             profile_tag_weights=profile_tag_weights,
-            positive_component_weights=self.positive_component_weights,
         )
         ranked = exclude_previously_shown(ranked, excluded_appids, excluded_titles)
         ranked = deduplicate_game_editions(ranked, preferred_appids)
@@ -171,10 +159,7 @@ class SteamGameIndexService:
             ranked = rank_entries(
                 ranking_entries,
                 preference,
-                self.min_review_count,
-                self.min_positive_ratio,
                 profile_tag_weights=profile_tag_weights,
-                positive_component_weights=self.positive_component_weights,
                 retrieval_ranks={
                     int(hit.candidate.appid): hit.retrieval_rank
                     for hit in recall.hits
@@ -199,10 +184,7 @@ class SteamGameIndexService:
         ranked = rank_entries(
             refreshed,
             preference,
-            self.min_review_count,
-            self.min_positive_ratio,
             profile_tag_weights=profile_tag_weights,
-            positive_component_weights=self.positive_component_weights,
         )
         ranked = exclude_previously_shown(ranked, excluded_appids, excluded_titles)
         ranked = deduplicate_game_editions(ranked, preferred_appids)
@@ -244,9 +226,6 @@ class SteamGameIndexService:
         ranked_index_candidates = rank_entries(
             record_candidates,
             preference,
-            self.min_review_count,
-            self.min_positive_ratio,
-            positive_component_weights=self.positive_component_weights,
         )
         seeds = select_recall_seeds(intent)
         source_results = await asyncio.gather(
@@ -949,10 +928,7 @@ def unsupported_platforms(preference: GamePreference) -> list[str]:
 def rank_entries(
     entries: list[GameCandidate],
     preference: GamePreference,
-    min_review_count: int,
-    min_positive_ratio: float,
     profile_tag_weights: dict[str, float] | None = None,
-    positive_component_weights: Mapping[str, Any] | None = None,
     retrieval_ranks: Mapping[int, int] | None = None,
 ) -> list[RankedGame]:
     positives = reference_candidates(preference, entries)
@@ -969,10 +945,7 @@ def rank_entries(
     return rank_steam_candidates(
         entries,
         intent,
-        min_review_count,
-        min_positive_ratio,
         profile_tag_weights=profile_tag_weights,
-        positive_component_weights=positive_component_weights,
         positive_reference_candidates=positives,
         negative_reference_candidates=negatives,
         retrieval_ranks=retrieval_ranks,

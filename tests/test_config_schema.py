@@ -40,11 +40,6 @@ class ConfigSchemaTest(unittest.TestCase):
             list(group_items(schema, "recommendation_and_scoring")),
             [
                 "max_results",
-                "tag_coverage_weight",
-                "positive_reference_weight",
-                "library_profile_weight",
-                "review_reputation_weight",
-                "popularity_weight",
                 "steam_index_ttl_hours",
                 "steam_min_review_count",
                 "steam_min_positive_ratio",
@@ -98,37 +93,25 @@ class ConfigSchemaTest(unittest.TestCase):
         self.assertIn("未安装", notice["default"])
         self.assertEqual(items["default_region"]["default"], "CN")
 
-    def test_positive_weights_are_adjustable_relative_percentages(self) -> None:
-        items = group_items(load_schema(), "recommendation_and_scoring")
-        expected = {
-            "tag_coverage_weight": 35.0,
-            "positive_reference_weight": 25.0,
-            "library_profile_weight": 5.0,
-            "review_reputation_weight": 20.0,
-            "popularity_weight": 15.0,
-        }
-
-        for key, default in expected.items():
-            with self.subTest(key=key):
-                setting = items[key]
-                self.assertEqual(setting["type"], "float")
-                self.assertEqual(setting["default"], default)
-                self.assertEqual(setting["min"], 0)
-                self.assertEqual(setting["max"], 100)
-                self.assertIn("相对权重", setting["hint"])
-                self.assertIn("无需", setting["hint"])
-
-    def test_recommendation_thresholds_keep_current_command_copy(self) -> None:
-        items = group_items(load_schema(), "recommendation_and_scoring")
+    def test_gamerec_uses_fixed_scoring_and_thresholds_only_apply_to_randomrec(
+        self,
+    ) -> None:
+        schema = load_schema()
+        group = schema["recommendation_and_scoring"]
+        items = group["items"]
 
         self.assertEqual(items["steam_index_ttl_hours"]["default"], 168)
         self.assertEqual(items["steam_min_review_count"]["default"], 50)
         self.assertEqual(items["steam_min_positive_ratio"]["default"], 0.65)
+        self.assertIn("/gamerec", group["hint"])
+        self.assertIn("Wilson", group["hint"])
         review_hint = items["steam_min_review_count"]["hint"]
         ratio_setting = items["steam_min_positive_ratio"]
         self.assertIn("/randomrec", review_hint)
         self.assertIn("随机推荐", ratio_setting["description"])
         self.assertIn("/randomrec", ratio_setting["hint"])
+        self.assertNotIn("/gamerec", review_hint + ratio_setting["hint"])
+        self.assertNotIn("索引推荐", review_hint + ratio_setting["hint"])
         self.assertNotIn("/unplayedrec", review_hint + ratio_setting["hint"])
 
 
