@@ -221,6 +221,7 @@ class SteamGameIndexService:
             preference,
             records,
             now,
+            new_appid_budget=enrichment_limit,
         )
         searched_queries: list[str] = []
 
@@ -319,9 +320,21 @@ class SteamGameIndexService:
         preference: GamePreference,
         records: dict[str, SteamIndexEntry],
         now: float,
+        new_appid_budget: int,
     ) -> int:
+        references = build_recommendation_intent(preference).references
+        available_appids = {
+            int(record.candidate.appid)
+            for record in records.values()
+            if record.candidate.appid is not None
+        }
+        prune_reference_resolution_state(
+            preference,
+            references,
+            available_appids,
+        )
         enriched_count = 0
-        for reference in build_recommendation_intent(preference).references:
+        for reference in references:
             records_by_appid = {
                 int(record.candidate.appid): record
                 for record in records.values()
@@ -347,13 +360,30 @@ class SteamGameIndexService:
 
             if match is None:
                 observed_hits = await self._search_reference_group(reference)
-                match, candidate = await self._select_reference_candidate(
-                    reference,
-                    observed_hits,
+                observed_match = match_reference_query(reference, observed_hits)
+                existing_record = (
+                    records_by_appid.get(observed_match.hit.appid)
+                    if observed_match is not None
+                    else None
                 )
-                if candidate is not None:
-                    enriched_count += 1
-                    refreshed_at = now
+                if existing_record is not None:
+                    match = observed_match
+                    candidate = existing_record.candidate
+                    refreshed_at = existing_record.refreshed_at
+                elif observed_match is None:
+                    match = None
+                    candidate = None
+                elif enriched_count >= new_appid_budget:
+                    log_deferred_reference_group(reference, observed_match)
+                    continue
+                else:
+                    match, candidate = await self._select_reference_candidate(
+                        reference,
+                        observed_hits,
+                    )
+                    if candidate is not None:
+                        enriched_count += 1
+                        refreshed_at = now
 
             polarity = reference_polarity(reference)
             if match is not None and candidate is not None:
@@ -647,11 +677,12 @@ def matching_reference_candidates(
     polarity: str,
     resolved: list[ResolvedReferenceGame] | None = None,
 ) -> list[GameCandidate]:
-    del titles
+    title_keys = {normalize_text(title) for title in titles if title}
     resolved_appids = {
         int(item.appid)
         for item in resolved or []
         if item.polarity == polarity
+        if normalize_text(item.raw_text) in title_keys
         if item.appid is not None and item.confidence >= REFERENCE_MATCH_THRESHOLD
     }
     return [
@@ -688,6 +719,51 @@ def reference_polarity(reference: ReferenceQuery) -> str:
 
 def reference_warning(display_title: str) -> str:
     return f"参考游戏“{display_title}”未能可靠解析，未扩展其标签。"
+
+
+def prune_reference_resolution_state(
+    preference: GamePreference,
+    references: tuple[ReferenceQuery, ...],
+    available_appids: set[int],
+) -> None:
+    active = {
+        (normalize_text(alias), reference_polarity(reference))
+        for reference in references
+        for alias in reference.aliases
+    }
+    preference.resolved_reference_games = [
+        item
+        for item in preference.resolved_reference_games
+        if item.appid is not None
+        and int(item.appid) in available_appids
+        and (normalize_text(item.raw_text), item.polarity) in active
+    ]
+    preference.parse_warnings = [
+        warning
+        for warning in preference.parse_warnings
+        if not is_reference_resolution_warning(warning)
+    ]
+
+
+def is_reference_resolution_warning(value: str) -> bool:
+    text = " ".join(str(value or "").split())
+    return text.startswith("参考游戏“") and text.endswith(
+        "”未能可靠解析，未扩展其标签。"
+    )
+
+
+def log_deferred_reference_group(
+    reference: ReferenceQuery,
+    match: ReferenceMatch,
+) -> None:
+    logger.debug(
+        "Steam reference group: display_title=%r polarity=%s status=deferred "
+        "appid=%s confidence=%.3f",
+        reference.display_title,
+        reference_polarity(reference),
+        match.hit.appid,
+        match.confidence,
+    )
 
 
 def record_reference_group_resolution(

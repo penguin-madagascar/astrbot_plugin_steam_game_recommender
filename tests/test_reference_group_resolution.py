@@ -99,6 +99,41 @@ class ReferenceGroupResolutionTest(unittest.IsolatedAsyncioTestCase):
             [call["search"] for call in client.search_calls],
         )
 
+    async def test_failed_alias_in_every_locale_does_not_warn_when_group_resolves(
+        self,
+    ) -> None:
+        preference = GamePreference(
+            reference_games_like=["本地标题"],
+            reference_search_terms=["English Alias"],
+        )
+        client = FrozenReferenceSteamClient(
+            search_results={
+                ("English Alias", "schinese"): [
+                    SteamSearchHit(appid=11, title="English Alias")
+                ]
+            },
+            details={11: game(11, "English Alias", ["Adventure"])},
+        )
+        service = SteamGameIndexService(client, MemoryCache({}), clock=lambda: 1_000.0)
+
+        await service.refresh_entries(preference, [], target_pool=1)
+
+        self.assertEqual(preference.parse_warnings, [])
+        self.assertEqual(len(preference.resolved_reference_games), 1)
+        self.assertEqual(preference.resolved_reference_games[0].appid, 11)
+        self.assertEqual(
+            {
+                (call["search"], call["language"])
+                for call in client.search_calls
+            },
+            {
+                ("本地标题", "english"),
+                ("本地标题", "schinese"),
+                ("English Alias", "english"),
+                ("English Alias", "schinese"),
+            },
+        )
+
     async def test_base_edition_beats_sequel(self) -> None:
         preference = GamePreference(reference_games_like=["Portal"])
         client = FrozenReferenceSteamClient(
@@ -256,6 +291,85 @@ class ReferenceGroupResolutionTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(references_are_resolved(preference))
 
+    async def test_new_reference_resolution_respects_remaining_appid_budget(self) -> None:
+        preference = GamePreference(
+            reference_games_like=["First Seed", "Second Seed"],
+        )
+        client = FrozenReferenceSteamClient(
+            search_results={
+                ("First Seed", "english"): [
+                    SteamSearchHit(appid=62, title="First Seed")
+                ],
+                ("Second Seed", "english"): [
+                    SteamSearchHit(appid=63, title="Second Seed")
+                ],
+            },
+            details={
+                62: game(62, "First Seed", ["Farming"]),
+                63: game(63, "Second Seed", ["Strategy"]),
+            },
+        )
+        service = SteamGameIndexService(client, MemoryCache({}), clock=lambda: 1_000.0)
+
+        entries = await service.refresh_entries(preference, [], target_pool=1)
+
+        self.assertEqual([entry.appid for entry in entries], [62])
+        self.assertEqual(client.detail_appids, [62])
+        self.assertEqual(
+            [(item.raw_text, item.appid) for item in preference.resolved_reference_games],
+            [("First Seed", 62)],
+        )
+        self.assertEqual(preference.parse_warnings, [])
+        self.assertIn(
+            "Second Seed",
+            [call["search"] for call in client.search_calls],
+        )
+
+    async def test_no_hit_group_records_unresolved_with_zero_budget(self) -> None:
+        preference = GamePreference(reference_games_like=["No Hit Seed"])
+        client = FrozenReferenceSteamClient(search_results={}, details={})
+        service = SteamGameIndexService(client, MemoryCache({}), clock=lambda: 1_000.0)
+
+        with self.assertLogs(
+            "astrbot_plugin_steam_game_recommender.services.steam_index",
+            level="DEBUG",
+        ) as logs:
+            await service.refresh_entries(preference, [], target_pool=0)
+
+        self.assertEqual(len(preference.resolved_reference_games), 1)
+        self.assertIsNone(preference.resolved_reference_games[0].appid)
+        self.assertEqual(
+            preference.parse_warnings,
+            ["参考游戏“No Hit Seed”未能可靠解析，未扩展其标签。"],
+        )
+        self.assertTrue(any("unresolved" in message for message in logs.output))
+
+    async def test_zero_budget_drops_active_resolution_missing_from_records(self) -> None:
+        preference = GamePreference(reference_games_like=["Missing Active Seed"])
+        preference.resolved_reference_games = [
+            resolved_reference("Missing Active Seed", "Missing Active Seed", 64),
+        ]
+        client = FrozenReferenceSteamClient(
+            search_results={
+                ("Missing Active Seed", "english"): [
+                    SteamSearchHit(appid=64, title="Missing Active Seed")
+                ]
+            },
+            details={64: game(64, "Missing Active Seed", ["Adventure"])},
+        )
+        service = SteamGameIndexService(client, MemoryCache({}), clock=lambda: 1_000.0)
+
+        await service.refresh_entries(preference, [], target_pool=0)
+
+        self.assertEqual(client.detail_appids, [])
+        self.assertEqual(preference.resolved_reference_games, [])
+        self.assertEqual(preference.parse_warnings, [])
+        self.assertFalse(references_are_resolved(preference))
+        self.assertIn(
+            "Missing Active Seed",
+            [call["search"] for call in client.search_calls],
+        )
+
     async def test_existing_confirmed_entry_resolves_without_search(self) -> None:
         preference = GamePreference(
             reference_games_like=["本地标题"],
@@ -274,6 +388,54 @@ class ReferenceGroupResolutionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(preference.resolved_reference_games[0].raw_text, "本地标题")
         self.assertEqual(client.search_calls, [])
         self.assertEqual([item.appid for item in reference_candidates(preference, entries)], [70])
+
+    async def test_refresh_prunes_removed_references_and_their_warnings(self) -> None:
+        preference = GamePreference()
+        preference.resolved_reference_games = [
+            resolved_reference("Removed Seed", "Removed Seed", 72),
+        ]
+        preference.parse_warnings = [
+            "参考游戏“Removed Seed”未能可靠解析，未扩展其标签。",
+            "保留这个其他解析提醒。",
+        ]
+        service = SteamGameIndexService(
+            FrozenReferenceSteamClient(search_results={}, details={}),
+            MemoryCache({}),
+            clock=lambda: 1_000.0,
+        )
+
+        await service.refresh_entries(preference, [], target_pool=0)
+
+        self.assertEqual(preference.resolved_reference_games, [])
+        self.assertEqual(preference.parse_warnings, ["保留这个其他解析提醒。"])
+
+    async def test_polarity_flip_replaces_stale_resolution(self) -> None:
+        preference = GamePreference(reference_games_dislike=["Flip Seed"])
+        preference.resolved_reference_games = [
+            resolved_reference("Flip Seed", "Flip Seed", 73, polarity="like"),
+        ]
+        service = SteamGameIndexService(
+            FrozenReferenceSteamClient(search_results={}, details={}),
+            MemoryCache({}),
+            clock=lambda: 1_000.0,
+        )
+        existing = [game(73, "Flip Seed", ["Horror"])]
+
+        entries = await service.refresh_entries(
+            preference,
+            existing,
+            target_pool=0,
+        )
+
+        self.assertEqual(
+            [(item.raw_text, item.polarity) for item in preference.resolved_reference_games],
+            [("Flip Seed", "dislike")],
+        )
+        self.assertEqual(reference_candidates(preference, entries), [])
+        self.assertEqual(
+            [item.appid for item in negative_reference_candidates(preference, entries)],
+            [73],
+        )
 
     async def test_configured_english_locale_deduplicates_search_calls(self) -> None:
         preference = GamePreference(reference_games_like=["One Locale"])
@@ -313,6 +475,22 @@ class ReferenceGroupResolutionTest(unittest.IsolatedAsyncioTestCase):
             ["popular co-op"],
         )
         self.assertEqual(len(build_recommendation_intent(preference).references), 1)
+
+    def test_reference_candidates_ignore_stale_titles_with_matching_polarity(self) -> None:
+        preference = GamePreference(reference_games_like=["Current Seed"])
+        preference.resolved_reference_games = [
+            resolved_reference("Current Seed", "Current Seed", 80),
+            resolved_reference("Removed Seed", "Removed Seed", 81),
+        ]
+        entries = [
+            game(80, "Current Seed", ["Farming"]),
+            game(81, "Removed Seed", ["Strategy"]),
+        ]
+
+        self.assertEqual(
+            [item.appid for item in reference_candidates(preference, entries)],
+            [80],
+        )
 
 
 class MemoryCache:
@@ -405,6 +583,7 @@ def resolved_reference(
     raw_text: str,
     canonical_title: str,
     appid: int,
+    polarity: str = "like",
 ):
     from astrbot_plugin_steam_game_recommender.storage.models import ResolvedReferenceGame
 
@@ -415,7 +594,7 @@ def resolved_reference(
         appid=appid,
         confidence=1.0,
         source="steam_alias_group",
-        polarity="like",
+        polarity=polarity,
     )
 
 
