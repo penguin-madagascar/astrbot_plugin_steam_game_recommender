@@ -65,8 +65,9 @@ class ConfigSchemaTest(unittest.TestCase):
 
         self.assertEqual(
             items["llm_provider_id"]["description"],
-            "‼️用于偏好解析和推荐理由的 LLM 提供商",
+            "用于偏好解析和推荐理由的 LLM 提供商",
         )
+        self.assertTrue(items["llm_provider_id"]["hint"].startswith("‼️留空时"))
         self.assertEqual(items["llm_provider_id"]["_special"], "select_provider")
         self.assertEqual(items["enable_llm_fallback"]["type"], "bool")
         self.assertIs(items["enable_llm_fallback"]["default"], False)

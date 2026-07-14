@@ -6,8 +6,8 @@
     "items": {
       "llm_provider_id": {
         "type": "string",
-        "description": "‼️用于偏好解析和推荐理由的 LLM 提供商",
-        "hint": "留空时尝试使用当前会话模型；偏好解析失败会降级为关键词规则，单款理由失败会降级为可信证据规则理由。",
+        "description": "用于偏好解析和推荐理由的 LLM 提供商",
+        "hint": "‼️留空时尝试使用当前会话模型；偏好解析失败会降级为关键词规则，单款理由失败会降级为可信证据规则理由。",
         "_special": "select_provider",
         "default": ""
       },
