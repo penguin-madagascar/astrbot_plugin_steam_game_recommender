@@ -402,7 +402,12 @@ class FakeHttpClient:
         self.call_count = 0
         self.last_params: dict[str, Any] = {}
 
-    async def get(self, url: str, params: dict[str, Any]) -> FakeResponse:
+    async def get(
+        self,
+        url: str,
+        params: dict[str, Any],
+        **_kwargs: Any,
+    ) -> FakeResponse:
         self.call_count += 1
         self.last_params = dict(params)
         return FakeResponse(self.responses[url])

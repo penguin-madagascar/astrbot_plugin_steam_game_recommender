@@ -10,6 +10,7 @@ from astrbot_plugin_steam_game_recommender.services.similarity_ranker import (
 )
 from astrbot_plugin_steam_game_recommender.services.steam_index import (
     STEAM_INDEX_CACHE_KEY,
+    STEAM_INDEX_SCHEMA_VERSION,
     SteamGameIndexService,
     SteamIndexEntry,
     SteamIndexSnapshot,
@@ -48,7 +49,7 @@ class SteamIndexSnapshotTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("query 0", pruned.search_coverage)
         self.assertIn("query 259", pruned.search_coverage)
 
-    async def test_v4_cache_key_ignores_v3_index_payload(self) -> None:
+    async def test_stable_cache_key_migrates_v3_without_deleting_it(self) -> None:
         cache = MemoryCache(
             {
                 "steam_index:v3": snapshot_payload(
@@ -62,24 +63,28 @@ class SteamIndexSnapshotTest(unittest.IsolatedAsyncioTestCase):
 
         entries = await service.load_entries()
 
-        self.assertEqual(STEAM_INDEX_CACHE_KEY, "steam_index:v4")
-        self.assertEqual(entries, [])
-        self.assertEqual(cache.read_keys, ["steam_index:v4"])
+        self.assertEqual(STEAM_INDEX_CACHE_KEY, "steam_index")
+        self.assertEqual([entry.appid for entry in entries], [1])
+        self.assertIn("steam_index:v3", cache.payloads)
+        self.assertEqual(
+            cache.payloads[STEAM_INDEX_CACHE_KEY]["schema_version"],
+            STEAM_INDEX_SCHEMA_VERSION,
+        )
 
-    def test_v3_snapshot_is_rejected_and_v4_preserves_release_status(self) -> None:
+    def test_current_snapshot_preserves_release_status(self) -> None:
         candidate = game(1, "Upcoming Game", ["Co-op"])
         candidate.coming_soon = True
         old_payload = snapshot_payload([candidate], refreshed_at=3.0, version=3)
-        current_payload = snapshot_payload([candidate], refreshed_at=3.0, version=4)
+        current_payload = snapshot_payload([candidate], refreshed_at=3.0)
 
         self.assertEqual(parse_snapshot(old_payload).entries, [])
         parsed = parse_snapshot(current_payload)
         self.assertEqual([entry.candidate.appid for entry in parsed.entries], [1])
         self.assertTrue(parsed.entries[0].candidate.coming_soon)
 
-    def test_v4_snapshot_keeps_only_confirmed_base_games(self) -> None:
+    def test_current_snapshot_keeps_only_confirmed_base_games(self) -> None:
         payload = {
-            "version": 4,
+            "schema_version": 1,
             "entries": [
                 {
                     "candidate": dump_model(game(1, "Base Game", ["Co-op"])),
@@ -105,7 +110,7 @@ class SteamIndexSnapshotTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([entry.candidate.appid for entry in snapshot.entries], [1])
 
-    def test_v4_snapshot_write_includes_release_status(self) -> None:
+    def test_current_snapshot_write_includes_release_status(self) -> None:
         candidate = game(1, "Upcoming Game", ["Co-op"])
         candidate.coming_soon = True
 
@@ -115,7 +120,7 @@ class SteamIndexSnapshotTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(payload["version"], 4)
+        self.assertEqual(payload["schema_version"], STEAM_INDEX_SCHEMA_VERSION)
         self.assertTrue(payload["entries"][0]["candidate"]["coming_soon"])
 
     async def test_refresh_drops_non_games_and_failed_details(self) -> None:
@@ -152,7 +157,7 @@ class SteamIndexSnapshotTest(unittest.IsolatedAsyncioTestCase):
     async def test_weak_cached_pool_triggers_deduplicated_query_recall(self) -> None:
         cache = MemoryCache(
             {
-                "steam_index:v4": snapshot_payload(
+                STEAM_INDEX_CACHE_KEY: snapshot_payload(
                     [game(1, "Cached Generic", ["Multiplayer"])],
                     refreshed_at=900.0,
                 )
@@ -179,8 +184,8 @@ class SteamIndexSnapshotTest(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(client.max_active_enrichments, 6)
         self.assertEqual(client.popular_tag_calls, 1)
 
-        written = cache.payloads["steam_index:v4"]
-        self.assertEqual(written["version"], 4)
+        written = cache.payloads[STEAM_INDEX_CACHE_KEY]
+        self.assertEqual(written["schema_version"], STEAM_INDEX_SCHEMA_VERSION)
         self.assertTrue(written["entries"])
         self.assertTrue(
             all("refreshed_at" in record and "candidate" in record for record in written["entries"])
@@ -267,8 +272,8 @@ class SteamIndexSnapshotTest(unittest.IsolatedAsyncioTestCase):
         covered = {term.lower(): 999.0 for term in terms[:2]}
         cache = MemoryCache(
             {
-                "steam_index:v4": {
-                    "version": 4,
+                STEAM_INDEX_CACHE_KEY: {
+                    "schema_version": 1,
                     "entries": [],
                     "search_coverage": covered,
                 }
@@ -298,7 +303,7 @@ class SteamIndexSnapshotTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_cached_quality_pool_does_not_skip_current_reference_resolution(self) -> None:
         cached = [game(index, f"Generic {index}", ["Action"]) for index in range(1, 13)]
-        cache = MemoryCache({"steam_index:v4": snapshot_payload(cached, refreshed_at=900.0)})
+        cache = MemoryCache({STEAM_INDEX_CACHE_KEY: snapshot_payload(cached, refreshed_at=900.0)})
         client = ReferenceExpansionSteamClient()
         service = SteamGameIndexService(client, cache, clock=lambda: 1_000.0)
 
@@ -451,16 +456,20 @@ class TypeAwareReferenceSteamClient(QueryAwareSteamClient):
 def snapshot_payload(
     candidates: list[GameCandidate],
     refreshed_at: float,
-    version: int = 4,
+    version: int | None = None,
 ) -> dict[str, Any]:
-    return {
-        "version": version,
+    payload = {
         "entries": [
             {"candidate": dump_model(candidate), "refreshed_at": refreshed_at}
             for candidate in candidates
         ],
         "search_coverage": {},
     }
+    if version is None:
+        payload["schema_version"] = STEAM_INDEX_SCHEMA_VERSION
+    else:
+        payload["version"] = version
+    return payload
 
 
 def game(

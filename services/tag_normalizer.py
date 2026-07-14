@@ -158,7 +158,7 @@ def register_steam_tag_aliases(
         key = normalize_key(name)
         if not key:
             continue
-        canonical = canonical_steam_tag_name(name)
+        canonical = str(item.get("canonical") or "").strip() or canonical_steam_tag_name(name)
         if canonical:
             STEAM_TAG_ALIASES[key] = canonical
             STEAM_CANONICAL_TAGS.add(canonical)

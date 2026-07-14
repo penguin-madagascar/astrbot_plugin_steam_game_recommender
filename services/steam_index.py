@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
+from enum import Enum
 from typing import Any, Callable, Protocol
+
+import httpx
 
 from ..storage.models import (
     GameCandidate,
@@ -52,8 +56,9 @@ from .tag_normalizer import (
 
 logger = logging.getLogger(__name__)
 
-STEAM_INDEX_CACHE_KEY = "steam_index:v4"
-STEAM_INDEX_VERSION = 4
+STEAM_INDEX_CACHE_KEY = "steam_index"
+STEAM_INDEX_SCHEMA_VERSION = 1
+STEAM_INDEX_LEGACY_CACHE_KEYS = ("steam_index:v4", "steam_index:v3")
 STEAM_INDEX_MAX_ENTRIES = 3_000
 STEAM_INDEX_MAX_SEARCH_TERMS = 256
 STEAM_INDEX_MAX_SEARCHES_PER_ROUND = 8
@@ -83,13 +88,40 @@ STEAM_INDEX_PLATFORMS = {"steam", "pc"}
 class SteamIndexEntry:
     candidate: GameCandidate
     refreshed_at: float
+    needs_revalidation: bool = False
 
 
 @dataclass(frozen=True)
 class SteamIndexSnapshot:
     entries: list[SteamIndexEntry] = field(default_factory=list)
     search_coverage: dict[str, float] = field(default_factory=dict)
-    version: int = STEAM_INDEX_VERSION
+    schema_version: int = STEAM_INDEX_SCHEMA_VERSION
+
+
+class ReferenceResolutionStatus(str, Enum):
+    RESOLVED = "resolved"
+    NO_HIT = "no_hit"
+    AMBIGUOUS = "ambiguous"
+    TRANSIENT_FAILURE = "transient_failure"
+    CONTRACT_FAILURE = "contract_failure"
+
+
+@dataclass(frozen=True)
+class ReferenceSearchFailure:
+    alias: str
+    language: str
+    source: str
+    kind: str
+    error: str
+
+
+@dataclass(frozen=True)
+class ReferenceSearchOutcome:
+    hits: tuple[SteamSearchHit, ...] = ()
+    attempted: int = 0
+    succeeded: int = 0
+    failures: tuple[ReferenceSearchFailure, ...] = ()
+    validation_failures: tuple[ReferenceSearchFailure, ...] = ()
 
 
 class SteamIndexCache(Protocol):
@@ -116,13 +148,18 @@ class SteamGameIndexService:
         self.ttl_hours = max(int(ttl_hours), 1)
         self.page_size = min(max(int(page_size), 1), STEAM_INDEX_SEARCH_RESULTS_PER_TERM)
         self.clock = clock
-        self._tag_aliases_loaded = False
-        self._tag_aliases_loaded_at: float | None = None
-        self._tag_aliases_last_attempt_at: float | None = None
+        self._tag_vocabulary_languages: tuple[str, ...] = ("english", "schinese")
+        self._tag_vocabulary_payloads: dict[
+            str,
+            tuple[tuple[dict[str, Any], ...], float],
+        ] = {}
         self._steam_tag_ids: dict[str, int] = {}
+        self._canonical_tag_by_id: dict[int, str] = {}
         self._tag_aliases_lock = asyncio.Lock()
         self._tag_aliases_task: asyncio.Task[bool] | None = None
         self._snapshot_lock = asyncio.Lock()
+        self._bootstrap_lock = asyncio.Lock()
+        self._bootstrap_task: asyncio.Task[None] | None = None
         self._steam_semaphore = asyncio.Semaphore(STEAM_HTTP_CONCURRENCY)
         self._storefront_tag_tasks: dict[int, asyncio.Task[Any]] = {}
         self._storefront_tag_tasks_lock = asyncio.Lock()
@@ -139,6 +176,7 @@ class SteamGameIndexService:
         if preference.platforms and not has_supported_steam_platform(preference):
             return []
 
+        await self.bootstrap()
         await self.ensure_steam_tag_aliases()
         request_tags = register_canonical_tag_keys(
             [
@@ -154,7 +192,11 @@ class SteamGameIndexService:
             if STEAM_TAG_RECALL_DEGRADED_WARNING not in preference.parse_warnings:
                 preference.parse_warnings.append(STEAM_TAG_RECALL_DEGRADED_WARNING)
         snapshot = await self.load_snapshot()
-        entries = [record.candidate for record in snapshot.entries]
+        entries = [
+            record.candidate
+            for record in snapshot.entries
+            if entry_is_validated(record)
+        ]
         intent = build_recommendation_intent(preference)
         specific_intent = bool(
             select_recall_seeds(intent)
@@ -239,7 +281,7 @@ class SteamGameIndexService:
         records = {
             entry_key(record.candidate): record
             for record in snapshot.entries
-            if is_confirmed_base_game(record.candidate)
+            if entry_is_recall_usable(record)
         }
         await self._resolve_reference_groups(
             preference,
@@ -351,6 +393,7 @@ class SteamGameIndexService:
             record.candidate
             for record in persisted.entries
             if record.candidate.appid in seed_appids
+            and entry_is_validated(record)
         ]
         logger.debug(
             "recommendation_recall event=recall_complete tags=%s tag_ids=%s "
@@ -544,14 +587,23 @@ class SteamGameIndexService:
             int(record.candidate.appid): record.candidate
             for record in records.values()
             if record.candidate.appid is not None
-            and is_confirmed_base_game(record.candidate)
+            and entry_is_validated(record)
+        }
+        legacy_appids = {
+            int(record.candidate.appid)
+            for record in records.values()
+            if record.candidate.appid is not None and record.needs_revalidation
         }
 
         async def validate(hit: CandidateHit) -> CandidateHit | None:
             appid = int(hit.candidate.appid or 0)
             candidate = existing.get(appid)
             if candidate is None:
-                candidate = await self._load_candidate(appid, prefetched)
+                candidate = await self._load_candidate(
+                    appid,
+                    prefetched,
+                    bypass_cache=appid in legacy_appids,
+                )
             if candidate is None or not is_confirmed_base_game(candidate):
                 return None
             return replace(hit, candidate=candidate)
@@ -560,18 +612,17 @@ class SteamGameIndexService:
         return [hit for hit in validated if hit is not None]
 
     async def ensure_steam_tag_aliases(self) -> bool:
-        if self._steam_tag_aliases_are_fresh():
-            return True
-        if (
-            self._steam_tag_aliases_are_usable_stale()
-            and self._tag_aliases_last_attempt_at is not None
-            and float(self.clock()) - self._tag_aliases_last_attempt_at
-            < STEAM_TAG_ALIASES_FRESH_SECONDS
-        ):
-            return True
         getter = getattr(self.steam_client, "get_popular_tags_snapshot", None)
         if getter is None:
             getter = getattr(self.steam_client, "get_popular_tags", None)
+        if getter is not None:
+            self._tag_vocabulary_languages = (
+                ("english", "schinese")
+                if callable_accepts_keyword(getter, "language")
+                else ("english",)
+            )
+        if self._steam_tag_aliases_are_fresh():
+            return self._steam_tag_aliases_are_usable_stale()
         if not getter:
             usable = self._steam_tag_aliases_are_usable_stale()
             if not usable:
@@ -598,33 +649,91 @@ class SteamGameIndexService:
                     self._tag_aliases_task = None
 
     async def _load_steam_tag_aliases(self, getter: Callable[..., Any]) -> bool:
-        self._tag_aliases_last_attempt_at = float(self.clock())
+        languages = self._tag_vocabulary_languages_needing_refresh()
+        if not languages:
+            return self._steam_tag_aliases_are_usable_stale()
         try:
-            async with self._steam_semaphore:
-                payload = await getter()
+            payloads = await self._request_tag_vocabularies(getter, languages)
         except Exception:
+            self._expire_tag_vocabulary()
             usable = self._steam_tag_aliases_are_usable_stale()
-            if not usable:
-                self._expire_tag_vocabulary()
             return usable
 
-        tags = list(getattr(payload, "tags", payload) or [])
-        fetched_at = float(getattr(payload, "fetched_at", self.clock()))
-        if not tags or max(float(self.clock()) - fetched_at, 0.0) > STEAM_TAG_ALIASES_STALE_SECONDS:
-            self._expire_tag_vocabulary()
-            return False
+        for language, payload in payloads:
+            tags = tuple(
+                item
+                for item in list(getattr(payload, "tags", payload) or [])
+                if isinstance(item, dict)
+            )
+            fetched_at = float(getattr(payload, "fetched_at", self.clock()))
+            if tags and max(
+                float(self.clock())
+                - fetched_at,
+                0.0,
+            ) <= STEAM_TAG_ALIASES_STALE_SECONDS:
+                self._tag_vocabulary_payloads[language] = (tags, fetched_at)
+
+        self._expire_tag_vocabulary()
+        return self._steam_tag_aliases_are_usable_stale()
+
+    def _rebuild_tag_vocabulary(self) -> None:
+        english = self._tag_vocabulary_payloads.get("english")
+        if english is None:
+            self._steam_tag_ids.clear()
+            self._canonical_tag_by_id.clear()
+            return
+
+        canonical_by_id: dict[int, str] = {}
+        for item in english[0]:
+            tag_id = item.get("tagid", item.get("id"))
+            if tag_id is None:
+                continue
+            canonical_by_id[int(tag_id)] = canonical_steam_tag_name(
+                str(item.get("name") or "")
+            )
+
+        tags: list[dict[str, Any]] = []
+        for language in ("english", "schinese"):
+            vocabulary = self._tag_vocabulary_payloads.get(language)
+            if vocabulary is None:
+                continue
+            for item in vocabulary[0]:
+                tag_id = item.get("tagid", item.get("id"))
+                if tag_id is None:
+                    continue
+                resolved_id = int(tag_id)
+                canonical = canonical_by_id.get(resolved_id)
+                if canonical is None:
+                    continue
+                tags.append({**item, "canonical": canonical})
 
         register_steam_tag_aliases(tags, register_ids=False)
         self._steam_tag_ids = {
-            canonical: int(tag_id)
-            for item in tags
-            if isinstance(item, dict)
-            and (canonical := canonical_steam_tag_name(str(item.get("name") or "")))
-            and (tag_id := item.get("tagid", item.get("id"))) is not None
+            canonical: tag_id for tag_id, canonical in canonical_by_id.items()
         }
-        self._tag_aliases_loaded = True
-        self._tag_aliases_loaded_at = fetched_at
-        return True
+        self._canonical_tag_by_id = dict(canonical_by_id)
+
+    async def _request_tag_vocabularies(
+        self,
+        getter: Callable[..., Any],
+        languages: tuple[str, ...],
+    ) -> list[tuple[str, Any]]:
+        if not callable_accepts_keyword(getter, "language"):
+            async with self._steam_semaphore:
+                return [("english", await getter())]
+
+        async def fetch(language: str) -> tuple[str, Any]:
+            async with self._steam_semaphore:
+                return language, await getter(language=language)
+
+        results = await asyncio.gather(
+            *(fetch(language) for language in languages),
+            return_exceptions=True,
+        )
+        payloads = [item for item in results if not isinstance(item, BaseException)]
+        if not payloads:
+            raise RuntimeError("Steam tag vocabularies are unavailable.")
+        return payloads
 
     def _usable_steam_tag_id_for(self, tag: str) -> int | None:
         if not self._steam_tag_aliases_are_usable_stale():
@@ -633,29 +742,86 @@ class SteamGameIndexService:
         return self._steam_tag_ids.get(canonical)
 
     def _expire_tag_vocabulary(self) -> None:
-        self._tag_aliases_loaded = False
-        self._tag_aliases_loaded_at = None
-        self._steam_tag_ids.clear()
+        expired = [
+            language
+            for language in self._tag_vocabulary_payloads
+            if self._tag_vocabulary_age(language) > STEAM_TAG_ALIASES_STALE_SECONDS
+        ]
+        for language in expired:
+            self._tag_vocabulary_payloads.pop(language, None)
+        self._rebuild_tag_vocabulary()
 
     def _steam_tag_aliases_are_fresh(self) -> bool:
-        return self._steam_tag_alias_age() < STEAM_TAG_ALIASES_FRESH_SECONDS
+        return bool(self._tag_vocabulary_languages) and all(
+            self._tag_vocabulary_age(language) < STEAM_TAG_ALIASES_FRESH_SECONDS
+            for language in self._tag_vocabulary_languages
+        )
 
     def _steam_tag_aliases_are_usable_stale(self) -> bool:
-        return self._steam_tag_alias_age() <= STEAM_TAG_ALIASES_STALE_SECONDS
+        return (
+            self._tag_vocabulary_age("english") <= STEAM_TAG_ALIASES_STALE_SECONDS
+            and bool(self._canonical_tag_by_id)
+        )
 
-    def _steam_tag_alias_age(self) -> float:
-        if not self._tag_aliases_loaded or self._tag_aliases_loaded_at is None:
+    def _tag_vocabulary_languages_needing_refresh(self) -> tuple[str, ...]:
+        return tuple(
+            language
+            for language in self._tag_vocabulary_languages
+            if self._tag_vocabulary_age(language) >= STEAM_TAG_ALIASES_FRESH_SECONDS
+        )
+
+    def _tag_vocabulary_age(self, language: str) -> float:
+        vocabulary = self._tag_vocabulary_payloads.get(language)
+        if vocabulary is None:
             return float("inf")
-        return max(float(self.clock()) - self._tag_aliases_loaded_at, 0.0)
+        return max(float(self.clock()) - vocabulary[1], 0.0)
+
+    async def bootstrap(self) -> None:
+        async with self._bootstrap_lock:
+            if self._bootstrap_task is None:
+                self._bootstrap_task = asyncio.create_task(self._run_bootstrap())
+            task = self._bootstrap_task
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            async with self._bootstrap_lock:
+                if self._bootstrap_task is task and task.done():
+                    self._bootstrap_task = None
+            raise
+
+    async def _run_bootstrap(self) -> None:
+        await asyncio.gather(
+            self.load_snapshot(),
+            self.ensure_steam_tag_aliases(),
+        )
 
     async def load_snapshot(self) -> SteamIndexSnapshot:
         payload = await self.cache.get_json(
             STEAM_INDEX_CACHE_KEY,
             SNAPSHOT_STORAGE_TTL_HOURS,
         )
-        return parse_snapshot(payload)
+        if is_current_snapshot_payload(payload):
+            return parse_snapshot(payload)
+
+        for legacy_key in STEAM_INDEX_LEGACY_CACHE_KEYS:
+            legacy_payload = await self.cache.get_json(
+                legacy_key,
+                SNAPSHOT_STORAGE_TTL_HOURS,
+            )
+            if not is_legacy_snapshot_payload(legacy_payload):
+                continue
+            migrated = parse_legacy_snapshot(legacy_payload)
+            await self.cache.set_json(
+                STEAM_INDEX_CACHE_KEY,
+                snapshot_payload(migrated),
+            )
+            return migrated
+        return SteamIndexSnapshot()
 
     async def load_entries(self) -> list[GameCandidate]:
+        await self.bootstrap()
         snapshot = await self.load_snapshot()
         return [record.candidate for record in snapshot.entries]
 
@@ -667,13 +833,14 @@ class SteamGameIndexService:
         snapshot: SteamIndexSnapshot | None = None,
     ) -> list[GameCandidate]:
         refresh_started = time.perf_counter()
+        await self.bootstrap()
         await self.ensure_steam_tag_aliases()
         now = float(self.clock())
         current = snapshot or await self.load_snapshot()
         records = {
             entry_key(record.candidate): record
             for record in current.entries
-            if is_confirmed_base_game(record.candidate)
+            if entry_is_recall_usable(record)
         }
         for candidate in existing or []:
             if not is_confirmed_base_game(candidate):
@@ -732,6 +899,13 @@ class SteamGameIndexService:
                 int(record.candidate.appid)
                 for record in records.values()
                 if record.candidate.appid is not None
+                and entry_is_validated(record)
+            }
+            legacy_appids = {
+                int(record.candidate.appid)
+                for record in records.values()
+                if record.candidate.appid is not None
+                and record.needs_revalidation
             }
             new_hits: list[SteamSearchHit] = []
             for hit in observed_hits:
@@ -740,7 +914,11 @@ class SteamGameIndexService:
                 seen_hits.add(hit.appid)
                 new_hits.append(hit)
             remaining = max(enrichment_limit - enriched_count, 0)
-            enriched = await self._enrich_hits(new_hits[:remaining], prefetched)
+            enriched = await self._enrich_hits(
+                new_hits[:remaining],
+                prefetched,
+                bypass_cache_appids=legacy_appids,
+            )
             enriched_count += len(enriched)
             for candidate in enriched:
                 records[entry_key(candidate)] = SteamIndexEntry(candidate, now)
@@ -780,7 +958,11 @@ class SteamGameIndexService:
             len(refreshed_snapshot.entries),
             len(refreshed_snapshot.search_coverage),
         )
-        return [record.candidate for record in refreshed_snapshot.entries]
+        return [
+            record.candidate
+            for record in refreshed_snapshot.entries
+            if entry_is_validated(record)
+        ]
 
     async def _resolve_reference_groups(
         self,
@@ -803,6 +985,7 @@ class SteamGameIndexService:
         )
         enriched_count = 0
         for reference in references:
+            search_outcome = ReferenceSearchOutcome()
             records_by_appid = {
                 int(record.candidate.appid): record
                 for record in records.values()
@@ -817,19 +1000,29 @@ class SteamGameIndexService:
                 for appid, record in records_by_appid.items()
             ]
             match = match_reference_query(reference, existing_hits)
+            matched_record = (
+                records_by_appid.get(match.hit.appid) if match is not None else None
+            )
             candidate = (
-                records_by_appid[match.hit.appid].candidate if match is not None else None
+                matched_record.candidate
+                if matched_record is not None and entry_is_validated(matched_record)
+                else None
             )
             refreshed_at = (
-                records_by_appid[match.hit.appid].refreshed_at
-                if match is not None
+                matched_record.refreshed_at
+                if matched_record is not None
                 else now
             )
-            if match is None or match.match_kind != "exact":
-                observed_hits = await self._search_reference_group(
+            if (
+                match is None
+                or match.match_kind != "exact"
+                or candidate is None
+            ):
+                search_outcome = await self._search_reference_group(
                     reference,
                     prefetched,
                 )
+                observed_hits = list(search_outcome.hits)
                 observed_match = match_reference_query(
                     reference,
                     [*existing_hits, *observed_hits],
@@ -839,9 +1032,21 @@ class SteamGameIndexService:
                     if observed_match is not None
                     else None
                 )
-                if existing_record is not None:
+                if existing_record is not None and entry_is_validated(existing_record):
                     match = observed_match
-                    candidate = existing_record.candidate
+                    evidence_hit = max(
+                        (
+                            hit
+                            for hit in observed_hits
+                            if hit.appid == observed_match.hit.appid
+                        ),
+                        key=lambda hit: len(hit.tag_ids),
+                        default=observed_match.hit,
+                    )
+                    candidate = self._apply_search_hit_tags(
+                        existing_record.candidate,
+                        evidence_hit,
+                    )
                     refreshed_at = existing_record.refreshed_at
                 elif observed_match is None:
                     match = None
@@ -851,7 +1056,7 @@ class SteamGameIndexService:
                     if match is None or candidate is None:
                         continue
                 else:
-                    selected_match, selected_candidate = (
+                    selected_match, selected_candidate, validation_failures = (
                         await self._select_reference_candidate(
                             reference,
                             [*existing_hits, *observed_hits],
@@ -859,9 +1064,23 @@ class SteamGameIndexService:
                             known_candidates={
                                 appid: record.candidate
                                 for appid, record in records_by_appid.items()
+                                if entry_is_validated(record)
+                            },
+                            bypass_cache_appids={
+                                appid
+                                for appid, record in records_by_appid.items()
+                                if record.needs_revalidation
                             },
                         )
                     )
+                    if validation_failures:
+                        search_outcome = replace(
+                            search_outcome,
+                            validation_failures=(
+                                *search_outcome.validation_failures,
+                                *validation_failures,
+                            ),
+                        )
                     if selected_match is not None and selected_candidate is not None:
                         match = selected_match
                         candidate = selected_candidate
@@ -870,6 +1089,8 @@ class SteamGameIndexService:
                         )
                         if selected_record is None:
                             enriched_count += 1
+                            refreshed_at = now
+                        elif selected_record.needs_revalidation:
                             refreshed_at = now
                         else:
                             refreshed_at = selected_record.refreshed_at
@@ -890,6 +1111,11 @@ class SteamGameIndexService:
                 reference,
                 match,
                 candidate,
+                classify_reference_resolution(
+                    search_outcome,
+                    match,
+                    candidate,
+                ),
             )
         return enriched_count
 
@@ -897,7 +1123,7 @@ class SteamGameIndexService:
         self,
         reference: ReferenceQuery,
         prefetched: dict[int, GameCandidate],
-    ) -> list[SteamSearchHit]:
+    ) -> ReferenceSearchOutcome:
         locale = str(getattr(self.steam_client, "language", "english") or "english")
         languages = dedupe_texts(["english", locale])
         requests = [
@@ -905,21 +1131,76 @@ class SteamGameIndexService:
             for alias in dedupe_texts(list(reference.aliases))
             for language in languages
         ]
-        async def search_one(alias: str, language: str) -> list[SteamSearchHit]:
+        search_storefront = getattr(
+            self.steam_client,
+            "search_storefront_term",
+            None,
+        )
+
+        async def search_one(
+            alias: str,
+            language: str,
+        ) -> tuple[list[SteamSearchHit], int, int, list[ReferenceSearchFailure]]:
+            attempted = 0
+            succeeded = 0
+            failures: list[ReferenceSearchFailure] = []
+            storefront_hits: list[SteamSearchHit] = []
+            if search_storefront is not None:
+                attempted += 1
+                try:
+                    async with self._steam_semaphore:
+                        page = await search_storefront(
+                            alias,
+                            page_size=20,
+                            start=0,
+                            language=language,
+                        )
+                    hits = [validate_search_hit(hit) for hit in page.hits]
+                except Exception as exc:
+                    failures.append(
+                        reference_search_failure(
+                            alias,
+                            language,
+                            "storefront",
+                            exc,
+                        )
+                    )
+                else:
+                    succeeded += 1
+                    if hits and match_reference_query(reference, hits) is not None:
+                        return hits, attempted, succeeded, failures
+                    storefront_hits = hits
+            attempted += 1
             try:
-                return await self._search_refs(
+                hits = await self._search_refs(
                     alias,
                     page_size=20,
                     language=language,
                     prefetched=prefetched,
                 )
-            except Exception:
-                return []
+            except Exception as exc:
+                failures.append(
+                    reference_search_failure(
+                        alias,
+                        language,
+                        "storesearch",
+                        exc,
+                    )
+                )
+                hits = []
+            else:
+                succeeded += 1
+            return [*storefront_hits, *hits], attempted, succeeded, failures
 
         results = await asyncio.gather(
             *(search_one(alias, language) for alias, language in requests)
         )
-        return [hit for hits in results for hit in hits]
+        return ReferenceSearchOutcome(
+            hits=tuple(hit for hits, _attempted, _succeeded, _failures in results for hit in hits),
+            attempted=sum(item[1] for item in results),
+            succeeded=sum(item[2] for item in results),
+            failures=tuple(failure for item in results for failure in item[3]),
+        )
 
     async def _select_reference_candidate(
         self,
@@ -927,26 +1208,84 @@ class SteamGameIndexService:
         hits: list[SteamSearchHit],
         prefetched: dict[int, GameCandidate],
         known_candidates: Mapping[int, GameCandidate] | None = None,
-    ) -> tuple[ReferenceMatch | None, GameCandidate | None]:
+        bypass_cache_appids: set[int] | None = None,
+    ) -> tuple[
+        ReferenceMatch | None,
+        GameCandidate | None,
+        tuple[ReferenceSearchFailure, ...],
+    ]:
         remaining = list(hits)
+        failures: list[ReferenceSearchFailure] = []
         while match := match_reference_query(reference, remaining):
             candidate = (known_candidates or {}).get(match.hit.appid)
             if candidate is None:
-                candidate = await self._load_reference_candidate(
-                    match.hit.appid,
-                    prefetched,
-                )
+                try:
+                    candidate = await self._load_reference_candidate(
+                        match.hit.appid,
+                        prefetched,
+                        bypass_cache=match.hit.appid in (bypass_cache_appids or set()),
+                    )
+                except Exception as exc:
+                    failures.append(
+                        reference_search_failure(
+                            reference.display_title,
+                            str(getattr(self.steam_client, "language", "") or ""),
+                            "detail",
+                            exc,
+                        )
+                    )
+                    candidate = None
             if candidate is not None:
-                return match, candidate
+                evidence_hit = max(
+                    (hit for hit in hits if hit.appid == match.hit.appid),
+                    key=lambda hit: len(hit.tag_ids),
+                    default=match.hit,
+                )
+                return (
+                    match,
+                    self._apply_search_hit_tags(candidate, evidence_hit),
+                    tuple(failures),
+                )
             remaining = [hit for hit in remaining if hit.appid != match.hit.appid]
-        return None, None
+        return None, None, tuple(failures)
+
+    def _apply_search_hit_tags(
+        self,
+        candidate: GameCandidate,
+        hit: SteamSearchHit,
+    ) -> GameCandidate:
+        mapped = dedupe_texts(
+            [
+                canonical
+                for tag_id in hit.tag_ids
+                if (canonical := self._canonical_tag_by_id.get(int(tag_id)))
+            ]
+        )
+        if not mapped:
+            return candidate
+        data = dump_model(candidate)
+        data["ordered_tags"] = dedupe_texts(
+            [*mapped, *(data.get("ordered_tags") or [])]
+        )
+        markers = list(data.get("internal_source_markers") or [])
+        marker = "tag_enrichment:steam_storefront_result"
+        if marker not in markers:
+            markers.append(marker)
+        data["internal_source_markers"] = markers
+        return validate_candidate(data)
 
     async def _load_reference_candidate(
         self,
         appid: int,
         prefetched: dict[int, GameCandidate],
+        *,
+        bypass_cache: bool = False,
     ) -> GameCandidate | None:
-        return await self._load_candidate(appid, prefetched)
+        return await self._fetch_candidate(
+            appid,
+            prefetched,
+            bypass_cache=bypass_cache,
+        )
 
     async def _search_queries(
         self,
@@ -1014,9 +1353,15 @@ class SteamGameIndexService:
         self,
         hits: list[SteamSearchHit],
         prefetched: dict[int, GameCandidate],
+        *,
+        bypass_cache_appids: set[int] | None = None,
     ) -> list[GameCandidate]:
         async def enrich_one(hit: SteamSearchHit) -> GameCandidate | None:
-            return await self._load_candidate(hit.appid, prefetched)
+            return await self._load_candidate(
+                hit.appid,
+                prefetched,
+                bypass_cache=hit.appid in (bypass_cache_appids or set()),
+            )
 
         candidates = await asyncio.gather(*(enrich_one(hit) for hit in hits))
         return [candidate for candidate in candidates if candidate is not None]
@@ -1025,17 +1370,38 @@ class SteamGameIndexService:
         self,
         appid: int,
         prefetched: dict[int, GameCandidate],
+        *,
+        bypass_cache: bool = False,
+    ) -> GameCandidate | None:
+        try:
+            return await self._fetch_candidate(
+                appid,
+                prefetched,
+                bypass_cache=bypass_cache,
+            )
+        except Exception:
+            return None
+
+    async def _fetch_candidate(
+        self,
+        appid: int,
+        prefetched: dict[int, GameCandidate],
+        *,
+        bypass_cache: bool = False,
     ) -> GameCandidate | None:
         if appid <= 0:
             return None
         candidate = prefetched.get(appid)
         detail_getter = getattr(self.steam_client, "get_game_detail", None)
         if detail_getter is not None:
-            try:
-                async with self._steam_semaphore:
-                    candidate = await detail_getter(appid)
-            except Exception:
-                return None
+            kwargs = (
+                {"bypass_cache": True}
+                if bypass_cache
+                and callable_accepts_keyword(detail_getter, "bypass_cache")
+                else {}
+            )
+            async with self._steam_semaphore:
+                candidate = await detail_getter(appid, **kwargs)
         if (
             candidate is None
             or candidate.appid is None
@@ -1043,10 +1409,7 @@ class SteamGameIndexService:
             or not is_confirmed_base_game(candidate)
         ):
             return None
-        try:
-            return await self.enrich_candidate(candidate, ensure_aliases=False)
-        except Exception:
-            return None
+        return await self.enrich_candidate(candidate, ensure_aliases=False)
 
     async def _merge_and_persist_snapshot(
         self,
@@ -1059,14 +1422,14 @@ class SteamGameIndexService:
             records = {
                 entry_key(record.candidate): record
                 for record in latest.entries
-                if is_confirmed_base_game(record.candidate)
+                if entry_is_recall_usable(record)
             }
             for record in additions:
-                if not is_confirmed_base_game(record.candidate):
+                if not entry_is_recall_usable(record):
                     continue
                 key = entry_key(record.candidate)
                 current = records.get(key)
-                if current is None or record.refreshed_at >= current.refreshed_at:
+                if current is None or entry_should_replace(current, record):
                     records[key] = record
             coverage = dict(latest.search_coverage)
             for query, covered_at in search_coverage.items():
@@ -1339,6 +1702,27 @@ def reference_warning(display_title: str) -> str:
     return f"参考游戏“{display_title}”未能可靠解析，未扩展其标签。"
 
 
+def reference_transient_warning(display_title: str) -> str:
+    return f"参考游戏“{display_title}”暂时无法搜索，未扩展其标签。"
+
+
+def reference_contract_warning(display_title: str) -> str:
+    return f"参考游戏“{display_title}”搜索响应无效，未扩展其标签。"
+
+
+def reference_warning_for_status(
+    display_title: str,
+    status: ReferenceResolutionStatus,
+) -> str | None:
+    if status is ReferenceResolutionStatus.RESOLVED:
+        return None
+    if status is ReferenceResolutionStatus.TRANSIENT_FAILURE:
+        return reference_transient_warning(display_title)
+    if status is ReferenceResolutionStatus.CONTRACT_FAILURE:
+        return reference_contract_warning(display_title)
+    return reference_warning(display_title)
+
+
 def prune_reference_resolution_state(
     preference: GamePreference,
     references: tuple[ReferenceQuery, ...],
@@ -1365,8 +1749,13 @@ def prune_reference_resolution_state(
 
 def is_reference_resolution_warning(value: str) -> bool:
     text = " ".join(str(value or "").split())
-    return text.startswith("参考游戏“") and text.endswith(
-        "”未能可靠解析，未扩展其标签。"
+    return text.startswith("参考游戏“") and any(
+        text.endswith(suffix)
+        for suffix in (
+            "”未能可靠解析，未扩展其标签。",
+            "”暂时无法搜索，未扩展其标签。",
+            "”搜索响应无效，未扩展其标签。",
+        )
     )
 
 
@@ -1389,6 +1778,7 @@ def record_reference_group_resolution(
     reference: ReferenceQuery,
     match: ReferenceMatch | None,
     candidate: GameCandidate | None,
+    status: ReferenceResolutionStatus = ReferenceResolutionStatus.AMBIGUOUS,
 ) -> None:
     polarity = reference_polarity(reference)
     alias_keys = {normalize_text(alias) for alias in reference.aliases}
@@ -1400,7 +1790,13 @@ def record_reference_group_resolution(
         )
     ]
     warning_keys = {
-        normalize_text(reference_warning(alias)) for alias in reference.aliases
+        normalize_text(warning)
+        for alias in reference.aliases
+        for warning in (
+            reference_warning(alias),
+            reference_transient_warning(alias),
+            reference_contract_warning(alias),
+        )
     }
     preference.parse_warnings = [
         warning
@@ -1432,17 +1828,64 @@ def record_reference_group_resolution(
         stores=candidate.stores if succeeded else [],
     )
     preference.resolved_reference_games.append(resolved)
-    if not succeeded:
-        preference.parse_warnings.append(reference_warning(reference.display_title))
+    warning = reference_warning_for_status(reference.display_title, status)
+    if not succeeded and warning is not None:
+        preference.parse_warnings.append(warning)
     logger.debug(
         "recommendation_reference event=resolution polarity=%s status=%s "
+        "resolution_state=%s "
         "alias_count=%d appid=%s confidence=%.3f",
         polarity,
+        status.value,
         "resolved" if succeeded else "unresolved",
         len(reference.aliases),
         resolved.appid,
         resolved.confidence,
     )
+
+
+def reference_search_failure(
+    alias: str,
+    language: str,
+    source: str,
+    exc: Exception,
+) -> ReferenceSearchFailure:
+    transient = bool(getattr(exc, "transient", False)) or isinstance(
+        exc,
+        (httpx.TimeoutException, httpx.NetworkError),
+    )
+    return ReferenceSearchFailure(
+        alias=alias,
+        language=language,
+        source=source,
+        kind="transient" if transient else "contract",
+        error=str(exc),
+    )
+
+
+def classify_reference_resolution(
+    outcome: ReferenceSearchOutcome,
+    match: ReferenceMatch | None,
+    candidate: GameCandidate | None,
+) -> ReferenceResolutionStatus:
+    if match is not None and candidate is not None:
+        return ReferenceResolutionStatus.RESOLVED
+    if outcome.validation_failures:
+        if all(
+            failure.kind == "transient"
+            for failure in outcome.validation_failures
+        ):
+            return ReferenceResolutionStatus.TRANSIENT_FAILURE
+        return ReferenceResolutionStatus.CONTRACT_FAILURE
+    if outcome.hits:
+        return ReferenceResolutionStatus.AMBIGUOUS
+    if outcome.succeeded:
+        return ReferenceResolutionStatus.NO_HIT
+    if outcome.failures and all(
+        failure.kind == "transient" for failure in outcome.failures
+    ):
+        return ReferenceResolutionStatus.TRANSIENT_FAILURE
+    return ReferenceResolutionStatus.CONTRACT_FAILURE
 
 
 def references_are_resolved(preference: GamePreference) -> bool:
@@ -1471,8 +1914,27 @@ def query_is_covered(
 
 
 def parse_snapshot(payload: Any) -> SteamIndexSnapshot:
-    if not isinstance(payload, dict) or payload.get("version") != STEAM_INDEX_VERSION:
+    if not is_current_snapshot_payload(payload):
         return SteamIndexSnapshot()
+    return parse_snapshot_records(payload, needs_revalidation=False)
+
+
+def parse_legacy_snapshot(payload: Any) -> SteamIndexSnapshot:
+    if not is_legacy_snapshot_payload(payload):
+        return SteamIndexSnapshot()
+    return parse_snapshot_records(
+        payload,
+        needs_revalidation=True,
+        preserve_coverage=False,
+    )
+
+
+def parse_snapshot_records(
+    payload: dict[str, Any],
+    *,
+    needs_revalidation: bool,
+    preserve_coverage: bool = True,
+) -> SteamIndexSnapshot:
     entries: list[SteamIndexEntry] = []
     for item in payload.get("entries") or []:
         if not isinstance(item, dict) or not isinstance(item.get("candidate"), dict):
@@ -1482,16 +1944,24 @@ def parse_snapshot(payload: Any) -> SteamIndexSnapshot:
         except (TypeError, ValueError):
             refreshed_at = 0.0
         candidate = validate_candidate(item["candidate"])
-        if is_confirmed_base_game(candidate):
+        record_needs_revalidation = (
+            needs_revalidation or item.get("needs_revalidation") is True
+        )
+        if is_confirmed_base_game(candidate) or (
+            record_needs_revalidation
+            and candidate.appid is not None
+            and bool(candidate.title)
+        ):
             entries.append(
                 SteamIndexEntry(
                     candidate=candidate,
                     refreshed_at=refreshed_at,
+                    needs_revalidation=record_needs_revalidation,
                 )
             )
     raw_coverage = payload.get("search_coverage")
     coverage: dict[str, float] = {}
-    if isinstance(raw_coverage, dict):
+    if preserve_coverage and isinstance(raw_coverage, dict):
         for query, covered_at in raw_coverage.items():
             try:
                 coverage[normalize_text(query)] = float(covered_at)
@@ -1503,11 +1973,11 @@ def parse_snapshot(payload: Any) -> SteamIndexSnapshot:
 def prune_snapshot(snapshot: SteamIndexSnapshot) -> SteamIndexSnapshot:
     newest_by_key: dict[str, SteamIndexEntry] = {}
     for record in snapshot.entries:
-        if not is_confirmed_base_game(record.candidate):
+        if not entry_is_recall_usable(record):
             continue
         key = entry_key(record.candidate)
         current = newest_by_key.get(key)
-        if current is None or record.refreshed_at >= current.refreshed_at:
+        if current is None or entry_should_replace(current, record):
             newest_by_key[key] = record
     entries = sorted(
         newest_by_key.values(),
@@ -1524,16 +1994,66 @@ def prune_snapshot(snapshot: SteamIndexSnapshot) -> SteamIndexSnapshot:
 
 def snapshot_payload(snapshot: SteamIndexSnapshot) -> dict[str, Any]:
     return {
-        "version": STEAM_INDEX_VERSION,
+        "schema_version": STEAM_INDEX_SCHEMA_VERSION,
         "entries": [
             {
                 "candidate": dump_model(record.candidate),
                 "refreshed_at": record.refreshed_at,
+                "needs_revalidation": record.needs_revalidation,
             }
             for record in snapshot.entries
         ],
         "search_coverage": snapshot.search_coverage,
     }
+
+
+def is_current_snapshot_payload(payload: Any) -> bool:
+    return (
+        isinstance(payload, dict)
+        and type(payload.get("schema_version")) is int
+        and payload.get("schema_version") == STEAM_INDEX_SCHEMA_VERSION
+    )
+
+
+def is_legacy_snapshot_payload(payload: Any) -> bool:
+    return (
+        isinstance(payload, dict)
+        and type(payload.get("version")) is int
+        and payload.get("version") in {3, 4}
+    )
+
+
+def entry_is_validated(record: SteamIndexEntry) -> bool:
+    return not record.needs_revalidation and is_confirmed_base_game(record.candidate)
+
+
+def entry_is_recall_usable(record: SteamIndexEntry) -> bool:
+    return entry_is_validated(record) or (
+        record.needs_revalidation
+        and record.candidate.appid is not None
+        and bool(record.candidate.title)
+    )
+
+
+def entry_should_replace(
+    current: SteamIndexEntry,
+    incoming: SteamIndexEntry,
+) -> bool:
+    if current.needs_revalidation != incoming.needs_revalidation:
+        return current.needs_revalidation and not incoming.needs_revalidation
+    return incoming.refreshed_at >= current.refreshed_at
+
+
+def callable_accepts_keyword(function: Callable[..., Any], keyword: str) -> bool:
+    try:
+        parameters = inspect.signature(function).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        or parameter.name == keyword
+        for parameter in parameters
+    )
 
 
 def entry_key(candidate: GameCandidate) -> str:

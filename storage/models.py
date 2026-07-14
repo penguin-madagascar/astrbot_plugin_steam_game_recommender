@@ -333,6 +333,7 @@ class SteamSearchHit(BaseModel):
     appid: int
     title: str
     store_url: str | None = None
+    tag_ids: list[int] = Field(default_factory=list)
 
     @validator("appid", pre=True)
     def _normalize_appid(cls, value: Any) -> int:
@@ -341,6 +342,22 @@ class SteamSearchHit(BaseModel):
     @validator("title", "store_url", pre=True)
     def _normalize_text(cls, value: Any) -> str:
         return re.sub(r"\s+", " ", str(value or "")).strip()
+
+    @validator("tag_ids", pre=True)
+    def _normalize_tag_ids(cls, value: Any) -> list[int]:
+        if not isinstance(value, (list, tuple)):
+            return []
+        result: list[int] = []
+        for item in value:
+            if isinstance(item, bool):
+                continue
+            try:
+                tag_id = int(item)
+            except (TypeError, ValueError):
+                continue
+            if tag_id > 0:
+                result.append(tag_id)
+        return result
 
     class Config:
         extra = "ignore"

@@ -92,7 +92,8 @@ def ranked_game_precedence_key(game: RankedGame) -> tuple[float | int | str, ...
 
 
 def normalize_game_title(title: str) -> str:
-    normalized = unicodedata.normalize("NFKC", str(title or "")).casefold()
+    text = str(title or "").replace("™", "").replace("®", "").replace("©", "")
+    normalized = unicodedata.normalize("NFKC", text).casefold()
     return re.sub(r"[\W_]+", " ", normalized, flags=re.UNICODE).strip()
 
 

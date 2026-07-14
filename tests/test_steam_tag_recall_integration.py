@@ -816,7 +816,7 @@ def candidate(
 
 def snapshot(candidates: list[GameCandidate]) -> dict[str, Any]:
     return {
-        "version": 4,
+        "schema_version": 1,
         "entries": [
             {
                 "candidate": (

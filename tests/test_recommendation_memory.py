@@ -214,7 +214,7 @@ class IndexCache:
 
     async def get_json(self, _key: str, _ttl_hours: int) -> Any:
         return {
-            "version": 4,
+            "schema_version": 1,
             "entries": [
                 {"candidate": entry.model_dump(), "refreshed_at": 1.0} for entry in self.entries
             ],
