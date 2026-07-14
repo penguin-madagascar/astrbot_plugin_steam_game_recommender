@@ -311,6 +311,7 @@ class SteamSearchHit(BaseModel):
 class GameCandidate(BaseModel):
     title: str
     appid: int | None = None
+    app_type: str | None = None
     platforms: list[str] = Field(default_factory=list)
     genres: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
@@ -353,6 +354,11 @@ class GameCandidate(BaseModel):
     @validator("title", pre=True)
     def _normalize_title(cls, value: Any) -> str:
         return re.sub(r"\s+", " ", str(value or "")).strip()
+
+    @validator("app_type", pre=True)
+    def _normalize_app_type(cls, value: Any) -> str | None:
+        text = re.sub(r"\s+", " ", str(value or "")).strip().lower()
+        return text or None
 
     class Config:
         extra = "ignore"

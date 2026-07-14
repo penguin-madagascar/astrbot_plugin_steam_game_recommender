@@ -14,8 +14,8 @@ class SteamClientTest(unittest.IsolatedAsyncioTestCase):
             {
                 "https://store.steampowered.com/api/storesearch/": {
                     "items": [
-                        {"id": 123, "name": "Co-op Test Game"},
-                        {"appid": 456, "name": "Other Game"},
+                        {"type": "app", "id": 123, "name": "Co-op Test Game"},
+                        {"type": "app", "appid": 456, "name": "Other Game"},
                     ]
                 }
             }
@@ -30,14 +30,33 @@ class SteamClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hits[0].store_url, "https://store.steampowered.com/app/123/")
         self.assertEqual(http_client.call_count, 1)
 
+    async def test_search_game_refs_ignores_packages_bundles_and_unknown_items(self) -> None:
+        http_client = FakeHttpClient(
+            {
+                "https://store.steampowered.com/api/storesearch/": {
+                    "items": [
+                        {"type": "app", "id": 123, "name": "Base Game"},
+                        {"type": "sub", "id": 456, "name": "Complete Package"},
+                        {"type": "bundle", "id": 789, "name": "Franchise Bundle"},
+                        {"id": 999, "name": "Unknown Store Item"},
+                    ]
+                }
+            }
+        )
+        client = SteamClient(http_client, MemoryCache(), cache_ttl_hours=24)
+
+        hits = await client.search_game_refs(search="base game", page_size=10)
+
+        self.assertEqual([hit.appid for hit in hits], [123])
+
     async def test_search_games_parses_steam_details_and_uses_cache(self) -> None:
         cache = MemoryCache()
         http_client = FakeHttpClient(
             {
                 "https://store.steampowered.com/api/storesearch/": {
                     "items": [
-                        {"id": 123, "name": "Co-op Test Game"},
-                        {"appid": 456, "name": "Other Game"},
+                        {"type": "app", "id": 123, "name": "Co-op Test Game"},
+                        {"type": "app", "appid": 456, "name": "Other Game"},
                     ]
                 },
                 "https://store.steampowered.com/api/appdetails": {
@@ -62,6 +81,7 @@ class SteamClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([game.title for game in games], ["Co-op Test Game", "Other Game"])
         first = games[0]
         self.assertEqual(first.appid, 123)
+        self.assertEqual(first.app_type, "game")
         self.assertEqual(first.platforms, ["pc", "macos", "linux"])
         self.assertIn("action", first.genres)
         self.assertIn("co-op", first.tags)
@@ -80,6 +100,74 @@ class SteamClientTest(unittest.IsolatedAsyncioTestCase):
         await client.search_games(search="co-op", page_size=2)
 
         self.assertEqual(http_client.call_count, 3)
+
+    async def test_search_games_skips_non_games_and_failed_details(self) -> None:
+        http_client = FakeHttpClient(
+            {
+                "https://store.steampowered.com/api/storesearch/": {
+                    "items": [
+                        {"type": "app", "id": 123, "name": "Base Game"},
+                        {"type": "app", "id": 456, "name": "Expansion"},
+                        {"type": "app", "id": 789, "name": "Missing Detail"},
+                    ]
+                },
+                "https://store.steampowered.com/api/appdetails": {
+                    "123": {"success": True, "data": steam_detail_payload()},
+                    "456": {
+                        "success": True,
+                        "data": {
+                            **steam_detail_payload(),
+                            "name": "Expansion",
+                            "type": "dlc",
+                        },
+                    },
+                    "789": {"success": False},
+                },
+            }
+        )
+        client = SteamClient(http_client, MemoryCache(), cache_ttl_hours=24)
+
+        games = await client.search_games(search="base game", page_size=3)
+
+        self.assertEqual([game.appid for game in games], [123])
+
+    async def test_game_detail_preserves_all_reported_app_types(self) -> None:
+        for app_type in ("game", "dlc", "demo", "music", "tool"):
+            with self.subTest(app_type=app_type):
+                payload = {**steam_detail_payload(), "type": app_type}
+                client = SteamClient(
+                    FakeHttpClient(
+                        {
+                            "https://store.steampowered.com/api/appdetails": {
+                                "123": {"success": True, "data": payload}
+                            }
+                        }
+                    ),
+                    MemoryCache(),
+                    cache_ttl_hours=24,
+                )
+
+                game = await client.get_game_detail(123)
+
+                self.assertEqual(game.app_type, app_type)
+
+        payload = steam_detail_payload()
+        payload.pop("type")
+        client = SteamClient(
+            FakeHttpClient(
+                {
+                    "https://store.steampowered.com/api/appdetails": {
+                        "123": {"success": True, "data": payload}
+                    }
+                }
+            ),
+            MemoryCache(),
+            cache_ttl_hours=24,
+        )
+
+        game = await client.get_game_detail(123)
+
+        self.assertIsNone(game.app_type)
 
     async def test_missing_supported_languages_is_explicitly_unknown(self) -> None:
         payload = steam_detail_payload()

@@ -114,9 +114,11 @@ class SteamClient:
         games: list[GameCandidate] = []
         for hit in hits:
             try:
-                games.append(await self.get_game_detail(hit.appid))
+                candidate = await self.get_game_detail(hit.appid)
             except SteamApiError:
-                games.append(steam_search_item_to_candidate(hit.appid, hit.title))
+                continue
+            if candidate.app_type == "game":
+                games.append(candidate)
         return games
 
     async def search_game_refs(
@@ -142,6 +144,8 @@ class SteamClient:
         hits: list[SteamSearchHit] = []
         for item in (items or [])[: min(max(page_size, 1), 40)]:
             if not isinstance(item, dict):
+                continue
+            if str(item.get("type") or "").strip().lower() != "app":
                 continue
             appid = optional_int(item.get("id") or item.get("appid"))
             title = str(item.get("name") or "").strip()
@@ -318,6 +322,7 @@ def parse_steam_game(appid: int, data: dict[str, Any]) -> GameCandidate:
     return GameCandidate(
         appid=appid,
         title=str(data.get("name") or f"appid={appid}").strip(),
+        app_type=optional_text(data.get("type")),
         platforms=parse_platforms(data.get("platforms")),
         genres=genres,
         tags=categories,
@@ -330,17 +335,6 @@ def parse_steam_game(appid: int, data: dict[str, Any]) -> GameCandidate:
         language_data_available=bool(languages),
         internal_source_markers=["steam_appdetails"],
         description=clean_html_text(data.get("short_description") or data.get("about_the_game")),
-    )
-
-
-def steam_search_item_to_candidate(appid: int, title: str) -> GameCandidate:
-    return GameCandidate(
-        appid=appid,
-        title=title,
-        platforms=["PC"],
-        stores=["Steam"],
-        raw_url=f"{STEAM_STORE_BASE_URL}/{appid}/",
-        internal_source_markers=["steam_store_search"],
     )
 
 
