@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import math
 import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -424,12 +425,21 @@ def parse_storefront_page(payload: Any) -> SteamStorefrontPage:
 
 
 def storefront_non_negative_int(value: Any, field_name: str) -> int:
-    try:
+    invalid = SteamApiError(f"Steam 商店筛选字段 {field_name} 无效。")
+    if isinstance(value, bool):
+        raise invalid
+    if isinstance(value, int):
+        number = value
+    elif isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            raise invalid
         number = int(value)
-    except (TypeError, ValueError) as exc:
-        raise SteamApiError(f"Steam 商店筛选字段 {field_name} 无效。") from exc
+    elif isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()):
+        number = int(value)
+    else:
+        raise invalid
     if number < 0:
-        raise SteamApiError(f"Steam 商店筛选字段 {field_name} 无效。")
+        raise invalid
     return number
 
 
@@ -455,7 +465,8 @@ class _StorefrontResultParser(HTMLParser):
             classes = set(str(attributes.get("class") or "").split())
             if "search_result_row" not in classes:
                 return
-            self._appid = optional_int(attributes.get("data-ds-appid"))
+            appid = optional_int(attributes.get("data-ds-appid"))
+            self._appid = appid if appid is not None and appid > 0 else None
             self._collect_title = False
             self._title_parts = []
             return
@@ -474,7 +485,7 @@ class _StorefrontResultParser(HTMLParser):
             return
         if tag != "a" or self._appid is None:
             return
-        title = html.unescape("".join(self._title_parts)).strip()
+        title = "".join(self._title_parts).strip()
         if title and self._appid not in self._seen_appids:
             self.hits.append(
                 SteamSearchHit(

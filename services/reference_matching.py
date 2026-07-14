@@ -105,18 +105,18 @@ def score_title_pair(alias: str, hit: SteamSearchHit) -> _ScoredHit:
 
 def title_key(value: str) -> str:
     normalized = normalized_title_words(value)
-    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", normalized)
+    return "".join(character for character in normalized if character.isalnum())
 
 
 def title_base_key(value: str) -> str:
     normalized = normalized_title_words(value)
     suffix_pattern = "|".join(re.escape(suffix) for suffix in EDITION_SUFFIXES)
     normalized = re.sub(rf"(?:\s+|:\s*)({suffix_pattern})$", "", normalized).strip()
-    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", normalized)
+    return "".join(character for character in normalized if character.isalnum())
 
 
 def normalized_title_words(value: str) -> str:
     text = str(value or "").replace("™", "").replace("®", "").replace("©", "")
     text = unicodedata.normalize("NFKC", text).casefold()
-    text = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
+    words = "".join(character if character.isalnum() else " " for character in text)
+    return " ".join(words.split())

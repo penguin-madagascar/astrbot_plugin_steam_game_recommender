@@ -101,6 +101,22 @@ class ReferenceMatchingTest(unittest.TestCase):
         self.assertEqual(title_base_key("Saga III Definitive Edition"), "sagaiii")
         self.assertNotEqual(title_base_key("Saga 2"), title_base_key("Saga 3"))
 
+    def test_exact_matching_preserves_non_latin_unicode_titles(self) -> None:
+        reference = ReferenceQuery(
+            "ドラゴンクエスト",
+            ("ドラゴンクエスト",),
+            ReferencePolarity.POSITIVE,
+        )
+
+        match = match_reference_query(
+            reference,
+            [SteamSearchHit(appid=7, title="ドラゴンクエスト")],
+        )
+
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match.match_kind, "exact")
+
 
 if __name__ == "__main__":
     unittest.main()

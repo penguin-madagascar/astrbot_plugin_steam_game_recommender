@@ -8,6 +8,7 @@ import httpx
 from astrbot_plugin_steam_game_recommender.clients.steam import (
     SteamApiError,
     SteamClient,
+    parse_storefront_results_html,
 )
 from astrbot_plugin_steam_game_recommender.services.tag_normalizer import (
     register_steam_tag_aliases,
@@ -27,6 +28,12 @@ RESULTS_HTML = """
 </a>
 <a class="search_result_row" data-ds-appid="bad">
   <span class="title">Malformed</span>
+</a>
+<a class="search_result_row" data-ds-appid="0">
+  <span class="title">Zero</span>
+</a>
+<a class="search_result_row" data-ds-appid="-12">
+  <span class="title">Negative</span>
 </a>
 <a class="search_result_row" data-ds-appid="12"></a>
 """
@@ -93,6 +100,17 @@ class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SteamApiError):
             await client.search_storefront_tag(29482)
 
+    async def test_contract_rejects_boolean_fractional_and_non_finite_integers(self) -> None:
+        invalid_values = (True, 1.5, float("inf"), "1.5")
+        for value in invalid_values:
+            with self.subTest(value=value):
+                payload = storefront_payload()
+                payload["total_count"] = value
+                client = SteamClient(FakeHttpClient(payload), MemoryCache())
+
+                with self.assertRaises(SteamApiError):
+                    await client.search_storefront_tag(29482)
+
     async def test_live_failure_uses_separate_seven_day_stale_cache(self) -> None:
         cache = MemoryCache()
         first = SteamClient(FakeHttpClient(storefront_payload()), cache)
@@ -121,6 +139,14 @@ class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(http_client.last_params["l"], "english")
 
+    def test_html_entities_are_decoded_exactly_once(self) -> None:
+        hits = parse_storefront_results_html(
+            '<a class="search_result_row" data-ds-appid="9">'
+            '<span class="title">Rock &amp;amp; Roll</span></a>'
+        )
+
+        self.assertEqual(hits[0].title, "Rock &amp; Roll")
+
 
 class FakeResponse:
     def __init__(self, payload: Any) -> None:
@@ -147,7 +173,11 @@ class FakeHttpClient:
 
 class FailingHttpClient:
     async def get(self, _url: str, params: dict[str, Any]) -> FakeResponse:
-        request = httpx.Request("GET", "https://store.steampowered.com/search/results", params=params)
+        request = httpx.Request(
+            "GET",
+            "https://store.steampowered.com/search/results",
+            params=params,
+        )
         raise httpx.ConnectError("offline", request=request)
 
 

@@ -190,7 +190,11 @@ def steam_tag_id_for(value: str) -> int | None:
 def steam_tag_for_id(tag_id: int) -> str | None:
     expected = int(tag_id)
     return next(
-        (canonical for canonical, registered_id in STEAM_TAG_IDS.items() if registered_id == expected),
+        (
+            canonical
+            for canonical, registered_id in STEAM_TAG_IDS.items()
+            if registered_id == expected
+        ),
         None,
     )
 
