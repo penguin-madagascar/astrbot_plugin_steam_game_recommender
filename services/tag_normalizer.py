@@ -141,6 +141,7 @@ TAG_ALIASES = {
 
 STEAM_TAG_ALIASES: dict[str, str] = {}
 STEAM_CANONICAL_TAGS: set[str] = set()
+STEAM_TAG_IDS: dict[str, int] = {}
 
 
 def register_steam_tag_aliases(tags: list[dict[str, Any]]) -> None:
@@ -151,10 +152,13 @@ def register_steam_tag_aliases(tags: list[dict[str, Any]]) -> None:
         key = normalize_key(name)
         if not key:
             continue
-        canonical = steam_tag_canonical_key(name)
+        canonical = TAG_ALIASES.get(key, steam_tag_canonical_key(name))
         if canonical:
             STEAM_TAG_ALIASES[key] = canonical
             STEAM_CANONICAL_TAGS.add(canonical)
+            tag_id = item.get("tagid", item.get("id"))
+            if tag_id is not None:
+                STEAM_TAG_IDS[canonical] = int(tag_id)
 
 
 def steam_tag_canonical_key(value: str) -> str:
@@ -169,12 +173,17 @@ def normalize_tag(value: str) -> str | None:
     key = normalize_key(value)
     if not key:
         return None
-    if key in STEAM_TAG_ALIASES:
-        return STEAM_TAG_ALIASES[key]
     if key in TAG_ALIASES:
         return TAG_ALIASES[key]
+    if key in STEAM_TAG_ALIASES:
+        return STEAM_TAG_ALIASES[key]
     compact = key.replace(" ", "_")
     return compact if compact in canonical_tags() else None
+
+
+def steam_tag_id_for(value: str) -> int | None:
+    canonical = normalize_tag(value) or steam_tag_canonical_key(value)
+    return STEAM_TAG_IDS.get(canonical)
 
 
 def canonical_tags_from_terms(values: list[str] | tuple[str, ...]) -> list[str]:

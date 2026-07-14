@@ -37,6 +37,8 @@ PREFERENCE_SCHEMA_HINT = """
   "required_languages": [],
   "difficulty": null,
   "mood": null,
+  "quality_intent": "normal",
+  "allow_unreleased": false,
   "result_count": 5
 }
 说明：
@@ -54,9 +56,11 @@ PREFERENCE_SCHEMA_HINT = """
 - genres_dislike 放排除标签，例如恐怖、魂类、肉鸽、纯单人、pvp。
 - 同一标签出现冲突时，以用户文本中最后一次明确表达的喜欢/排除极性为准。
 - reference_games_dislike 只放用户明确表示不想要类似体验的参考游戏名。
-- 用户说 3A、AAA、triple-A、大作、单机大作时，按宽泛的 Steam 大作意图处理：
-  genres_like 可包含 action、adventure、rpg；extra_tags 包含 aaa、story rich、open world。
-  不要把 3A 当成推荐数量，不要因此编造具体游戏名。
+- 单机、单人、singleplayer、single-player、纯单人统一写入 genres_like 的 singleplayer。
+- 用户说 3A、AAA、triple-A、大作、单机大作时，将 quality_intent 设为 "mainstream"；
+  不要因此添加 action、adventure、rpg、story rich、open world 等标签，也不要编造具体游戏名。
+- 仅当用户明确请求未发售、即将发售、upcoming、coming-soon 游戏时，
+  将 allow_unreleased 设为 true；否则设为 false。
 - library_filter_mode 只在用户明确要求时填写：排除已有/exclude-owned 为 "exclude_owned"；
   仅查看已有/only-owned 为 "only_owned"；否则为 null。
 """

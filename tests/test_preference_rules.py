@@ -315,16 +315,53 @@ class PreferenceRulesTest(unittest.TestCase):
         self.assertIn("action", preference.extra_tags)
         self.assertIn("rpg", preference.extra_tags)
 
-    def test_aaa_request_extracts_broad_blockbuster_profile(self) -> None:
-        preference = infer_preference_from_text("推荐一下3a游戏")
+    def test_singleplayer_aaa_request_sets_intents_without_fabricated_genres(self) -> None:
+        preference = infer_preference_from_text("推荐的单机3a大作")
 
-        self.assertIn("action", preference.genres_like)
-        self.assertIn("adventure", preference.genres_like)
-        self.assertIn("rpg", preference.genres_like)
-        self.assertIn("aaa", preference.extra_tags)
-        self.assertIn("story rich", preference.extra_tags)
-        self.assertIn("open world", preference.extra_tags)
+        self.assertEqual(preference.genres_like, ["singleplayer"])
+        self.assertEqual(preference.extra_tags, [])
+        self.assertEqual(preference.quality_intent, "mainstream")
+        self.assertFalse(preference.allow_unreleased)
         self.assertEqual(preference.result_count, 5)
+
+    def test_normal_query_keeps_default_quality_and_release_policy(self) -> None:
+        preference = infer_preference_from_text("推荐轻松解谜游戏")
+
+        self.assertEqual(preference.quality_intent, "normal")
+        self.assertFalse(preference.allow_unreleased)
+
+    def test_explicit_upcoming_query_allows_unreleased_games(self) -> None:
+        cases = (
+            "推荐尚未发售的单人游戏",
+            "show me upcoming single-player games",
+            "推荐 coming-soon games",
+        )
+
+        for text in cases:
+            with self.subTest(text=text):
+                preference = infer_preference_from_text(text)
+                self.assertTrue(preference.allow_unreleased)
+
+    def test_singleplayer_terms_share_one_canonical_positive_tag(self) -> None:
+        terms = ("单机游戏", "单人游戏", "singleplayer game", "single-player game", "纯单人")
+        for text in terms:
+            with self.subTest(text=text):
+                preference = infer_preference_from_text(text)
+                self.assertIn("singleplayer", preference.genres_like)
+                self.assertNotIn("singleplayer", preference.genres_dislike)
+
+    def test_text_rules_remove_llm_fabricated_aaa_expansion(self) -> None:
+        merged = merge_text_preference(
+            GamePreference(
+                genres_like=["action", "adventure", "rpg"],
+                extra_tags=["aaa", "story rich", "open world"],
+            ),
+            "推荐的单机3a大作",
+        )
+
+        self.assertEqual(merged.genres_like, ["singleplayer"])
+        self.assertEqual(merged.extra_tags, [])
+        self.assertEqual(merged.quality_intent, "mainstream")
 
     def test_infers_library_filter_mode_from_text(self) -> None:
         self.assertEqual(

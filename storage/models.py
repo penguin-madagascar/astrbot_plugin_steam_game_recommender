@@ -143,6 +143,8 @@ class GamePreference(BaseModel):
     required_languages: list[str] = Field(default_factory=list)
     difficulty: str | None = None
     mood: str | None = None
+    quality_intent: str = "normal"
+    allow_unreleased: bool = False
     result_count: int = 5
     parse_warnings: list[str] = Field(default_factory=list)
 
@@ -211,6 +213,11 @@ class GamePreference(BaseModel):
     def _normalize_optional_text(cls, value: Any) -> str | None:
         text = re.sub(r"\s+", " ", str(value or "")).strip().lower()
         return text or None
+
+    @validator("quality_intent", pre=True, always=True)
+    def _normalize_quality_intent(cls, value: Any) -> str:
+        text = re.sub(r"\s+", " ", str(value or "")).strip().lower()
+        return "mainstream" if text == "mainstream" else "normal"
 
     @validator("result_count", pre=True, always=True)
     def _normalize_result_count(cls, value: Any) -> int:

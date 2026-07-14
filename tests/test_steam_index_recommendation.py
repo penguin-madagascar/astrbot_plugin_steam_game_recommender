@@ -67,6 +67,32 @@ class TagNormalizerTest(unittest.TestCase):
         self.assertEqual(normalizer.normalize_tag("生活模拟"), "life_sim")
         self.assertEqual(normalizer.normalize_tag("像素图形"), "pixel_graphics")
 
+    def test_static_alias_wins_dynamic_collision_and_exposes_steam_tag_id(self) -> None:
+        normalizer = optional_import(
+            "astrbot_plugin_steam_game_recommender.services.tag_normalizer"
+        )
+
+        normalizer.register_steam_tag_aliases(
+            [{"tagid": 29482, "name": "Souls-like"}]
+        )
+
+        self.assertEqual(normalizer.normalize_tag("Souls-like"), "soulslike")
+        self.assertEqual(normalizer.normalize_tag("souls_like"), "soulslike")
+        self.assertEqual(normalizer.steam_tag_id_for("soulslike"), 29482)
+
+    def test_registering_name_only_steam_tags_remains_supported(self) -> None:
+        normalizer = optional_import(
+            "astrbot_plugin_steam_game_recommender.services.tag_normalizer"
+        )
+
+        normalizer.register_steam_tag_aliases([{"name": "Precision Platformer"}])
+
+        self.assertEqual(
+            normalizer.normalize_tag("Precision Platformer"),
+            "precision_platformer",
+        )
+        self.assertIsNone(normalizer.steam_tag_id_for("precision_platformer"))
+
     def test_maps_specific_mechanic_tags_without_broad_false_positive(self) -> None:
         normalizer = optional_import(
             "astrbot_plugin_steam_game_recommender.services.tag_normalizer"

@@ -16,9 +16,6 @@ SOULSLIKE_TERMS = (
     "dark souls",
 )
 
-AAA_GENRE_TAGS = ["action", "adventure", "rpg"]
-AAA_EXTRA_TAGS = ["aaa", "story rich", "open world"]
-
 TAG_INTENT_TERMS: dict[str, tuple[str, ...]] = {
     "co_op": ("双人", "两人", "合作", "coop", "co-op"),
     "local_coop": (
@@ -49,7 +46,7 @@ TAG_INTENT_TERMS: dict[str, tuple[str, ...]] = {
     "soulslike": SOULSLIKE_TERMS[:-1],
     "roguelike": ("肉鸽", "roguelike", "rogue-like", "roguelite"),
     "violent": ("血腥", "violent", "gore"),
-    "singleplayer": ("纯单人", "singleplayer", "single-player"),
+    "singleplayer": ("纯单人", "单机", "单人", "singleplayer", "single-player"),
     "pvp": ("pvp",),
 }
 
@@ -177,8 +174,6 @@ def infer_preference_from_text(text: str) -> GamePreference:
     reference_like = remove_reference_titles(reference_like, reference_dislike)
     if references_imply_soulslike(reference_like):
         genres_like = merge_lists(genres_like, ["soulslike"])
-    if has_aaa_intent(lower):
-        genres_like = merge_lists(genres_like, AAA_GENRE_TAGS)
     extra_tags = keyword_hits(
         lower,
         {
@@ -192,8 +187,6 @@ def infer_preference_from_text(text: str) -> GamePreference:
     extra_tags = remove_terms_matching_tags(extra_tags, set(negative_tags))
     if references_imply_soulslike(reference_like):
         extra_tags = merge_lists(extra_tags, ["soulslike"])
-    if has_aaa_intent(lower):
-        extra_tags = merge_lists(extra_tags, AAA_EXTRA_TAGS)
     extra_tags = expand_related_extra_tags(extra_tags)
     genres_like = remove_terms_matching_tags(genres_like, set(negative_tags))
     extra_tags = remove_terms_matching_tags(extra_tags, set(negative_tags))
@@ -217,6 +210,8 @@ def infer_preference_from_text(text: str) -> GamePreference:
         required_languages=required_languages,
         difficulty=difficulty,
         mood="轻松" if tag_polarities.get("relaxing") == "positive" else None,
+        quality_intent="mainstream" if has_aaa_intent(lower) else "normal",
+        allow_unreleased=has_unreleased_intent(lower),
         result_count=result_count,
         library_filter_mode=library_filter_mode,
     )
@@ -270,6 +265,11 @@ def merge_text_preference(preference: GamePreference, text: str) -> GamePreferen
     data["preferred_languages"] = list(inferred.preferred_languages)
     data["required_languages"] = list(inferred.required_languages)
     data["budget_is_required"] = inferred.budget_is_required
+    data["quality_intent"] = inferred.quality_intent
+    data["allow_unreleased"] = inferred.allow_unreleased
+    if inferred.quality_intent == "mainstream":
+        for field in ("required_tags", "genres_like", "extra_tags"):
+            data[field] = remove_fabricated_mainstream_tags(data[field], text)
     for field in ("players", "budget", "difficulty", "mood"):
         if getattr(preference, field) in (None, "", []):
             data[field] = getattr(inferred, field)
@@ -495,6 +495,49 @@ def has_aaa_intent(text: str) -> bool:
     return bool(re.search(r"(?<![0-9a-z])(?:3a|aaa)(?![0-9a-z])", lower)) or any(
         term in lower for term in ("triple-a", "triple a", "大作")
     )
+
+
+def has_unreleased_intent(text: str) -> bool:
+    lower = text.lower()
+    terms = (
+        "尚未发售",
+        "未发售",
+        "即将发售",
+        "尚未发行",
+        "未发行",
+        "即将推出",
+        "unreleased",
+        "upcoming",
+        "coming-soon",
+        "coming soon",
+    )
+    for term in terms:
+        for match in re.finditer(re.escape(term), lower):
+            if not is_negative_context(lower, match.start(), match.end()):
+                return True
+    return False
+
+
+def remove_fabricated_mainstream_tags(values: list[str], text: str) -> list[str]:
+    explicit_terms = {
+        "action": ("动作", "action"),
+        "adventure": ("冒险", "adventure"),
+        "rpg": ("角色扮演", "rpg"),
+        "story_rich": ("剧情丰富", "剧情向", "story rich"),
+        "open_world": ("开放世界", "open world"),
+    }
+    lower = text.lower()
+    retained: list[str] = []
+    for value in values:
+        canonical = canonical_tags_from_terms([value])
+        tag = canonical[0] if canonical else value.strip().lower().replace(" ", "_")
+        if tag == "aaa":
+            continue
+        terms = explicit_terms.get(tag)
+        if terms and not any(term in lower for term in terms):
+            continue
+        retained.append(value)
+    return retained
 
 
 def expand_related_extra_tags(tags: list[str]) -> list[str]:
