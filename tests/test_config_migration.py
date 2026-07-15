@@ -36,6 +36,7 @@ def legacy_config() -> dict:
         "steam_min_positive_ratio": 0.75,
         "cache_ttl_hours": 36,
         "timeout_seconds": 30,
+        "reuse_identical_query_cache": True,
     }
 
 
@@ -72,6 +73,7 @@ class ConfigMigrationTest(unittest.TestCase):
                 migrated["model_and_access"],
                 {
                     "llm_provider_id": "provider/custom-model",
+                    "semantic_verification_batch_size": 5,
                     "steam_api_key": "test-steam-key",
                 },
             )
@@ -86,6 +88,10 @@ class ConfigMigrationTest(unittest.TestCase):
                 )
             )
             self.assertEqual(migrated["cache_and_network"]["timeout_seconds"], 30)
+            self.assertIs(
+                migrated["cache_and_network"]["reuse_identical_query_cache"],
+                True,
+            )
 
             first_write = raw
             self.assertIs(
@@ -234,6 +240,21 @@ class ConfigMigrationTest(unittest.TestCase):
 
             self.assertIs(changed, False)
             self.assertEqual(config_path.read_bytes(), original)
+
+    def test_grouped_cache_config_missing_reuse_policy_is_not_rewritten(self) -> None:
+        migration = load_migration_module()
+        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        grouped = {
+            "cache_and_network": {
+                "cache_ttl_hours": 24,
+                "timeout_seconds": 15,
+            }
+        }
+
+        migrated, changed = migration.migrate_config_data(grouped, schema)
+
+        self.assertIs(changed, False)
+        self.assertEqual(migrated, grouped)
 
     def test_malformed_config_is_unchanged_when_migration_aborts(self) -> None:
         migration = load_migration_module()

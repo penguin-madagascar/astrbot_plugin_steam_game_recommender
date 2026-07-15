@@ -124,6 +124,10 @@ class SteamGameRecommenderPlugin(Star):
         cache_config = config_section(self.config, "cache_and_network")
 
         timeout = safe_int(cache_config.get("timeout_seconds"), 15)
+        self.reuse_identical_query_cache = safe_bool(
+            cache_config.get("reuse_identical_query_cache"),
+            False,
+        )
         self.max_results = min(
             max(
                 safe_int(
@@ -172,6 +176,7 @@ class SteamGameRecommenderPlugin(Star):
                 self.recommendation_config.get("steam_index_ttl_hours"),
                 168,
             ),
+            reuse_cache=self.reuse_identical_query_cache,
         )
         self.price_bridge = SteamPriceBridge(
             self.http_client,
@@ -561,6 +566,11 @@ class SteamGameRecommenderPlugin(Star):
                             getattr(self.steam_client, "language", "schinese")
                             or "schinese"
                         ),
+                        reuse_cache=getattr(
+                            self,
+                            "reuse_identical_query_cache",
+                            True,
+                        ),
                     )
                     if resolved_provider_id
                     else None
@@ -789,6 +799,20 @@ def safe_int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def safe_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    if isinstance(value, (int, float)) and value in {0, 1}:
+        return bool(value)
+    return default
 
 
 def safe_float(value: Any, default: float) -> float:

@@ -176,12 +176,14 @@ class SteamGameIndexService:
         ttl_hours: int = 168,
         page_size: int = STEAM_INDEX_SEARCH_RESULTS_PER_TERM,
         clock: Callable[[], float] = time.time,
+        reuse_cache: bool = True,
     ) -> None:
         self.steam_client = steam_client
         self.cache = cache
         self.ttl_hours = max(int(ttl_hours), 1)
         self.page_size = min(max(int(page_size), 1), STEAM_INDEX_SEARCH_RESULTS_PER_TERM)
         self.clock = clock
+        self.reuse_cache = reuse_cache
         self._tag_vocabulary_languages: tuple[str, ...] = ("english", "schinese")
         self._tag_vocabulary_payloads: dict[
             str,
@@ -203,6 +205,14 @@ class SteamGameIndexService:
         self._intersection_tasks_lock = asyncio.Lock()
         self._more_like_tasks: dict[tuple[int, bool], asyncio.Task[Any]] = {}
         self._more_like_tasks_lock = asyncio.Lock()
+
+    def _discovery_cache_kwargs(
+        self,
+        function: Callable[..., Any],
+    ) -> dict[str, bool]:
+        if callable_accepts_keyword(function, "reuse_cache"):
+            return {"reuse_cache": self.reuse_cache}
+        return {}
 
     async def recommend(
         self,
@@ -785,7 +795,11 @@ class SteamGameIndexService:
         page_size: int,
     ) -> Any:
         async with self._steam_semaphore:
-            return await search_storefront(tag_id, page_size=page_size)
+            return await search_storefront(
+                tag_id,
+                page_size=page_size,
+                **self._discovery_cache_kwargs(search_storefront),
+            )
 
     async def _fetch_company_source(
         self,
@@ -815,7 +829,12 @@ class SteamGameIndexService:
 
         async def search_one(alias: str, role: str) -> Any:
             async with self._steam_semaphore:
-                return await search(alias, role, page_size=20)
+                return await search(
+                    alias,
+                    role,
+                    page_size=20,
+                    **self._discovery_cache_kwargs(search),
+                )
 
         results = await asyncio.gather(
             *(search_one(alias, role) for alias, role in requests),
@@ -885,7 +904,10 @@ class SteamGameIndexService:
             )
         try:
             async with self._steam_semaphore:
-                page = await browser(page_size=60)
+                page = await browser(
+                    page_size=60,
+                    **self._discovery_cache_kwargs(browser),
+                )
             candidates = tuple(
                 self._candidate_from_storefront_hit(hit)
                 for hit in page.hits[:60]
@@ -1003,7 +1025,11 @@ class SteamGameIndexService:
         tag_ids, page_size = key
         try:
             async with self._steam_semaphore:
-                return await search(list(tag_ids), page_size=page_size)
+                return await search(
+                    list(tag_ids),
+                    page_size=page_size,
+                    **self._discovery_cache_kwargs(search),
+                )
         finally:
             async with self._intersection_tasks_lock:
                 if self._intersection_tasks.get(key) is task:
@@ -1085,6 +1111,7 @@ class SteamGameIndexService:
                 return await getter(
                     appid,
                     allow_unreleased=allow_unreleased,
+                    **self._discovery_cache_kwargs(getter),
                 )
         finally:
             async with self._more_like_tasks_lock:
@@ -1570,7 +1597,8 @@ class SteamGameIndexService:
             initial_queries = [
                 query
                 for query in search_terms_for(preference, initial_profile)
-                if not query_is_covered(query, coverage, now, self.ttl_hours)
+                if not self.reuse_cache
+                or not query_is_covered(query, coverage, now, self.ttl_hours)
             ][:STEAM_INDEX_MAX_SEARCHES_PER_ROUND]
         else:
             initial_queries = []
@@ -1635,7 +1663,10 @@ class SteamGameIndexService:
                 query
                 for query in search_terms_for(preference, expanded_profile)
                 if normalize_text(query) not in searched_keys
-                and not query_is_covered(query, coverage, now, self.ttl_hours)
+                and (
+                    not self.reuse_cache
+                    or not query_is_covered(query, coverage, now, self.ttl_hours)
+                )
             ][:remaining_searches]
             await process_searches(supplemental_queries)
 
@@ -1708,7 +1739,8 @@ class SteamGameIndexService:
                 else now
             )
             if (
-                match is None
+                not self.reuse_cache
+                or match is None
                 or match.match_kind != "exact"
                 or candidate is None
             ):
@@ -1852,6 +1884,7 @@ class SteamGameIndexService:
                             page_size=20,
                             start=0,
                             language=language,
+                            **self._discovery_cache_kwargs(search_storefront),
                         )
                     hits = [validate_search_hit(hit) for hit in page.hits]
                 except Exception as exc:
@@ -2018,6 +2051,7 @@ class SteamGameIndexService:
             }
             if language is not None:
                 kwargs["language"] = language
+            kwargs.update(self._discovery_cache_kwargs(search_refs))
             async with self._steam_semaphore:
                 results = await search_refs(**kwargs)
             return [validate_search_hit(hit) for hit in results]
@@ -2031,6 +2065,7 @@ class SteamGameIndexService:
                 page_size=resolved_page_size,
                 ordering="-relevance",
                 language=language,
+                **self._discovery_cache_kwargs(search_games),
             )
         hits: list[SteamSearchHit] = []
         for candidate in candidates:
@@ -2797,7 +2832,14 @@ def callable_accepts_keyword(function: Callable[..., Any], keyword: str) -> bool
         return False
     return any(
         parameter.kind is inspect.Parameter.VAR_KEYWORD
-        or parameter.name == keyword
+        or (
+            parameter.name == keyword
+            and parameter.kind
+            in {
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            }
+        )
         for parameter in parameters
     )
 

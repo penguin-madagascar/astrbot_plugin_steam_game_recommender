@@ -118,6 +118,7 @@ class PluginDashboardConfigTest(unittest.TestCase):
             "cache_and_network": {
                 "cache_ttl_hours": 48,
                 "timeout_seconds": 21,
+                "reuse_identical_query_cache": "false",
             },
             "llm_provider_id": "provider/legacy-flat",
             "default_region": "CN",
@@ -168,9 +169,13 @@ class PluginDashboardConfigTest(unittest.TestCase):
             },
         )
         self.assertEqual(index_service_class.call_args.kwargs["ttl_hours"], 96)
+        self.assertIs(
+            index_service_class.call_args.kwargs["reuse_cache"],
+            False,
+        )
         self.assertEqual(
             set(index_service_class.call_args.kwargs),
-            {"steam_client", "cache", "ttl_hours"},
+            {"steam_client", "cache", "ttl_hours", "reuse_cache"},
         )
         price_bridge_class.assert_called_once_with(
             http_client,
@@ -201,6 +206,35 @@ class PluginDashboardConfigTest(unittest.TestCase):
         )
         self.assertEqual(getattr(build(0), "semantic_verification_batch_size", None), 1)
         self.assertEqual(getattr(build(11), "semantic_verification_batch_size", None), 10)
+
+    def test_identical_query_cache_reuse_defaults_false_and_accepts_explicit_true(
+        self,
+    ) -> None:
+        def build(cache_config):
+            with (
+                patch.object(main_module.httpx, "AsyncClient", return_value=object()),
+                patch.object(main_module, "SQLiteCacheRepository", return_value=object()),
+                patch.object(main_module, "SteamClient"),
+                patch.object(main_module, "PreferenceParser"),
+                patch.object(main_module, "SteamGameIndexService") as index_service,
+                patch.object(main_module, "SteamPriceBridge") as price_bridge,
+            ):
+                price_bridge.return_value.is_available.return_value = False
+                plugin = SteamGameRecommenderPlugin(
+                    object(),
+                    {"cache_and_network": cache_config},
+                )
+            return plugin, index_service.call_args.kwargs
+
+        default_plugin, default_kwargs = build({})
+        enabled_plugin, enabled_kwargs = build(
+            {"reuse_identical_query_cache": True}
+        )
+
+        self.assertIs(default_plugin.reuse_identical_query_cache, False)
+        self.assertIs(default_kwargs["reuse_cache"], False)
+        self.assertIs(enabled_plugin.reuse_identical_query_cache, True)
+        self.assertIs(enabled_kwargs["reuse_cache"], True)
 
 
 class PrepareRecommendationTest(unittest.IsolatedAsyncioTestCase):
@@ -439,6 +473,51 @@ class RecommendationPipelineTest(unittest.IsolatedAsyncioTestCase):
 
 
 class SemanticFeatureMainPipelineTest(unittest.IsolatedAsyncioTestCase):
+    async def test_main_passes_identical_query_cache_policy_to_semantic_verifier(
+        self,
+    ) -> None:
+        preference = GamePreference(
+            platforms=["steam"],
+            soft_features=[
+                {
+                    "constraint_id": "branching",
+                    "source_span": "分支剧情",
+                    "normalized_text": "branching story",
+                    "role": "optional",
+                    "polarity": "positive",
+                }
+            ],
+        )
+        games = [semantic_ranked_game(1)]
+        context = SemanticLlmContext(
+            provider_id="provider/session-model",
+            response={"verdicts": []},
+        )
+        plugin = semantic_pipeline_plugin(context, SemanticMemoryCache(), games)
+        plugin.reuse_identical_query_cache = False
+        prepared = PreparedRecommendation("分支剧情", preference, 5)
+        semantic_result = SimpleNamespace(
+            games=tuple(games),
+            notices=(),
+            candidate_count=1,
+        )
+
+        async def identity_reasons(_context, _event, _provider_id, ranked_games):
+            return ranked_games
+
+        with (
+            patch.object(main_module, "SemanticFeatureVerifier") as verifier_class,
+            patch.object(
+                main_module,
+                "verify_ranked_features",
+                AsyncMock(return_value=semantic_result),
+            ),
+            patch.object(main_module, "generate_recommendation_reasons", identity_reasons),
+        ):
+            await plugin._run_recommendation(FakeEvent(), prepared)
+
+        self.assertIs(verifier_class.call_args.kwargs["reuse_cache"], False)
+
     async def test_current_session_provider_verifies_top_twenty_and_keys_cache(self) -> None:
         feature = {
             "constraint_id": "branching",

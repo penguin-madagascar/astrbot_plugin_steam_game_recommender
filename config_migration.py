@@ -38,6 +38,7 @@ GROUP_LEGACY_KEYS = {
     "cache_and_network": (
         "cache_ttl_hours",
         "timeout_seconds",
+        "reuse_identical_query_cache",
     ),
 }
 LEGACY_KEYS = frozenset(

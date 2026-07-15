@@ -140,6 +140,7 @@ class SemanticFeatureVerifier:
         prompt_version: str = FEATURE_PROMPT_VERSION,
         schema_version: str = FEATURE_SCHEMA_VERSION,
         clock: Callable[[], float] = time.time,
+        reuse_cache: bool = True,
     ) -> None:
         self.context = context
         self.cache = cache
@@ -149,6 +150,7 @@ class SemanticFeatureVerifier:
         self.prompt_version = str(prompt_version or "").strip()
         self.schema_version = str(schema_version or "").strip()
         self.clock = clock
+        self.reuse_cache = reuse_cache
 
     async def verify(
         self,
@@ -178,36 +180,43 @@ class SemanticFeatureVerifier:
         missing: list[tuple[int, str, str]] = []
         key_by_pair: dict[tuple[int, str, str], str] = {}
         cache_read_error: Exception | None = None
-        for candidate in selected_candidates:
-            for feature in selected_features:
-                pair = (int(candidate.appid or 0), feature.constraint_id, feature.polarity)
-                key = verdict_cache_key(
-                    feature,
-                    candidate,
-                    provider_id=self.provider_id,
-                    locale=self.locale,
-                    prompt_version=self.prompt_version,
-                    schema_version=self.schema_version,
-                )
-                key_by_pair[pair] = key
-                if cache_read_error is not None:
-                    missing.append(pair)
-                    continue
-                try:
-                    verdict = await self._load_cached_verdict(
-                        key,
-                        pair,
-                        candidate,
+        if self.reuse_cache:
+            for candidate in selected_candidates:
+                for feature in selected_features:
+                    pair = (
+                        int(candidate.appid or 0),
+                        feature.constraint_id,
+                        feature.polarity,
                     )
-                except Exception as exc:
-                    cache_read_error = exc
-                    notices.append(cache_failure_notice("read", exc))
-                    missing.append(pair)
-                    continue
-                if verdict is None:
-                    missing.append(pair)
-                else:
-                    cached[pair] = verdict
+                    key = verdict_cache_key(
+                        feature,
+                        candidate,
+                        provider_id=self.provider_id,
+                        locale=self.locale,
+                        prompt_version=self.prompt_version,
+                        schema_version=self.schema_version,
+                    )
+                    key_by_pair[pair] = key
+                    if cache_read_error is not None:
+                        missing.append(pair)
+                        continue
+                    try:
+                        verdict = await self._load_cached_verdict(
+                            key,
+                            pair,
+                            candidate,
+                        )
+                    except Exception as exc:
+                        cache_read_error = exc
+                        notices.append(cache_failure_notice("read", exc))
+                        missing.append(pair)
+                        continue
+                    if verdict is None:
+                        missing.append(pair)
+                    else:
+                        cached[pair] = verdict
+        else:
+            missing.extend(expected)
 
         fresh_by_pair: dict[tuple[int, str, str], FeatureVerdict] = {}
         cacheable_fresh_pairs: set[tuple[int, str, str]] = set()
@@ -264,19 +273,20 @@ class SemanticFeatureVerifier:
                             (appid, verdict.constraint_id, verdict.polarity)
                         )
 
-            now = float(self.clock())
-            for pair in expected:
-                verdict = fresh_by_pair.get(pair)
-                if verdict is None or pair not in cacheable_fresh_pairs:
-                    continue
-                try:
-                    await self.cache.set_json(
-                        key_by_pair[pair],
-                        verdict_cache_payload(verdict, now),
-                    )
-                except Exception as exc:
-                    notices.append(cache_failure_notice("write", exc))
-                    break
+            if self.reuse_cache:
+                now = float(self.clock())
+                for pair in expected:
+                    verdict = fresh_by_pair.get(pair)
+                    if verdict is None or pair not in cacheable_fresh_pairs:
+                        continue
+                    try:
+                        await self.cache.set_json(
+                            key_by_pair[pair],
+                            verdict_cache_payload(verdict, now),
+                        )
+                    except Exception as exc:
+                        notices.append(cache_failure_notice("write", exc))
+                        break
 
         by_pair = {
             **cached,

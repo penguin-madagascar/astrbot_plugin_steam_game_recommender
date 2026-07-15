@@ -445,6 +445,14 @@ class FailingWriteCache(MemoryCache):
         raise RuntimeError("cache write unavailable")
 
 
+class ExplodingCache(MemoryCache):
+    async def get_json(self, _key: str, _ttl_hours: int):
+        raise AssertionError("semantic cache must not be read")
+
+    async def set_json(self, _key: str, _payload: object) -> None:
+        raise AssertionError("semantic cache must not be written")
+
+
 class FakeContext:
     def __init__(self, responses: list[object]) -> None:
         self.responses = list(responses)
@@ -502,6 +510,49 @@ class EchoUnknownContext:
 
 
 class SemanticFeatureVerifierCacheTest(unittest.IsolatedAsyncioTestCase):
+    async def test_disabled_reuse_never_touches_cache_and_reverifies_each_call(
+        self,
+    ) -> None:
+        module = importlib.import_module(MODULE)
+        feature = SoftFeature(
+            constraint_id="branching",
+            source_span="选择影响剧情",
+            normalized_text="choices alter the story",
+            role="optional",
+            polarity="positive",
+        )
+        candidate = GameCandidate(
+            appid=10,
+            title="One",
+            short_description="Choices alter the ending.",
+        )
+        response = {
+            "verdicts": [
+                {
+                    "appid": 10,
+                    "constraint_id": "branching",
+                    "polarity": "positive",
+                    "status": "satisfied",
+                    "evidence_quote": "alter the ending",
+                }
+            ]
+        }
+        context = FakeContext([response, response])
+        verifier = module.SemanticFeatureVerifier(
+            context,
+            ExplodingCache(),
+            reuse_cache=False,
+        )
+
+        first = await verifier.verify(features=[feature], candidates=[candidate])
+        second = await verifier.verify(features=[feature], candidates=[candidate])
+
+        self.assertEqual(len(context.calls), 2)
+        self.assertEqual(len(first.verdicts), 1)
+        self.assertEqual(len(second.verdicts), 1)
+        self.assertEqual(first.notices, ())
+        self.assertEqual(second.notices, ())
+
     async def test_prompt_declares_exact_json_schema_and_treats_evidence_as_untrusted(self) -> None:
         module = importlib.import_module(MODULE)
         context = FakeContext(

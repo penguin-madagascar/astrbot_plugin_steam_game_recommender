@@ -101,6 +101,71 @@ def _tag(name: str, weight: float = 1.0) -> WeightedIntentTag:
 
 
 class MoreLikeContractTest(unittest.IsolatedAsyncioTestCase):
+    async def test_more_like_reuse_false_skips_fresh_and_overwrites_with_live_empty(
+        self,
+    ) -> None:
+        cache = ClientMemoryCache()
+        online_http = HtmlHttpClient(MORE_LIKE_HTML)
+        online = SteamClient(online_http, cache)
+        await online.get_more_like(900)
+        empty_http = HtmlHttpClient('<section id="released"></section>')
+        network_first = SteamClient(empty_http, cache)
+
+        result = await network_first.get_more_like(900, reuse_cache=False)
+
+        self.assertEqual(result.hits, ())
+        self.assertFalse(result.stale)
+        self.assertEqual(empty_http.call_count, 1)
+        self.assertTrue(
+            all(
+                payload["html"] == '<section id="released"></section>'
+                for key, payload in cache.payloads.items()
+                if key.endswith((":fresh", ":stale"))
+            )
+        )
+
+    async def test_more_like_network_first_failure_uses_seven_day_stale(self) -> None:
+        cache = ClientMemoryCache()
+        online = SteamClient(HtmlHttpClient(MORE_LIKE_HTML), cache)
+        await online.get_more_like(900)
+        offline = SteamClient(FailingHttpClient(), cache)
+
+        result = await offline.get_more_like(900, reuse_cache=False)
+
+        self.assertEqual([hit.appid for hit in result.hits], [901])
+        self.assertTrue(result.stale)
+        self.assertEqual(cache.requested_ttls[-1], 168)
+
+    async def test_more_like_network_first_raises_without_seven_day_stale(self) -> None:
+        cache = ClientMemoryCache()
+        offline = SteamClient(FailingHttpClient(), cache)
+
+        with self.assertRaises(SteamApiError):
+            await offline.get_more_like(900, reuse_cache=False)
+
+        self.assertEqual(cache.requested_ttls, [168])
+
+    async def test_more_like_stale_older_than_seven_days_is_rejected(self) -> None:
+        now = [1_000.0]
+        cache = ExpiringClientMemoryCache(lambda: now[0])
+        online = SteamClient(
+            HtmlHttpClient(MORE_LIKE_HTML),
+            cache,
+            clock=lambda: now[0],
+        )
+        await online.get_more_like(900)
+        now[0] += 7 * 24 * 60 * 60 + 1
+        offline = SteamClient(
+            FailingHttpClient(),
+            cache,
+            clock=lambda: now[0],
+        )
+
+        with self.assertRaises(SteamApiError):
+            await offline.get_more_like(900, reuse_cache=False)
+
+        self.assertEqual(cache.requested_ttls[-1], 168)
+
     def test_parser_keeps_section_boundaries_titles_and_ordered_tag_ids(self) -> None:
         parser = getattr(steam, "parse_more_like_html", None)
         self.assertIsNotNone(parser, "More Like This parser is missing")
@@ -870,6 +935,25 @@ class ClientMemoryCache:
                 self.payloads.pop(key)
 
 
+class ExpiringClientMemoryCache(ClientMemoryCache):
+    def __init__(self, clock) -> None:
+        super().__init__()
+        self.clock = clock
+        self.written_at: dict[str, float] = {}
+
+    async def get_json(self, key: str, ttl_hours: int) -> Any | None:
+        self.requested_ttls.append(ttl_hours)
+        if key not in self.payloads:
+            return None
+        if self.clock() - self.written_at[key] > ttl_hours * 60 * 60:
+            return None
+        return self.payloads[key]
+
+    async def set_json(self, key: str, payload: Any) -> None:
+        self.payloads[key] = payload
+        self.written_at[key] = self.clock()
+
+
 class HtmlResponse:
     def __init__(self, text: str) -> None:
         self.text = text
@@ -881,8 +965,10 @@ class HtmlResponse:
 class HtmlHttpClient:
     def __init__(self, html: str) -> None:
         self.html = html
+        self.call_count = 0
 
     async def get(self, _url: str, **_kwargs: Any) -> HtmlResponse:
+        self.call_count += 1
         return HtmlResponse(self.html)
 
 

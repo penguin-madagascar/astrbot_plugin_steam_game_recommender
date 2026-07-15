@@ -93,6 +93,12 @@
         "description": "HTTP 请求超时时间",
         "hint": "Steam 和价格查询的单次 HTTP 请求超时时间，单位秒。",
         "default": 15
+      },
+      "reuse_identical_query_cache": {
+        "type": "bool",
+        "description": "复用顺序相同的推荐查询缓存",
+        "hint": "关闭后，顺序相同的推荐会重新尝试 Steam 发现召回与语义核验；AppDetails、评测、商店标签、标签词表、发行状态、价格、账号、本地实体索引和 /gamerec_retry 记忆仍会缓存；实时召回失败时可使用最多 7 天的旧发现快照。",
+        "default": false
       }
     }
   }

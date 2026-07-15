@@ -51,7 +51,7 @@ class ConfigSchemaTest(unittest.TestCase):
         )
         self.assertEqual(
             list(group_items(schema, "cache_and_network")),
-            ["cache_ttl_hours", "timeout_seconds"],
+            ["cache_ttl_hours", "timeout_seconds", "reuse_identical_query_cache"],
         )
         for group in GROUP_KEYS:
             with self.subTest(group=group):
@@ -116,6 +116,21 @@ class ConfigSchemaTest(unittest.TestCase):
         self.assertNotIn("/gamerec", review_hint + ratio_setting["hint"])
         self.assertNotIn("索引推荐", review_hint + ratio_setting["hint"])
         self.assertNotIn("/unplayedrec", review_hint + ratio_setting["hint"])
+
+    def test_identical_query_cache_reuse_is_opt_in_and_preserves_other_caches(self) -> None:
+        setting = group_items(load_schema(), "cache_and_network").get(
+            "reuse_identical_query_cache"
+        )
+
+        self.assertIsNotNone(setting)
+        self.assertEqual(setting["type"], "bool")
+        self.assertIs(setting["default"], False)
+        hint = setting["hint"]
+        self.assertIn("Steam 发现召回", hint)
+        self.assertIn("语义核验", hint)
+        self.assertIn("AppDetails", hint)
+        self.assertIn("/gamerec_retry", hint)
+        self.assertIn("7 天", hint)
 
 
 if __name__ == "__main__":

@@ -157,6 +157,7 @@ class SteamClient:
         page_size: int = 20,
         ordering: str = "-relevance",
         language: str | None = None,
+        reuse_cache: bool = True,
     ) -> list[GameCandidate]:
         hits = await self.search_game_refs(
             search=search,
@@ -166,6 +167,7 @@ class SteamClient:
             page_size=page_size,
             ordering=ordering,
             language=language,
+            reuse_cache=reuse_cache,
         )
         games: list[GameCandidate] = []
         for hit in hits:
@@ -186,17 +188,17 @@ class SteamClient:
         page_size: int = 10,
         ordering: str = "-relevance",
         language: str | None = None,
+        reuse_cache: bool = True,
     ) -> list[SteamSearchHit]:
         del ordering, platforms
         query = build_search_query(search, genres or [], tags or [])
-        data = await self._get_json(
-            STEAM_STORE_SEARCH_URL,
+        data = await self._get_store_search_payload(
             {
                 "term": query,
                 "cc": self.default_country,
                 "l": str(language or self.language).strip() or self.language,
             },
-            validator=validate_store_search_payload,
+            reuse_cache=reuse_cache,
         )
         items = data["items"]
         hits: list[SteamSearchHit] = []
@@ -226,6 +228,7 @@ class SteamClient:
         tag_id: int,
         page_size: int = 20,
         start: int = 0,
+        reuse_cache: bool = True,
     ) -> SteamStorefrontPage:
         resolved_tag_id = int(tag_id)
         if resolved_tag_id <= 0:
@@ -240,7 +243,8 @@ class SteamClient:
                 "start": max(int(start), 0),
                 "count": min(max(int(page_size), 1), 60),
                 "infinite": 1,
-            }
+            },
+            reuse_cache=reuse_cache,
         )
         return page
 
@@ -249,6 +253,7 @@ class SteamClient:
         tag_ids: list[int] | tuple[int, ...],
         page_size: int = 40,
         start: int = 0,
+        reuse_cache: bool = True,
     ) -> SteamStorefrontPage:
         resolved = tuple(int(tag_id) for tag_id in tag_ids)
         if len(resolved) != 2 or len(set(resolved)) != 2 or any(
@@ -265,7 +270,8 @@ class SteamClient:
                 "start": max(int(start), 0),
                 "count": min(max(int(page_size), 1), 40),
                 "infinite": 1,
-            }
+            },
+            reuse_cache=reuse_cache,
         )
 
     async def search_storefront_term(
@@ -274,6 +280,7 @@ class SteamClient:
         page_size: int = 20,
         start: int = 0,
         language: str | None = None,
+        reuse_cache: bool = True,
     ) -> SteamStorefrontPage:
         resolved_term = str(term or "").strip()
         if not resolved_term:
@@ -288,7 +295,8 @@ class SteamClient:
                 "start": max(int(start), 0),
                 "count": min(max(int(page_size), 1), 60),
                 "infinite": 1,
-            }
+            },
+            reuse_cache=reuse_cache,
         )
 
     async def search_storefront_company(
@@ -297,6 +305,7 @@ class SteamClient:
         role: str,
         page_size: int = 20,
         start: int = 0,
+        reuse_cache: bool = True,
     ) -> SteamStorefrontPage:
         resolved_term = str(term or "").strip()
         resolved_role = str(role or "").strip().lower()
@@ -314,13 +323,15 @@ class SteamClient:
                 "start": max(int(start), 0),
                 "count": min(max(int(page_size), 1), 20),
                 "infinite": 1,
-            }
+            },
+            reuse_cache=reuse_cache,
         )
 
     async def browse_top_sellers(
         self,
         page_size: int = 60,
         start: int = 0,
+        reuse_cache: bool = True,
     ) -> SteamStorefrontPage:
         return await self._get_storefront_page(
             {
@@ -332,7 +343,8 @@ class SteamClient:
                 "start": max(int(start), 0),
                 "count": min(max(int(page_size), 1), 60),
                 "infinite": 1,
-            }
+            },
+            reuse_cache=reuse_cache,
         )
 
     async def get_game_detail(
@@ -440,6 +452,7 @@ class SteamClient:
         appid: int,
         *,
         allow_unreleased: bool = False,
+        reuse_cache: bool = True,
     ) -> SteamMoreLikeResult:
         resolved_appid = int(appid)
         if resolved_appid <= 0:
@@ -448,18 +461,19 @@ class SteamClient:
         cache_key = f"{self._cache_key(url, {'l': 'english'})}:v1"
         fresh_key = f"{cache_key}:fresh"
         stale_key = f"{cache_key}:stale"
-        fresh = await self.cache.get_json(fresh_key, STOREFRONT_FRESH_TTL_HOURS)
-        if fresh is not None:
-            try:
-                sections, fetched_at = parse_more_like_snapshot(fresh)
-                if self._snapshot_age(fetched_at) <= STOREFRONT_FRESH_TTL_HOURS * 3600:
-                    return select_more_like_hits(
-                        sections,
-                        resolved_appid,
-                        allow_unreleased=allow_unreleased,
-                    )
-            except SteamApiError:
-                pass
+        if reuse_cache:
+            fresh = await self.cache.get_json(fresh_key, STOREFRONT_FRESH_TTL_HOURS)
+            if fresh is not None:
+                try:
+                    sections, fetched_at = parse_more_like_snapshot(fresh)
+                    if self._snapshot_age(fetched_at) <= STOREFRONT_FRESH_TTL_HOURS * 3600:
+                        return select_more_like_hits(
+                            sections,
+                            resolved_appid,
+                            allow_unreleased=allow_unreleased,
+                        )
+                except SteamApiError:
+                    pass
 
         error: SteamApiError
         try:
@@ -598,6 +612,49 @@ class SteamClient:
         await self.cache.set_json(cache_key, data)
         return data
 
+    async def _get_store_search_payload(
+        self,
+        params: dict[str, Any],
+        *,
+        reuse_cache: bool,
+    ) -> dict[str, Any]:
+        cache_key = self._cache_key(STEAM_STORE_SEARCH_URL, params)
+        fresh_key = f"{cache_key}:fresh"
+        stale_key = f"{cache_key}:stale"
+        if reuse_cache:
+            fresh = await self.cache.get_json(fresh_key, STOREFRONT_FRESH_TTL_HOURS)
+            if fresh is not None:
+                try:
+                    validate_store_search_payload(fresh)
+                except SteamApiError:
+                    pass
+                else:
+                    return fresh
+
+        error: SteamApiError
+        try:
+            response = await self._request_get(STEAM_STORE_SEARCH_URL, params)
+            payload = response.json()
+            validate_store_search_payload(payload)
+        except ValueError:
+            error = SteamApiError("Steam 返回了无法解析的 JSON。")
+        except SteamApiError as exc:
+            error = exc
+        else:
+            await self.cache.set_json(fresh_key, payload)
+            await self.cache.set_json(stale_key, payload)
+            return payload
+
+        stale = await self.cache.get_json(stale_key, STOREFRONT_STALE_TTL_HOURS)
+        if stale is not None:
+            try:
+                validate_store_search_payload(stale)
+            except SteamApiError:
+                pass
+            else:
+                return stale
+        raise error
+
     async def _get_game_detail_payload(
         self,
         appid: int,
@@ -653,16 +710,22 @@ class SteamClient:
         await self.cache.set_json(stale_key, snapshot)
         return payload, fetched_at
 
-    async def _get_storefront_page(self, params: dict[str, Any]) -> SteamStorefrontPage:
+    async def _get_storefront_page(
+        self,
+        params: dict[str, Any],
+        *,
+        reuse_cache: bool,
+    ) -> SteamStorefrontPage:
         cache_key = self._cache_key(STEAM_STOREFRONT_SEARCH_URL, params)
         fresh_key = f"{cache_key}:fresh"
         stale_key = f"{cache_key}:stale"
-        fresh = await self.cache.get_json(fresh_key, STOREFRONT_FRESH_TTL_HOURS)
-        if fresh is not None:
-            try:
-                return parse_storefront_page(fresh)
-            except SteamApiError:
-                pass
+        if reuse_cache:
+            fresh = await self.cache.get_json(fresh_key, STOREFRONT_FRESH_TTL_HOURS)
+            if fresh is not None:
+                try:
+                    return parse_storefront_page(fresh)
+                except SteamApiError:
+                    pass
 
         error: SteamApiError
         try:
