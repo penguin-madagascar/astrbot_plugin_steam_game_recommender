@@ -437,11 +437,14 @@ class PriceBridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enriched[0].score, 98)
         self.assertEqual(enriched[1].score, 95)
 
-    async def test_budget_lookup_limit_marks_unchecked_steam_candidates_unknown(self) -> None:
+    async def test_budget_enrichment_prices_deeper_candidate_before_finalizing(self) -> None:
         bridge = FixedPriceBridge(
             {
-                f"Game {index}": price_summary(current_cny=40, lowest_cny=30)
-                for index in range(10)
+                **{
+                    f"Game {index}": price_summary(current_cny=120, lowest_cny=110)
+                    for index in range(10)
+                },
+                "Game 10": price_summary(current_cny=40, lowest_cny=30),
             }
         )
         games = [
@@ -456,31 +459,43 @@ class PriceBridgeTest(unittest.IsolatedAsyncioTestCase):
 
         enriched = await bridge.enrich_ranked_games(games, GamePreference(budget=50))
 
-        unchecked = next(game for game in enriched if game.title == "Game 10")
-        self.assertEqual(len(bridge.lookup_calls), 10)
-        self.assertEqual(unchecked.score_breakdown.budget_adjustment, -2)
+        finalists = enriched[:10]
+        self.assertIn("Game 10", [game.title for game in finalists])
         self.assertTrue(
-            any(
-                item.evidence_id == "budget_price_unknown"
-                for item in unchecked.recommendation_evidence
-            )
+            {game.title for game in finalists}.issubset(set(bridge.lookup_calls))
         )
+        deeper_candidate = next(game for game in finalists if game.title == "Game 10")
+        self.assertIsNotNone(deeper_candidate.price_summary)
+        self.assertEqual(deeper_candidate.score_breakdown.budget_adjustment, 5)
 
     async def test_no_budget_price_lookup_preserves_final_order(self) -> None:
         bridge = FixedPriceBridge(
             {
-                "First": price_summary(current_cny=100, lowest_cny=80),
-                "Second": price_summary(current_cny=10, lowest_cny=5),
+                f"Game {index}": price_summary(
+                    current_cny=100 - index,
+                    lowest_cny=80 - index,
+                )
+                for index in range(11)
             }
         )
         games = [
-            RankedGame(title="First", score=90, platforms=["PC"], stores=["Steam"]),
-            RankedGame(title="Second", score=80, platforms=["PC"], stores=["Steam"]),
+            RankedGame(
+                title=f"Game {index}",
+                score=100 - index,
+                platforms=["PC"],
+                stores=["Steam"],
+            )
+            for index in range(11)
         ]
 
         enriched = await bridge.enrich_ranked_games(games, GamePreference())
 
-        self.assertEqual([game.title for game in enriched], ["First", "Second"])
+        self.assertEqual(
+            [game.title for game in enriched],
+            [game.title for game in games],
+        )
+        self.assertEqual(len(bridge.lookup_calls), 10)
+        self.assertIsNone(enriched[-1].price_summary)
 
     async def test_price_lookup_concurrency_is_capped_at_four(self) -> None:
         bridge = ConcurrentPriceBridge()

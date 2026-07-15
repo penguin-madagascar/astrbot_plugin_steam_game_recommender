@@ -155,12 +155,11 @@ class SteamPriceBridge:
         async def enrich_one(index: int, game: RankedGame) -> RankedGame:
             if not has_steam_purchase_signal(game):
                 return game
-            if index >= self.lookup_limit:
-                return (
-                    attach_missing_price_warning(game)
-                    if preference.budget is not None
-                    else game
-                )
+            # A budget adjustment can pull any same-tier candidate into the
+            # final window, so the display-only lookup cap is safe only when
+            # price cannot change the ranking.
+            if preference.budget is None and index >= self.lookup_limit:
+                return game
             async with semaphore:
                 summary = await self.lookup(game.title, country)
             return attach_price_summary(game, summary, preference)
