@@ -135,6 +135,16 @@ class SteamGameRecommenderPlugin(Star):
             MAX_RECOMMENDATION_COUNT,
         )
         self.provider_id = str(model_config.get("llm_provider_id", "") or "").strip()
+        self.semantic_verification_batch_size = min(
+            max(
+                safe_int(
+                    model_config.get("semantic_verification_batch_size"),
+                    5,
+                ),
+                1,
+            ),
+            10,
+        )
         self.default_region = normalize_region(str(price_config.get("default_region") or "CN"))
         self.http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout),
@@ -546,6 +556,7 @@ class SteamGameRecommenderPlugin(Star):
                         self.context,
                         self.cache,
                         provider_id=resolved_provider_id,
+                        batch_size=self.semantic_verification_batch_size,
                         locale=str(
                             getattr(self.steam_client, "language", "schinese")
                             or "schinese"

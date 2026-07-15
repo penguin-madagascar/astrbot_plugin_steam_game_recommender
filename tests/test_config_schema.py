@@ -30,7 +30,11 @@ class ConfigSchemaTest(unittest.TestCase):
         self.assertEqual(list(schema), GROUP_KEYS)
         self.assertEqual(
             list(group_items(schema, "model_and_access")),
-            ["llm_provider_id", "steam_api_key"],
+            [
+                "llm_provider_id",
+                "semantic_verification_batch_size",
+                "steam_api_key",
+            ],
         )
         self.assertEqual(
             list(group_items(schema, "price_and_region")),
@@ -64,6 +68,13 @@ class ConfigSchemaTest(unittest.TestCase):
         )
         self.assertTrue(items["llm_provider_id"]["hint"].startswith("‼️留空时"))
         self.assertEqual(items["llm_provider_id"]["_special"], "select_provider")
+        batch_size = items.get("semantic_verification_batch_size")
+        self.assertIsNotNone(batch_size)
+        self.assertEqual(batch_size["type"], "int")
+        self.assertEqual(batch_size["default"], 5)
+        self.assertIn("语义特征", batch_size["description"])
+        self.assertIn("1", batch_size["hint"])
+        self.assertIn("10", batch_size["hint"])
         steam_key = items["steam_api_key"]
         self.assertEqual(steam_key["type"], "string")
         self.assertEqual(steam_key["default"], "")

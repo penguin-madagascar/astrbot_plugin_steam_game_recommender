@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import importlib.util
 import json
 import unittest
 from types import SimpleNamespace
 
+from astrbot_plugin_steam_game_recommender.services.formatter import format_game_block
 from astrbot_plugin_steam_game_recommender.services.ranking_precedence import effective_score
 from astrbot_plugin_steam_game_recommender.storage.models import (
     GameCandidate,
@@ -21,6 +23,17 @@ MODULE = (
 
 
 class SemanticFeatureVerifierContractTest(unittest.TestCase):
+    def salvaged(self, module, raw_text, features, candidates, **kwargs):
+        try:
+            return module.validate_verdict_response(
+                raw_text,
+                features,
+                candidates,
+                **kwargs,
+            )
+        except module.FeatureVerificationContractError as exc:
+            self.fail(f"parseable verdict arrays must be salvaged: {exc}")
+
     def test_typed_batch_contract_is_available(self) -> None:
         spec = importlib.util.find_spec(MODULE)
         self.assertIsNotNone(spec)
@@ -29,6 +42,7 @@ class SemanticFeatureVerifierContractTest(unittest.TestCase):
         for name in (
             "FeatureVerdict",
             "FeatureVerificationNotice",
+            "FeatureVerificationFailure",
             "FeatureVerificationOutcome",
             "SemanticFeatureVerifier",
         ):
@@ -77,6 +91,9 @@ class SemanticFeatureVerifierContractTest(unittest.TestCase):
         ]
         payload = module.build_verification_payload(features, candidates)
 
+        self.assertEqual(module.FEATURE_PROMPT_VERSION, "semantic-feature-v3")
+        self.assertEqual(module.FEATURE_SCHEMA_VERSION, "feature-verdict-v2")
+
         self.assertEqual(
             set(payload["candidates"][0]),
             {
@@ -124,7 +141,8 @@ class SemanticFeatureVerifierContractTest(unittest.TestCase):
                 },
             ]
         }
-        verdicts = module.validate_verdict_response(
+        verdicts = self.salvaged(
+            module,
             json.dumps(valid),
             features,
             candidates,
@@ -132,8 +150,7 @@ class SemanticFeatureVerifierContractTest(unittest.TestCase):
         self.assertEqual(len(verdicts), 4)
 
         invalid_cases = {
-            "cardinality": valid["verdicts"][:-1],
-            "duplicate": [*valid["verdicts"][:-1], valid["verdicts"][0]],
+            "missing": valid["verdicts"][:-1],
             "appid": [{**valid["verdicts"][0], "appid": 99}, *valid["verdicts"][1:]],
             "constraint": [
                 {**valid["verdicts"][0], "constraint_id": "invented"},
@@ -156,16 +173,59 @@ class SemanticFeatureVerifierContractTest(unittest.TestCase):
                 *valid["verdicts"][1:],
             ],
         }
-        error_type = module.FeatureVerificationContractError
         for label, verdict_items in invalid_cases.items():
-            with self.subTest(label=label), self.assertRaises(error_type):
-                module.validate_verdict_response(
+            with self.subTest(label=label):
+                salvaged = self.salvaged(
+                    module,
                     json.dumps({"verdicts": verdict_items}),
                     features,
                     candidates,
                 )
+                self.assertEqual(len(salvaged), 3)
 
-    def test_contract_rejects_json_prefix_suffix_fences_and_blank_decisive_quote(self) -> None:
+        identical_duplicate = self.salvaged(
+            module,
+            json.dumps({"verdicts": [*valid["verdicts"], valid["verdicts"][0]]}),
+            features,
+            candidates,
+        )
+        self.assertEqual(len(identical_duplicate), 4)
+
+        conflicting_duplicate = self.salvaged(
+            module,
+            json.dumps(
+                {
+                    "verdicts": [
+                        *valid["verdicts"],
+                        {**valid["verdicts"][0], "status": "unknown", "evidence_quote": ""},
+                    ]
+                }
+            ),
+            features,
+            candidates,
+        )
+        self.assertEqual(len(conflicting_duplicate), 3)
+        self.assertNotIn(
+            (10, "branching", "positive"),
+            {(item.appid, item.constraint_id, item.polarity) for item in conflicting_duplicate},
+        )
+
+        with_unknown_pair = self.salvaged(
+            module,
+            json.dumps(
+                {
+                    "verdicts": [
+                        *valid["verdicts"],
+                        {**valid["verdicts"][0], "appid": 999},
+                    ]
+                }
+            ),
+            features,
+            candidates,
+        )
+        self.assertEqual(len(with_unknown_pair), 4)
+
+    def test_contract_accepts_json_prefix_suffix_and_fences_but_salvages_blank_quote(self) -> None:
         module = importlib.import_module(MODULE)
         feature = SoftFeature(
             constraint_id="branching",
@@ -191,10 +251,24 @@ class SemanticFeatureVerifierContractTest(unittest.TestCase):
             ]
         }
         raw = json.dumps(payload)
-        invalid_responses = (
+        wrapped_responses = (
             f"analysis\n{raw}",
             f"{raw}\nthanks",
             f"```json\n{raw}\n```",
+        )
+
+        for response in wrapped_responses:
+            with self.subTest(response=response):
+                verdicts = self.salvaged(
+                    module,
+                    response,
+                    [feature],
+                    [candidate],
+                )
+                self.assertEqual(len(verdicts), 1)
+
+        blank_quote = self.salvaged(
+            module,
             json.dumps(
                 {
                     "verdicts": [
@@ -205,13 +279,17 @@ class SemanticFeatureVerifierContractTest(unittest.TestCase):
                     ]
                 }
             ),
+            [feature],
+            [candidate],
         )
+        self.assertEqual(blank_quote, ())
 
-        for response in invalid_responses:
-            with self.subTest(response=response), self.assertRaises(
-                module.FeatureVerificationContractError
-            ):
-                module.validate_verdict_response(response, [feature], [candidate])
+        with self.assertRaises(module.FeatureVerificationContractError):
+            module.validate_verdict_response(
+                json.dumps({"verdicts": payload["verdicts"], "extra": True}),
+                [feature],
+                [candidate],
+            )
 
     def test_contract_rejects_title_as_decisive_feature_evidence(self) -> None:
         module = importlib.import_module(MODULE)
@@ -244,8 +322,10 @@ class SemanticFeatureVerifierContractTest(unittest.TestCase):
             }
         )
 
-        with self.assertRaises(module.FeatureVerificationContractError):
-            module.validate_verdict_response(response, [feature], [candidate])
+        self.assertEqual(
+            self.salvaged(module, response, [feature], [candidate]),
+            (),
+        )
 
     def test_verifier_evidence_and_quotes_have_deterministic_bounds(self) -> None:
         module = importlib.import_module(MODULE)
@@ -268,6 +348,7 @@ class SemanticFeatureVerifierContractTest(unittest.TestCase):
         evidence = payload["candidates"][0]
 
         self.assertLessEqual(len(evidence["title"]), module.MAX_EVIDENCE_TITLE_CHARS)
+        self.assertEqual(module.MAX_EVIDENCE_TITLE_CHARS, 256)
         self.assertLessEqual(
             len(evidence["ordered_tags"]),
             module.MAX_EVIDENCE_LIST_ITEMS,
@@ -282,14 +363,17 @@ class SemanticFeatureVerifierContractTest(unittest.TestCase):
             len(evidence["short_description"]),
             module.MAX_SHORT_DESCRIPTION_CHARS,
         )
+        self.assertEqual(module.MAX_SHORT_DESCRIPTION_CHARS, 1_000)
         self.assertLessEqual(
             len(evidence["detailed_description"]),
             module.MAX_DETAILED_DESCRIPTION_CHARS,
         )
+        self.assertEqual(module.MAX_DETAILED_DESCRIPTION_CHARS, 4_000)
         self.assertNotIn("TAIL_NOT_TRANSMITTED", evidence["detailed_description"])
 
-        with self.assertRaises(module.FeatureVerificationContractError):
-            module.validate_verdict_response(
+        self.assertEqual(
+            self.salvaged(
+                module,
                 json.dumps(
                     {
                         "verdicts": [
@@ -305,7 +389,36 @@ class SemanticFeatureVerifierContractTest(unittest.TestCase):
                 ),
                 [feature],
                 [candidate],
-            )
+            ),
+            (),
+        )
+
+    def test_size_split_never_builds_requests_for_candidates_without_missing_pairs(self) -> None:
+        module = importlib.import_module(MODULE)
+        feature = SoftFeature(
+            constraint_id="oversized-general-constraint",
+            source_span="X" * 50_000,
+            normalized_text="Y" * 50_000,
+            role="core",
+            polarity="positive",
+        )
+        candidates = tuple(
+            GameCandidate(appid=appid, title=f"Candidate {appid}")
+            for appid in range(1, 6)
+        )
+        missing = ((5, "oversized-general-constraint", "positive"),)
+
+        requests, failed = module.build_verification_requests(
+            (feature,),
+            candidates,
+            missing,
+            batch_size=5,
+            prompt_version=module.FEATURE_PROMPT_VERSION,
+            schema_version=module.FEATURE_SCHEMA_VERSION,
+        )
+
+        self.assertEqual(requests, ())
+        self.assertEqual(failed, missing)
 
 
 class MemoryCache:
@@ -341,7 +454,50 @@ class FakeContext:
         response = self.responses.pop(0)
         if isinstance(response, Exception):
             raise response
-        return SimpleNamespace(completion_text=json.dumps(response))
+        if callable(response):
+            response = response(kwargs)
+        text = response if isinstance(response, str) else json.dumps(response)
+        return SimpleNamespace(completion_text=text)
+
+
+def request_payload(call: dict) -> dict:
+    return json.loads(call["prompt"].split("INPUT=", 1)[1])
+
+
+def build_verifier(testcase, module, context, cache, **kwargs):
+    try:
+        return module.SemanticFeatureVerifier(context, cache, **kwargs)
+    except TypeError as exc:
+        testcase.fail(f"semantic verifier constructor rejected runtime options: {exc}")
+
+
+class EchoUnknownContext:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    async def llm_generate(self, **kwargs):
+        self.calls.append(kwargs)
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        await asyncio.sleep(0.01)
+        payload = request_payload(kwargs)
+        self.in_flight -= 1
+        return SimpleNamespace(
+            completion_text=json.dumps(
+                {
+                    "verdicts": [
+                        {
+                            **request,
+                            "status": "unknown",
+                            "evidence_quote": "",
+                        }
+                        for request in payload["requests"]
+                    ]
+                }
+            )
+        )
 
 
 class SemanticFeatureVerifierCacheTest(unittest.IsolatedAsyncioTestCase):
@@ -416,7 +572,18 @@ class SemanticFeatureVerifierCacheTest(unittest.IsolatedAsyncioTestCase):
                             "evidence_quote": " ",
                         }
                     ]
-                }
+                },
+                {
+                    "verdicts": [
+                        {
+                            "appid": 10,
+                            "constraint_id": "branching",
+                            "polarity": "positive",
+                            "status": "satisfied",
+                            "evidence_quote": " ",
+                        }
+                    ]
+                },
             ]
         )
         verifier = module.SemanticFeatureVerifier(context, cache)
@@ -442,6 +609,14 @@ class SemanticFeatureVerifierCacheTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(outcome.verdicts, ())
         self.assertEqual(cache.writes, [])
+        self.assertEqual(len(context.calls), 2)
+        self.assertEqual(
+            [
+                (item.appid, item.constraint_id, item.kind)
+                for item in getattr(outcome, "failures", ())
+            ],
+            [(10, "branching", "contract")],
+        )
         self.assertEqual(
             [notice.code for notice in outcome.notices],
             ["semantic_feature_contract_failure"],
@@ -526,25 +701,41 @@ class SemanticFeatureVerifierCacheTest(unittest.IsolatedAsyncioTestCase):
         )
         cases = (
             (
-                {"verdicts": []},
+                [{"verdicts": []}, {"verdicts": []}],
                 "semantic_feature_contract_failure",
+                "contract",
+                2,
             ),
-            (RuntimeError("provider unavailable"), "semantic_feature_provider_failure"),
+            (
+                [RuntimeError("provider unavailable")],
+                "semantic_feature_provider_failure",
+                "provider",
+                1,
+            ),
         )
-        for response, notice_code in cases:
+        for responses, notice_code, failure_kind, call_count in cases:
             with self.subTest(notice_code=notice_code):
                 cache = MemoryCache()
+                context = FakeContext(responses)
                 verifier = module.SemanticFeatureVerifier(
-                    FakeContext([response]),
+                    context,
                     cache,
                     provider_id="provider-a",
                 )
                 outcome = await verifier.verify(features=[feature], candidates=[candidate])
                 self.assertEqual(outcome.verdicts, ())
-                self.assertEqual(outcome.notices[0].code, notice_code)
+                self.assertEqual(
+                    [notice.code for notice in outcome.notices],
+                    [notice_code],
+                )
+                self.assertEqual(
+                    [item.kind for item in getattr(outcome, "failures", ())],
+                    [failure_kind],
+                )
+                self.assertEqual(len(context.calls), call_count)
                 self.assertEqual(cache.writes, [])
 
-    async def test_one_invalid_pair_aborts_the_entire_batch_without_partial_cache_writes(self) -> None:
+    async def test_one_invalid_pair_is_repaired_without_discarding_valid_cache_write(self) -> None:
         module = importlib.import_module(MODULE)
         feature = SoftFeature(
             constraint_id="branching",
@@ -576,7 +767,18 @@ class SemanticFeatureVerifierCacheTest(unittest.IsolatedAsyncioTestCase):
                             "evidence_quote": "quote not in evidence",
                         },
                     ]
-                }
+                },
+                {
+                    "verdicts": [
+                        {
+                            "appid": 20,
+                            "constraint_id": "branching",
+                            "polarity": "positive",
+                            "status": "unknown",
+                            "evidence_quote": "",
+                        }
+                    ]
+                },
             ]
         )
         cache = MemoryCache()
@@ -587,9 +789,220 @@ class SemanticFeatureVerifierCacheTest(unittest.IsolatedAsyncioTestCase):
             provider_id="provider-a",
         ).verify(features=[feature], candidates=candidates)
 
-        self.assertEqual(outcome.verdicts, ())
-        self.assertEqual(outcome.notices[0].code, "semantic_feature_contract_failure")
-        self.assertEqual(cache.writes, [])
+        self.assertEqual([item.appid for item in outcome.verdicts], [10, 20])
+        self.assertEqual(outcome.notices, ())
+        self.assertEqual(getattr(outcome, "failures", ()), ())
+        self.assertEqual(len(cache.writes), 2)
+        self.assertEqual(len(context.calls), 2)
+        repair = request_payload(context.calls[1])
+        self.assertEqual(repair["requests"], [
+            {
+                "appid": 20,
+                "constraint_id": "branching",
+                "polarity": "positive",
+            }
+        ])
+        self.assertEqual([item["appid"] for item in repair["candidates"]], [20])
+        self.assertEqual(
+            [item["constraint_id"] for item in repair["constraints"]],
+            ["branching"],
+        )
+
+    async def test_twenty_candidates_use_four_size_five_batches_with_concurrency_two(self) -> None:
+        module = importlib.import_module(MODULE)
+        feature = SoftFeature(
+            constraint_id="adaptive-dialogue",
+            source_span="对话会响应选择",
+            normalized_text="dialogue responds to choices",
+            role="optional",
+            polarity="positive",
+        )
+        candidates = [
+            GameCandidate(
+                appid=appid,
+                title=f"Candidate {appid}",
+                short_description="Dialogue reacts to player decisions.",
+            )
+            for appid in range(1, 21)
+        ]
+        context = EchoUnknownContext()
+        verifier = build_verifier(
+            self,
+            module,
+            context,
+            MemoryCache(),
+            batch_size=5,
+        )
+
+        outcome = await verifier.verify(features=[feature], candidates=candidates)
+
+        self.assertEqual(len(context.calls), 4)
+        self.assertEqual(
+            [
+                [candidate["appid"] for candidate in request_payload(call)["candidates"]]
+                for call in context.calls
+            ],
+            [
+                list(range(1, 6)),
+                list(range(6, 11)),
+                list(range(11, 16)),
+                list(range(16, 21)),
+            ],
+        )
+        self.assertEqual(context.max_in_flight, 2)
+        self.assertEqual(len(outcome.verdicts), 20)
+        self.assertEqual(getattr(outcome, "failures", ()), ())
+
+    async def test_large_evidence_is_compressed_or_split_below_input_limit(self) -> None:
+        module = importlib.import_module(MODULE)
+        feature = SoftFeature(
+            constraint_id="persistent-world-state",
+            source_span="世界状态会持续变化",
+            normalized_text="persistent world state changes",
+            role="core",
+            polarity="positive",
+        )
+        candidates = [
+            GameCandidate(
+                appid=appid,
+                title="T" * 1_000,
+                ordered_tags=[f"tag-{index}-" + "x" * 300 for index in range(40)],
+                genres=[f"genre-{index}-" + "y" * 300 for index in range(40)],
+                categories=[f"category-{index}-" + "z" * 300 for index in range(40)],
+                short_description="S" * 10_000,
+                detailed_description="D" * 20_000,
+            )
+            for appid in range(1, 11)
+        ]
+        context = EchoUnknownContext()
+        verifier = build_verifier(
+            self,
+            module,
+            context,
+            MemoryCache(),
+            batch_size=10,
+        )
+
+        outcome = await verifier.verify(features=[feature], candidates=candidates)
+
+        payloads = [request_payload(call) for call in context.calls]
+        self.assertEqual(len(outcome.verdicts), 10)
+        self.assertTrue(payloads)
+        self.assertTrue(
+            all(len(module.canonical_json(payload)) <= 48_000 for payload in payloads)
+        )
+        self.assertTrue(
+            any(
+                len(candidate["detailed_description"])
+                < module.MAX_DETAILED_DESCRIPTION_CHARS
+                for payload in payloads
+                for candidate in payload["candidates"]
+            )
+        )
+
+    async def test_provider_failure_does_not_repair_and_other_batch_survives(self) -> None:
+        module = importlib.import_module(MODULE)
+        feature = SoftFeature(
+            constraint_id="reactive-companions",
+            source_span="同伴会记住决定",
+            normalized_text="companions remember decisions",
+            role="core",
+            polarity="positive",
+        )
+        context = FakeContext(
+            [
+                RuntimeError("provider unavailable"),
+                {
+                    "verdicts": [
+                        {
+                            "appid": 20,
+                            "constraint_id": "reactive-companions",
+                            "polarity": "positive",
+                            "status": "unknown",
+                            "evidence_quote": "",
+                        }
+                    ]
+                },
+            ]
+        )
+        cache = MemoryCache()
+        verifier = build_verifier(
+            self,
+            module,
+            context,
+            cache,
+            batch_size=1,
+        )
+
+        outcome = await verifier.verify(
+            features=[feature],
+            candidates=[
+                GameCandidate(appid=10, title="One"),
+                GameCandidate(appid=20, title="Two"),
+            ],
+        )
+
+        self.assertEqual(len(context.calls), 2)
+        self.assertEqual([item.appid for item in outcome.verdicts], [20])
+        failures = getattr(outcome, "failures", ())
+        self.assertEqual(
+            [(item.appid, item.constraint_id, item.polarity, item.kind) for item in failures],
+            [(10, "reactive-companions", "positive", "provider")],
+        )
+        self.assertEqual(len(cache.writes), 1)
+
+    async def test_repair_provider_failure_keeps_first_pass_valid_pair_only(self) -> None:
+        module = importlib.import_module(MODULE)
+        feature = SoftFeature(
+            constraint_id="environmental-storytelling",
+            source_span="环境会讲述历史",
+            normalized_text="environment communicates history",
+            role="optional",
+            polarity="positive",
+        )
+        context = FakeContext(
+            [
+                {
+                    "verdicts": [
+                        {
+                            "appid": 10,
+                            "constraint_id": "environmental-storytelling",
+                            "polarity": "positive",
+                            "status": "satisfied",
+                            "evidence_quote": "environment reveals its history",
+                        },
+                        {
+                            "appid": 20,
+                            "constraint_id": "environmental-storytelling",
+                            "polarity": "positive",
+                            "status": "satisfied",
+                            "evidence_quote": "invented quote",
+                        },
+                    ]
+                },
+                RuntimeError("repair provider unavailable"),
+            ]
+        )
+        cache = MemoryCache()
+        verifier = module.SemanticFeatureVerifier(context, cache)
+
+        outcome = await verifier.verify(
+            features=[feature],
+            candidates=[
+                GameCandidate(
+                    appid=10,
+                    title="One",
+                    short_description="The environment reveals its history.",
+                ),
+                GameCandidate(appid=20, title="Two", short_description="No details."),
+            ],
+        )
+
+        self.assertEqual([item.appid for item in outcome.verdicts], [10])
+        self.assertEqual(len(cache.writes), 1)
+        self.assertEqual(len(context.calls), 2)
+        failures = getattr(outcome, "failures", ())
+        self.assertEqual([(item.appid, item.kind) for item in failures], [(20, "provider")])
 
     async def test_cache_read_or_write_failure_keeps_fresh_verdict_with_typed_notice(self) -> None:
         module = importlib.import_module(MODULE)
@@ -664,7 +1077,7 @@ class SemanticFeatureVerifierCacheTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("secret", outcome.notices[0].message)
         self.assertNotIn("/private", outcome.notices[0].message)
 
-    async def test_cache_identity_covers_constraint_evidence_versions_provider_and_locale(self) -> None:
+    async def test_cache_identity_covers_versions_provider_locale_and_evidence(self) -> None:
         module = importlib.import_module(MODULE)
         feature = SoftFeature(
             constraint_id="branching",
@@ -970,23 +1383,29 @@ class SemanticFeatureVerifierCacheTest(unittest.IsolatedAsyncioTestCase):
 
 
 class SemanticFeaturePolicyTest(unittest.TestCase):
-    def ranked(self, appid: int) -> RankedGame:
+    def ranked(
+        self,
+        appid: int,
+        *,
+        layer_score: float = 0.40,
+        relevance_tier: str = "broad",
+    ) -> RankedGame:
         return RankedGame.from_candidate(
             GameCandidate(appid=appid, title=f"Game {appid}", app_type="game"),
             40,
             ScoreBreakdown(
-                relevance_tier="broad",
+                relevance_tier=relevance_tier,
                 supporting_similarity=0.40,
                 semantic_score=0.40,
                 quality_score=0.40,
-                layer_score=0.40,
+                layer_score=layer_score,
                 retrieval_rank=appid,
-                positive_score=40,
+                positive_score=layer_score * 100,
             ),
             [],
         )
 
-    def test_core_keeps_only_satisfied_and_never_emits_unverified_tail(self) -> None:
+    def test_core_filters_explicit_unknown_violated_and_unverified_tail(self) -> None:
         module = importlib.import_module(MODULE)
         feature = SoftFeature(
             constraint_id="branching",
@@ -1002,8 +1421,12 @@ class SemanticFeaturePolicyTest(unittest.TestCase):
                     appid=appid,
                     constraint_id="branching",
                     polarity="positive",
-                    status="satisfied" if appid != 2 else "unknown",
-                    evidence_quote="evidence" if appid != 2 else "",
+                    status=(
+                        "unknown"
+                        if appid == 2
+                        else "violated" if appid == 3 else "satisfied"
+                    ),
+                    evidence_quote="" if appid == 2 else "evidence",
                 )
                 for appid in range(1, 21)
             )
@@ -1011,7 +1434,63 @@ class SemanticFeaturePolicyTest(unittest.TestCase):
 
         filtered = module.apply_feature_verdicts(games, [feature], outcome)
 
-        self.assertEqual([game.appid for game in filtered], [1, *range(3, 21)])
+        self.assertEqual([game.appid for game in filtered], [1, *range(4, 21)])
+
+    def test_technical_core_failure_is_retained_with_caution_after_verified_peer(self) -> None:
+        module = importlib.import_module(MODULE)
+        feature = SoftFeature(
+            constraint_id="world-reactivity",
+            source_span="世界会响应玩家行为",
+            normalized_text="world reacts to player actions",
+            role="core",
+            polarity="positive",
+        )
+        games = [
+            self.ranked(1, layer_score=0.20),
+            self.ranked(2, layer_score=0.90),
+            self.ranked(3, layer_score=0.80),
+            self.ranked(21, layer_score=0.95),
+            self.ranked(22, layer_score=0.99, relevance_tier="C"),
+        ]
+        outcome = module.FeatureVerificationOutcome(
+            verdicts=(
+                module.FeatureVerdict(
+                    1,
+                    "world-reactivity",
+                    "positive",
+                    "satisfied",
+                    "reactive evidence",
+                ),
+                module.FeatureVerdict(
+                    3,
+                    "world-reactivity",
+                    "positive",
+                    "unknown",
+                    "",
+                ),
+            ),
+            failures=(
+                module.FeatureVerificationFailure(
+                    2,
+                    "world-reactivity",
+                    "positive",
+                    "provider",
+                ),
+            ),
+        )
+
+        applied = module.apply_feature_verdicts(games, [feature], outcome)
+
+        self.assertEqual([game.appid for game in applied], [1, 2])
+        caution = next(
+            item
+            for item in applied[1].recommendation_evidence
+            if item.evidence_id == "semantic_feature:world-reactivity:technical_failure"
+        )
+        self.assertEqual(caution.sentiment, "uncertain")
+        self.assertTrue(caution.important)
+        self.assertIn("世界会响应玩家行为", caution.text)
+        self.assertIn("服务异常", caution.text)
 
     def test_optional_unknown_and_violated_keep_exact_baseline_score(self) -> None:
         module = importlib.import_module(MODULE)
@@ -1022,14 +1501,22 @@ class SemanticFeaturePolicyTest(unittest.TestCase):
             role="optional",
             polarity="positive",
         )
-        games = [self.ranked(appid) for appid in (1, 2, 3)]
+        games = [self.ranked(appid) for appid in (1, 2, 3, 4)]
         baseline = {game.appid: effective_score(game.score_breakdown) for game in games}
         outcome = module.FeatureVerificationOutcome(
             verdicts=(
                 module.FeatureVerdict(1, "branching", "positive", "satisfied", "branch"),
                 module.FeatureVerdict(2, "branching", "positive", "unknown", ""),
                 module.FeatureVerdict(3, "branching", "positive", "violated", "linear"),
-            )
+            ),
+            failures=(
+                module.FeatureVerificationFailure(
+                    4,
+                    "branching",
+                    "positive",
+                    "contract",
+                ),
+            ),
         )
 
         applied = module.apply_feature_verdicts(games, [feature], outcome)
@@ -1038,11 +1525,18 @@ class SemanticFeaturePolicyTest(unittest.TestCase):
         self.assertGreater(effective_score(by_appid[1].score_breakdown), baseline[1])
         self.assertEqual(effective_score(by_appid[2].score_breakdown), baseline[2])
         self.assertEqual(effective_score(by_appid[3].score_breakdown), baseline[3])
+        self.assertEqual(effective_score(by_appid[4].score_breakdown), baseline[4])
         self.assertTrue(
-            any(item.evidence_id == "semantic_feature:branching:unknown" for item in by_appid[2].recommendation_evidence)
+            any(
+                item.evidence_id == "semantic_feature:branching:unknown"
+                for item in by_appid[2].recommendation_evidence
+            )
         )
         self.assertTrue(
-            any(item.evidence_id == "semantic_feature:branching:violated" for item in by_appid[3].recommendation_evidence)
+            any(
+                item.evidence_id == "semantic_feature:branching:violated"
+                for item in by_appid[3].recommendation_evidence
+            )
         )
         unknown = next(
             item
@@ -1058,6 +1552,18 @@ class SemanticFeaturePolicyTest(unittest.TestCase):
         self.assertTrue(unknown.important)
         self.assertEqual(violated.sentiment, "negative")
         self.assertTrue(violated.important)
+        technical = next(
+            (
+                item
+                for item in by_appid[4].recommendation_evidence
+                if item.evidence_id == "semantic_feature:branching:technical_failure"
+            ),
+            None,
+        )
+        self.assertIsNotNone(technical)
+        self.assertEqual(technical.sentiment, "uncertain")
+        self.assertTrue(technical.important)
+        self.assertIn("响应契约异常", technical.text)
 
 
 class RecordingVerifier:
@@ -1084,8 +1590,33 @@ class RecordingVerifier:
         )
 
 
+class TechnicalFailureVerifier(RecordingVerifier):
+    async def verify(self, *, features, candidates):
+        selected_features = list(features)
+        selected_candidates = list(candidates)
+        self.calls.append((selected_features, selected_candidates))
+        return self.module.FeatureVerificationOutcome(
+            failures=tuple(
+                self.module.FeatureVerificationFailure(
+                    int(candidate.appid),
+                    feature.constraint_id,
+                    feature.polarity,
+                    "provider",
+                )
+                for candidate in selected_candidates
+                for feature in selected_features
+            ),
+            notices=(
+                self.module.FeatureVerificationNotice(
+                    "semantic_feature_provider_failure",
+                    "provider notice",
+                ),
+            ),
+        )
+
+
 class SemanticFeaturePipelineTest(unittest.IsolatedAsyncioTestCase):
-    async def test_only_top_twenty_ab_candidates_are_verified_and_core_tail_is_removed(self) -> None:
+    async def test_only_top_twenty_ab_candidates_are_verified(self) -> None:
         module = importlib.import_module(MODULE)
         feature = SoftFeature(
             constraint_id="branching",
@@ -1164,6 +1695,66 @@ class SemanticFeaturePipelineTest(unittest.IsolatedAsyncioTestCase):
             list(range(1, 21)),
         )
         self.assertEqual([game.appid for game in outcome.games], list(range(1, 21)))
+
+    async def test_required_failures_keep_attempted_candidates_with_strong_notice(self) -> None:
+        module = importlib.import_module(MODULE)
+        feature = SoftFeature(
+            constraint_id="consequence-persistence",
+            source_span="之前的决定会留下后果",
+            normalized_text="earlier decisions have persistent consequences",
+            role="required",
+            polarity="positive",
+        )
+        games = [
+            RankedGame.from_candidate(
+                GameCandidate(appid=appid, title=f"Candidate {appid}", app_type="game"),
+                50,
+                ScoreBreakdown(
+                    relevance_tier="C" if appid == 22 else "broad",
+                    semantic_score=0.5,
+                    quality_score=0.5,
+                    layer_score=0.5,
+                    positive_score=50,
+                    retrieval_rank=appid,
+                ),
+                [],
+            )
+            for appid in range(1, 23)
+        ]
+        verifier = TechnicalFailureVerifier(module)
+
+        outcome = await module.verify_ranked_features(games, [feature], verifier)
+
+        self.assertEqual(
+            [game.appid for game in verifier.calls[0][1]],
+            list(range(1, 21)),
+        )
+        self.assertEqual([game.appid for game in outcome.games], list(range(1, 21)))
+        self.assertNotIn(21, [game.appid for game in outcome.games])
+        self.assertNotIn(22, [game.appid for game in outcome.games])
+        self.assertEqual(
+            [notice.code for notice in outcome.notices],
+            [
+                "semantic_feature_provider_failure",
+                "semantic_feature_required_unverified",
+            ],
+        )
+        self.assertIn("之前的决定会留下后果", outcome.notices[1].message)
+        self.assertTrue(
+            all(
+                any(
+                    item.evidence_id
+                    == "semantic_feature:consequence-persistence:technical_failure"
+                    and item.important
+                    and item.sentiment == "uncertain"
+                    for item in game.recommendation_evidence
+                )
+                for game in outcome.games
+            )
+        )
+        rendered = "\n".join(format_game_block(1, outcome.games[0]))
+        self.assertIn("不推荐理由", rendered)
+        self.assertIn("之前的决定会留下后果", rendered)
 
     async def test_negative_polarity_prompt_defines_status_as_constraint_satisfaction(self) -> None:
         module = importlib.import_module(MODULE)

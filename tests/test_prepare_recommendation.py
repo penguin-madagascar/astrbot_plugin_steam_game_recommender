@@ -98,6 +98,7 @@ class PluginDashboardConfigTest(unittest.TestCase):
         config = {
             "model_and_access": {
                 "llm_provider_id": "provider/nested",
+                "semantic_verification_batch_size": "99",
                 "steam_api_key": "nested-steam-key",
             },
             "price_and_region": {
@@ -147,6 +148,7 @@ class PluginDashboardConfigTest(unittest.TestCase):
             plugin = SteamGameRecommenderPlugin(object(), config)
 
         self.assertEqual(plugin.provider_id, "provider/nested")
+        self.assertEqual(getattr(plugin, "semantic_verification_batch_size", None), 10)
         self.assertFalse(hasattr(plugin, "fallback_provider_id"))
         self.assertEqual(plugin.default_region, "JP")
         self.assertEqual(plugin.max_results, 8)
@@ -174,6 +176,31 @@ class PluginDashboardConfigTest(unittest.TestCase):
             http_client,
             {"default_region": "JP"},
         )
+
+    def test_semantic_verification_batch_size_defaults_and_clamps_safely(self) -> None:
+        def build(value=...):
+            model_config = {} if value is ... else {"semantic_verification_batch_size": value}
+            with (
+                patch.object(main_module.httpx, "AsyncClient", return_value=object()),
+                patch.object(main_module, "SQLiteCacheRepository", return_value=object()),
+                patch.object(main_module, "SteamClient"),
+                patch.object(main_module, "PreferenceParser"),
+                patch.object(main_module, "SteamGameIndexService"),
+                patch.object(main_module, "SteamPriceBridge") as price_bridge_class,
+            ):
+                price_bridge_class.return_value.is_available.return_value = False
+                return SteamGameRecommenderPlugin(
+                    object(),
+                    {"model_and_access": model_config},
+                )
+
+        self.assertEqual(getattr(build(), "semantic_verification_batch_size", None), 5)
+        self.assertEqual(
+            getattr(build("not-an-int"), "semantic_verification_batch_size", None),
+            5,
+        )
+        self.assertEqual(getattr(build(0), "semantic_verification_batch_size", None), 1)
+        self.assertEqual(getattr(build(11), "semantic_verification_batch_size", None), 10)
 
 
 class PrepareRecommendationTest(unittest.IsolatedAsyncioTestCase):
@@ -459,11 +486,29 @@ class SemanticFeatureMainPipelineTest(unittest.IsolatedAsyncioTestCase):
             run = await plugin._run_recommendation(FakeEvent(), prepared)
 
         self.assertEqual(context.provider_requests, ["qq:test"])
-        self.assertEqual(len(context.calls), 1)
-        payload = json.loads(context.calls[0]["prompt"].split("INPUT=", 1)[1])
+        self.assertEqual(len(context.calls), 4)
+        payloads = [
+            json.loads(call["prompt"].split("INPUT=", 1)[1])
+            for call in context.calls
+        ]
         self.assertEqual(
-            [candidate["appid"] for candidate in payload["candidates"]],
-            list(range(1, 21)),
+            [
+                [candidate["appid"] for candidate in payload["candidates"]]
+                for payload in payloads
+            ],
+            [
+                list(range(1, 6)),
+                list(range(6, 11)),
+                list(range(11, 16)),
+                list(range(16, 21)),
+            ],
+        )
+        self.assertTrue(
+            all(
+                len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+                <= 48_000
+                for payload in payloads
+            )
         )
         self.assertEqual([game.appid for game in run.ranked_games], list(range(1, 21)))
         self.assertEqual(run.run_notices, ())
@@ -484,7 +529,7 @@ class SemanticFeatureMainPipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("semantic_notices=none", rendered_log)
         self.assertIn("semantic_features_ms=", rendered_log)
 
-    async def test_contract_failure_is_request_local_and_core_returns_no_games(self) -> None:
+    async def test_contract_failure_is_request_local_and_core_is_kept_with_caution(self) -> None:
         preference = GamePreference(
             platforms=["steam"],
             soft_features=[
@@ -514,20 +559,30 @@ class SemanticFeatureMainPipelineTest(unittest.IsolatedAsyncioTestCase):
         ):
             run = await plugin._run_recommendation(FakeEvent(), prepared)
 
-        self.assertEqual(run.ranked_games, [])
+        self.assertEqual([game.appid for game in run.ranked_games], [1])
         self.assertEqual(
             [notice.code for notice in run.run_notices],
-            ["semantic_feature_contract_failure"],
+            [
+                "semantic_feature_contract_failure",
+                "semantic_feature_required_unverified",
+            ],
         )
         self.assertEqual(preference.parse_warnings, [])
         self.assertEqual(cache.writes, [])
-        self.assertEqual(len(context.calls), 1)
-        self.assertNotIn("LLM 兜底建议", run.messages[0])
+        self.assertEqual(len(context.calls), 2)
+        rendered_messages = "\n".join(run.messages)
+        self.assertNotIn("LLM 兜底建议", rendered_messages)
+        self.assertNotIn("格式无效，本次未采用整批结果", rendered_messages)
+        self.assertIn("强提示", rendered_messages)
+        self.assertIn("必须有分支剧情", rendered_messages)
+        self.assertIn("不推荐理由", rendered_messages)
+        self.assertIn("响应契约异常", rendered_messages)
         log_args = debug_log.call_args.args
         rendered_log = log_args[0] % log_args[1:]
         self.assertIn("semantic_candidates=1", rendered_log)
         self.assertIn(
-            "semantic_notices=semantic_feature_contract_failure",
+            "semantic_notices=semantic_feature_contract_failure,"
+            "semantic_feature_required_unverified",
             rendered_log,
         )
 
@@ -643,6 +698,7 @@ def semantic_pipeline_plugin(
 ) -> SteamGameRecommenderPlugin:
     plugin = object.__new__(SteamGameRecommenderPlugin)
     plugin.provider_id = ""
+    plugin.semantic_verification_batch_size = 5
     plugin.context = context
     plugin.cache = cache
     plugin.steam_client = SimpleNamespace(language="schinese")

@@ -61,6 +61,9 @@ class PreferenceParserIntentTest(unittest.TestCase):
         ):
             self.assertIn(field, PREFERENCE_SCHEMA_HINT)
         self.assertIn("proxy_tags 只用于召回", PREFERENCE_SCHEMA_HINT)
+        self.assertIn("显式使用“必须”“只接受”等强制措辞时为 required", PREFERENCE_SCHEMA_HINT)
+        self.assertIn("查询中心的具体特性为 core", PREFERENCE_SCHEMA_HINT)
+        self.assertIn("“最好”“如果有”等弱偏好措辞时为 optional", PREFERENCE_SCHEMA_HINT)
         self.assertIn("不得因为 3A、AAA、大作", PREFERENCE_SCHEMA_HINT)
 
     def test_llm_json_fields_are_normalized_by_game_preference(self) -> None:

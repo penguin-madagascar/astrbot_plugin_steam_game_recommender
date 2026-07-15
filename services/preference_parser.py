@@ -64,7 +64,10 @@ PREFERENCE_SCHEMA_HINT = """
   标签词表，并且必须有原文支持，不得自由创造标签。
 - soft_features 最多 3 项，每项包含 constraint_id、source_span、normalized_text、
   role、polarity、proxy_tags。role 只能是 required/core/optional，polarity 只能是
-  positive/negative；source_span 必须逐字复制原文。proxy_tags 只用于召回，不得作为支持证据计分。
+  positive/negative；显式使用“必须”“只接受”等强制措辞时为 required，
+  查询中心的具体特性为 core，“最好”“如果有”等弱偏好措辞时为 optional。
+  source_span 必须逐字复制原文。
+  proxy_tags 只用于召回，不得作为支持证据计分。
 - company_preferences 最多 3 项，每项包含 display_name、aliases、role、strength、
   source_span；只抽取用户明确点名的公司。role 只能是 developer/publisher/either，
   strength 只能是 preferred/strong；display_name 必须对应 source_span 中的实体，

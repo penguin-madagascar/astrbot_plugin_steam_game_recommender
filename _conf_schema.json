@@ -11,6 +11,12 @@
         "_special": "select_provider",
         "default": ""
       },
+      "semantic_verification_batch_size": {
+        "type": "int",
+        "description": "语义特征核验的单批候选数",
+        "hint": "每批提交给模型核验的候选游戏数量；运行时限制为 1–10。",
+        "default": 5
+      },
       "steam_api_key": {
         "type": "string",
         "description": "Steam Web API Key",
