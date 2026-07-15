@@ -71,7 +71,6 @@ from .services.semantic_feature_verifier import (
 )
 from .services.run_notices import RunNotice, dedupe_run_notices
 from .services.steam_index import (
-    STEAM_INDEX_FALLBACK_WARNING,
     STEAM_TAG_RECALL_DEGRADED_WARNING,
     SteamGameIndexService,
     has_supported_steam_platform,
@@ -393,7 +392,7 @@ class SteamGameRecommenderPlugin(Star):
         excluded_titles: list[str] | None = None,
         preferred_appids: list[int] | None = None,
     ):
-        ranked_games = await self.steam_index.recommend(
+        return await self.steam_index.recommend(
             preference,
             limit=limit,
             profile_tag_weights=profile_tag_weights,
@@ -402,11 +401,6 @@ class SteamGameRecommenderPlugin(Star):
             preferred_appids=preferred_appids,
             requested_limit=requested_limit,
         )
-        if ranked_games:
-            return ranked_games
-        if STEAM_INDEX_FALLBACK_WARNING not in preference.parse_warnings:
-            preference.parse_warnings.append(STEAM_INDEX_FALLBACK_WARNING)
-        return []
 
     async def _user_profile_tag_weights(
         self,
@@ -548,8 +542,6 @@ class SteamGameRecommenderPlugin(Star):
             )
             if STEAM_TAG_RECALL_DEGRADED_WARNING in preference.parse_warnings:
                 degradation_reason = "steam_tag_recall"
-            elif STEAM_INDEX_FALLBACK_WARNING in preference.parse_warnings:
-                degradation_reason = "steam_index"
             ranked_games = [
                 game for game in ranked_games if is_confirmed_base_game(game)
             ]

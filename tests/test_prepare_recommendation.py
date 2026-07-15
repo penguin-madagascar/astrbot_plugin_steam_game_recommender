@@ -73,7 +73,11 @@ try:
         recommendation_memory_key,
     )
     from astrbot_plugin_steam_game_recommender.services.run_notices import RunNotice
-    from astrbot_plugin_steam_game_recommender.services.steam_index import STEAM_ONLY_SCOPE_WARNING
+    from astrbot_plugin_steam_game_recommender.services.steam_index import (
+        STEAM_INDEX_FALLBACK_WARNING,
+        STEAM_ONLY_SCOPE_WARNING,
+        STEAM_TAG_RECALL_DEGRADED_WARNING,
+    )
     from astrbot_plugin_steam_game_recommender.services.steam_recall import (
         RecallHealth,
         RecallUnavailableError,
@@ -442,6 +446,92 @@ class PrepareRecommendationTest(unittest.IsolatedAsyncioTestCase):
 
 
 class RecommendationPipelineTest(unittest.IsolatedAsyncioTestCase):
+    async def test_healthy_empty_result_stays_a_normal_empty_result(self) -> None:
+        context = RaisingLlmContext()
+        plugin = empty_pipeline_plugin(context)
+        plugin.fallback_provider_id = ""
+        preference = GamePreference(
+            platforms=["steam"],
+            genres_like=["strategy"],
+        )
+
+        run = await plugin._run_recommendation(
+            FakeEvent(),
+            PreparedRecommendation("Steam strategy", preference, 2),
+        )
+
+        self.assertEqual(run.ranked_games, [])
+        self.assertEqual(preference.parse_warnings, [])
+        self.assertEqual(context.calls, 0)
+        rendered = "\n".join(run.messages)
+        self.assertIn("暂时没有找到满足当前条件的游戏", rendered)
+        self.assertNotIn(STEAM_INDEX_FALLBACK_WARNING, rendered)
+        self.assertNotIn(STEAM_TAG_RECALL_DEGRADED_WARNING, rendered)
+
+    async def test_only_typed_steam_errors_use_the_steam_failure_message(self) -> None:
+        errors = [
+            RecallUnavailableError(RecallHealth()),
+            SteamApiError("steam failed"),
+            RuntimeError("programming error"),
+        ]
+
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                plugin = object.__new__(SteamGameRecommenderPlugin)
+
+                async def prepare(_event, raw_query):
+                    return PreparedRecommendation(
+                        raw_query,
+                        GamePreference(platforms=["steam"]),
+                        2,
+                    )
+
+                async def execute(_event, _prepared):
+                    raise error
+
+                plugin._prepare_recommendation = prepare
+                plugin._run_recommendation = execute
+                plugin._save_recent_recommendation = AsyncMock()
+
+                results = [
+                    result
+                    async for result in plugin.recommend_games(
+                        PlainResultEvent(),
+                        "Steam query",
+                    )
+                ]
+
+                expected_prefix = (
+                    "Steam 查询失败："
+                    if isinstance(error, SteamApiError)
+                    else "游戏推荐失败："
+                )
+                self.assertEqual(results, [("plain", f"{expected_prefix}{error}")])
+                plugin._save_recent_recommendation.assert_not_awaited()
+
+    async def test_partial_tag_recall_degradation_keeps_ranked_results(self) -> None:
+        context = RaisingLlmContext()
+        plugin = empty_pipeline_plugin(
+            context,
+            games=[RankedGame(appid=1, title="Verified Game", app_type="game", score=80)],
+        )
+        plugin.fallback_provider_id = ""
+        preference = GamePreference(
+            platforms=["steam"],
+            parse_warnings=[STEAM_TAG_RECALL_DEGRADED_WARNING],
+        )
+
+        run = await plugin._run_recommendation(
+            FakeEvent(),
+            PreparedRecommendation("Steam query", preference, 2),
+        )
+
+        self.assertEqual([game.appid for game in run.ranked_games], [1])
+        rendered = "\n".join(run.messages)
+        self.assertIn(STEAM_TAG_RECALL_DEGRADED_WARNING, rendered)
+        self.assertNotIn(STEAM_INDEX_FALLBACK_WARNING, rendered)
+        self.assertEqual(context.calls, 0)
+
     async def test_library_snapshot_is_loaded_once_for_profile_and_filtering(self) -> None:
         plugin = object.__new__(SteamGameRecommenderPlugin)
         plugin.provider_id = ""

@@ -240,9 +240,14 @@ class FrozenSteamClient:
             title=item["title"],
             app_type=item.get("app_type", "game"),
             platforms=["PC"],
+            genres=list(item.get("genres", [])),
+            categories=list(item.get("categories", [])),
             stores=["Steam"],
             raw_url=f"https://store.steampowered.com/app/{resolved}/",
             coming_soon=bool(item.get("coming_soon", False)),
+            short_description=item.get("short_description"),
+            detailed_description=item.get("detailed_description"),
+            description=item.get("description"),
         )
 
     async def get_store_page_tags(self, appid: int) -> list[str]:

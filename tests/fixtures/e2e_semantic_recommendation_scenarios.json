@@ -1,0 +1,172 @@
+{
+  "tags": [
+    {"tagid": 501, "name": "Simulation"},
+    {"tagid": 502, "name": "Management"}
+  ],
+  "storefront_tag_results": {
+    "501": {"total_count": 3, "appids": [9001, 9002, 9003]},
+    "502": {"total_count": 2, "appids": [9001, 9002]}
+  },
+  "storefront_intersection_results": {
+    "501,502": {
+      "total_count": 2,
+      "hits": [
+        {"appid": 9001, "title": "Hearthside Workshop", "tag_ids": [501, 502]},
+        {"appid": 9002, "title": "Quiet Foundry", "tag_ids": [501, 502]}
+      ]
+    }
+  },
+  "more_like_results": {},
+  "top_seller_appids": [],
+  "reference_search": {},
+  "games": [
+    {
+      "appid": 9001,
+      "title": "Hearthside Workshop",
+      "ordered_tags": ["Simulation", "Management"],
+      "review_total": 12000,
+      "review_positive_ratio": 0.94,
+      "short_description": "Residents gather for a new year celebration and launch a fireworks parade.",
+      "detailed_description": "Four seasons visibly reshape the town. Residents organize festivals throughout the year."
+    },
+    {
+      "appid": 9002,
+      "title": "Quiet Foundry",
+      "ordered_tags": ["Simulation", "Management"],
+      "review_total": 24000,
+      "review_positive_ratio": 0.96,
+      "short_description": "A fixed civic calendar has no festivals.",
+      "detailed_description": "Four seasons visibly reshape the town. Residents never organize festivals."
+    },
+    {
+      "appid": 9003,
+      "title": "River Borough",
+      "ordered_tags": ["Simulation"],
+      "review_total": 8000,
+      "review_positive_ratio": 0.91,
+      "short_description": "A quiet workshop district follows an undocumented calendar.",
+      "detailed_description": "Seasonal weather affects production, but town customs are not described."
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "specific-seasonal-event",
+      "raw_query": "想找 Steam 经营模拟游戏，还要能在过年时放烟花",
+      "parser_payload": {
+        "platforms": ["steam"],
+        "genres_like": ["simulation", "management"],
+        "explicit_tag_evidence": [
+          {"target": "genres_like", "tag": "simulation", "span": "模拟"},
+          {"target": "genres_like", "tag": "management", "span": "经营"}
+        ],
+        "soft_features": [
+          {
+            "constraint_id": "seasonal-fireworks",
+            "source_span": "过年时放烟花",
+            "normalized_text": "the simulation includes a new-year fireworks event",
+            "role": "core",
+            "polarity": "positive",
+            "proxy_tags": []
+          }
+        ],
+        "result_count": 3
+      },
+      "semantic_verdicts": {
+        "9001|seasonal-fireworks|positive": {"status": "satisfied", "evidence_quote": "fireworks parade"},
+        "9002|seasonal-fireworks|positive": {"status": "violated", "evidence_quote": "no festivals"},
+        "9003|seasonal-fireworks|positive": {"status": "unknown", "evidence_quote": ""}
+      },
+      "expected": {
+        "output_appids": [9001],
+        "excluded_appids": [9002, 9003],
+        "relevance_tiers": ["A", "B"],
+        "minimum_tag_sources": 2,
+        "minimum_intersection_sources": 1,
+        "semantic_batches": 1
+      }
+    },
+    {
+      "id": "adjacent-event-rewrite",
+      "raw_query": "推荐 Steam 模拟经营游戏，希望居民一起庆祝新年",
+      "parser_payload": {
+        "platforms": ["steam"],
+        "genres_like": ["simulation", "management"],
+        "explicit_tag_evidence": [
+          {"target": "genres_like", "tag": "simulation", "span": "模拟"},
+          {"target": "genres_like", "tag": "management", "span": "经营"}
+        ],
+        "soft_features": [
+          {
+            "constraint_id": "communal-new-year",
+            "source_span": "居民一起庆祝新年",
+            "normalized_text": "residents collectively celebrate the new year",
+            "role": "core",
+            "polarity": "positive",
+            "proxy_tags": []
+          }
+        ],
+        "result_count": 3
+      },
+      "semantic_verdicts": {
+        "9001|communal-new-year|positive": {"status": "satisfied", "evidence_quote": "Residents gather for a new year celebration"},
+        "9002|communal-new-year|positive": {"status": "violated", "evidence_quote": "no festivals"},
+        "9003|communal-new-year|positive": {"status": "unknown", "evidence_quote": ""}
+      },
+      "expected": {
+        "output_appids": [9001],
+        "excluded_appids": [9002, 9003],
+        "relevance_tiers": ["A", "B"],
+        "minimum_tag_sources": 2,
+        "minimum_intersection_sources": 1,
+        "semantic_batches": 1
+      }
+    },
+    {
+      "id": "multiple-specific-features",
+      "raw_query": "想找 Steam 经营模拟游戏，四季要明显变化，居民必须会举办节日",
+      "parser_payload": {
+        "platforms": ["steam"],
+        "genres_like": ["simulation", "management"],
+        "explicit_tag_evidence": [
+          {"target": "genres_like", "tag": "simulation", "span": "模拟"},
+          {"target": "genres_like", "tag": "management", "span": "经营"}
+        ],
+        "soft_features": [
+          {
+            "constraint_id": "visible-seasons",
+            "source_span": "四季要明显变化",
+            "normalized_text": "four seasons visibly change the town",
+            "role": "core",
+            "polarity": "positive",
+            "proxy_tags": []
+          },
+          {
+            "constraint_id": "resident-festivals",
+            "source_span": "居民必须会举办节日",
+            "normalized_text": "residents organize festivals",
+            "role": "required",
+            "polarity": "positive",
+            "proxy_tags": []
+          }
+        ],
+        "result_count": 3
+      },
+      "semantic_verdicts": {
+        "9001|visible-seasons|positive": {"status": "satisfied", "evidence_quote": "Four seasons visibly reshape the town"},
+        "9001|resident-festivals|positive": {"status": "satisfied", "evidence_quote": "Residents organize festivals"},
+        "9002|visible-seasons|positive": {"status": "satisfied", "evidence_quote": "Four seasons visibly reshape the town"},
+        "9002|resident-festivals|positive": {"status": "violated", "evidence_quote": "Residents never organize festivals"},
+        "9003|visible-seasons|positive": {"status": "unknown", "evidence_quote": ""},
+        "9003|resident-festivals|positive": {"status": "unknown", "evidence_quote": ""}
+      },
+      "expected": {
+        "output_appids": [9001],
+        "excluded_appids": [9002, 9003],
+        "relevance_tiers": ["A", "B"],
+        "minimum_tag_sources": 2,
+        "minimum_intersection_sources": 1,
+        "semantic_batches": 1
+      }
+    }
+  ]
+}

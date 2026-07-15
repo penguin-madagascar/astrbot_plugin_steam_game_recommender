@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import sqlite3
+import tempfile
+import time
 import unittest
+from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import httpx
 
@@ -10,10 +15,12 @@ from astrbot_plugin_steam_game_recommender.clients.steam import (
     SteamClient,
     parse_steam_game,
 )
+from astrbot_plugin_steam_game_recommender.storage import repository as repository_module
 from astrbot_plugin_steam_game_recommender.storage.models import (
     GameCandidate,
     SteamSearchHit,
 )
+from astrbot_plugin_steam_game_recommender.storage.repository import SQLiteCacheRepository
 
 
 class SteamClientTest(unittest.IsolatedAsyncioTestCase):
@@ -218,6 +225,78 @@ class SteamClientTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SteamApiError):
             await client.get_game_detail(123)
         self.assertEqual(http_client.call_count, 5)
+
+    async def test_sqlite_game_detail_refreshes_after_one_hour(self) -> None:
+        now = 1_700_000_000.0
+        upcoming = steam_detail_payload()
+        upcoming["release_date"] = {
+            "date": "Coming soon",
+            "coming_soon": True,
+        }
+        released = steam_detail_payload()
+
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch.object(repository_module.time, "time", return_value=now),
+        ):
+            cache = SQLiteCacheRepository(Path(temp_dir) / "cache.sqlite3")
+            http_client = MutableDetailHttpClient(upcoming)
+            client = SteamClient(
+                http_client,
+                cache,
+                cache_ttl_hours=24,
+                clock=lambda: now,
+            )
+
+            first = await client.get_game_detail(123)
+            age_sqlite_cache_rows(cache, ":fresh", 60 * 60 - 1, now=now)
+            still_fresh = await client.get_game_detail(123)
+            http_client.payload = released
+            age_sqlite_cache_rows(cache, ":fresh", 60 * 60 + 1, now=now)
+            refreshed = await client.get_game_detail(123)
+
+        self.assertTrue(first.coming_soon)
+        self.assertTrue(still_fresh.coming_soon)
+        self.assertFalse(refreshed.coming_soon)
+        self.assertEqual(http_client.call_count, 2)
+
+    async def test_sqlite_game_detail_stale_fallback_expires_after_six_hours(
+        self,
+    ) -> None:
+        now = 1_700_000_000.0
+        upcoming = steam_detail_payload()
+        upcoming["release_date"] = {
+            "date": "Coming soon",
+            "coming_soon": True,
+        }
+
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch.object(repository_module.time, "time", return_value=now),
+        ):
+            cache = SQLiteCacheRepository(Path(temp_dir) / "cache.sqlite3")
+            http_client = MutableDetailHttpClient(upcoming)
+            client = SteamClient(
+                http_client,
+                cache,
+                cache_ttl_hours=24,
+                clock=lambda: now,
+            )
+
+            await client.get_game_detail(123)
+            http_client.failure = httpx.ConnectError("offline")
+            age_sqlite_cache_rows(cache, ":fresh", 60 * 60 + 1, now=now)
+            age_sqlite_cache_rows(cache, ":stale", 60 * 60 + 1, now=now)
+            stale = await client.get_game_detail(123)
+
+            self.assertTrue(stale.coming_soon)
+            self.assertEqual(http_client.call_count, 3)
+
+            age_sqlite_cache_rows(cache, ":stale", 6 * 60 * 60 + 1, now=now)
+            with self.assertRaises(SteamApiError):
+                await client.get_game_detail(123)
+            self.assertEqual(http_client.call_count, 5)
+            self.assertEqual(sqlite_cache_row_count(cache, ":stale"), 0)
 
     async def test_search_games_skips_non_games_and_failed_details(self) -> None:
         http_client = FakeHttpClient(
@@ -503,6 +582,35 @@ class TimedMemoryCache:
 
     async def set_json(self, key: str, payload: Any) -> None:
         self.payloads[key] = (payload, self.clock())
+
+
+def age_sqlite_cache_rows(
+    repository: SQLiteCacheRepository,
+    suffix: str,
+    seconds: float,
+    *,
+    now: float | None = None,
+) -> None:
+    created_at = (time.time() if now is None else now) - seconds
+    with sqlite3.connect(repository.db_path) as connection:
+        cursor = connection.execute(
+            "UPDATE cache SET created_at = ? WHERE key LIKE ?",
+            (created_at, f"%{suffix}"),
+        )
+    if cursor.rowcount <= 0:
+        raise AssertionError(f"no SQLite cache row matched suffix {suffix}")
+
+
+def sqlite_cache_row_count(
+    repository: SQLiteCacheRepository,
+    suffix: str,
+) -> int:
+    with sqlite3.connect(repository.db_path) as connection:
+        row = connection.execute(
+            "SELECT COUNT(*) FROM cache WHERE key LIKE ?",
+            (f"%{suffix}",),
+        ).fetchone()
+    return int(row[0]) if row else 0
 
 
 class MutableDetailHttpClient:
