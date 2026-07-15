@@ -51,28 +51,28 @@ class SteamOnlyMetadataTest(unittest.TestCase):
 
         for command in ("/gamerec", "/gamerec_retry", "/accountbind", "/randomrec"):
             self.assertIn(command, readme)
+        for alias in ("/游戏推荐", "/重新推荐", "/换一批", "/账号绑定", "/随机推荐"):
+            self.assertIn(alias, readme)
         self.assertNotIn("/unplayedrec", readme)
         self.assertNotIn("/未玩推荐", readme)
         self.assertIn("-US", readme)
         self.assertIn("推荐分：86/100", readme)
-        self.assertIn("按核心匹配层级及层内推荐分排列", readme)
-        self.assertIn("搜索条目必须是 `app`", readme)
-        self.assertIn("详情类型必须是 `game`", readme)
-        self.assertIn("DLC、Demo、原声、工具和套餐", readme)
-        self.assertIn("同一作品只保留一款", readme)
-        self.assertIn("`llm_fallback_provider_id`", readme)
-        self.assertIn("⚠️ LLM 兜底建议", readme)
+        self.assertIn("推荐理由：", readme)
+        self.assertIn("不推荐理由：", readme)
+        self.assertIn("DLC、试玩版、原声、工具和套餐", readme)
+        self.assertIn("不会让 LLM 自由编造游戏清单", readme)
 
     def test_readme_is_a_user_facing_overview_with_combined_examples(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
         headings = (
-            "## 项目定位",
-            "## 核心能力",
-            "## 快速开始",
-            "## 推荐结果",
             "## 安装与配置",
-            "## 使用边界",
+            "## 开始使用",
+            "## 怎样提出需求",
+            "## 怎样理解结果",
+            "## 账号、游戏库与价格",
+            "## 错误、降级与空结果",
+            "## 数据边界",
         )
         positions = [readme.index(heading) for heading in headings]
         self.assertEqual(positions, sorted(positions))
@@ -82,54 +82,45 @@ class SteamOnlyMetadataTest(unittest.TestCase):
         )
         for example in (
             "/gamerec 排除已有 -US 双人合作解谜，预算 30 美元",
-            "/游戏推荐 仅查看已有 日区 适合周末通关的剧情游戏，预算 3000 日元",
-            "/gamerec 排除已有 国区 支持简体中文的轻松经营游戏，预算 100 元",
+            "/gamerec 类似黑暗之魂的游戏",
+            "/gamerec 推荐 3 款支持简体中文、预算 100 元以内的合作游戏",
+            "/gamerec 模拟类游戏，要有节日活动，最好由 ConcernedApe 开发",
+            "/gamerec 即将发售的类魂游戏",
         ):
             self.assertIn(example, readme)
-        self.assertIn("游戏库过滤参数必须位于需求开头", readme)
-        self.assertIn("参考游戏只排除精确种子 AppID", readme)
-        self.assertIn("其续作、同系列和其他版本仍可参与推荐", readme)
-        self.assertNotIn("换一批、参考游戏和“排除已有”会排除整个作品族", readme)
-        for scoring_detail in (
-            "固定的锚点分层策略",
-            "A 层满足硬约束且核心覆盖率至少为 0.60",
-            "C 层满足硬约束但没有命中核心锚点",
-            "有核心锚点：语义分 = 70% × 核心覆盖率 + 30% × 辅助标签相似度",
-            "Wilson 好评率下界（z=1.96）",
-            "普通查询：层内分 = 70% × 语义分 + 30% × 质量分",
-            "高知名度/大作倾向：层内分 = 55% × 语义分 + 45% × 质量分",
-            "评测缺失或为零时质量分为 0",
-            "负向参考相似度按 0.25 系数从语义分扣除",
-            "不会再作为独立分量重复计分",
-            "普通语言偏好不支持时为 -5",
-            "强制措辞而不支持时为 -10",
-            "当前价不高于预算时为 +5",
-            "普通预算为 -5",
-            "强制措辞的预算为 -10",
-        ):
-            self.assertIn(scoring_detail, readme)
-
-        for config_detail in (
-            "模型与鉴权",
-            "价格与地区",
-            "推荐与评分",
-            "缓存与网络",
+        for user_visible_behavior in (
+            "新安装默认最多返回 10 款",
+            "用户原文中明确写出的数量优先",
+            "升级前已经设置为 5 款",
+            "而不是只凭一个宽泛类型标签",
+            "参考游戏本身不会作为结果返回",
+            "续作和同系列作品仍可参与推荐",
+            "Steam 标签、类型和商店描述",
+            "即使写了“仅限”或“只要”",
+            "不会用完全没有核心玩法直接证据的候选凑数",
+            "部分核心特征证据不足的候选仍可能返回",
+            "使用 60/100 未发售质量先验，仅用于排序，不代表玩家实评或实际知名度",
+            "普通推荐不需要 Steam Web API Key",
             "https://steamcommunity.com/dev/apikey",
-            "仅供 `/randomrec` 使用",
-            "旧的五项评分权重会被清除",
-            "旧版平铺配置会在首次加载时自动迁移",
+            "astrbot_plugin_steam_price_heybox",
+            "偏好解析模型暂时不可用",
+            "语义特征核验服务暂不可用",
+            "暂时没有找到满足当前条件的游戏",
         ):
-            self.assertIn(config_detail, readme)
-
-        self.assertNotIn("无需手工凑满 100", readme)
+            self.assertIn(user_visible_behavior, readme)
 
         for implementation_detail in (
-            "## 评分规则",
-            "## LLM 行为",
-            "## 开发验证",
-            "min(log10(",
+            "语义分 =",
+            "层内分 =",
+            "Wilson 好评率下界",
+            "z=1.96",
+            "RRF",
             "evidence_ids",
-            "最多 5 路并发",
+            "schema_version",
+            "source_kind",
+            "quality_source",
+            "company_adjustment",
+            "llm_fallback_provider_id",
             "steam_index_ttl_hours",
             "cache_ttl_hours",
         ):
