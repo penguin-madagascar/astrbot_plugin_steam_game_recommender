@@ -17,14 +17,62 @@ SYSTEM_PROMPT = (
     "百分比分数、好评率、评测数量或任何已通过 Steam 验证的承诺。"
 )
 
-PROHIBITED_PATTERNS = (
+COMMON_CURRENCY_CODES = frozenset(
+    """
+    AED ARS AUD BRL CAD CHF CLP CNY COP CZK DKK EGP EUR GBP HKD HUF IDR ILS INR
+    JPY KRW KWD MXN MYR NGN NOK NZD PEN PHP PLN QAR RMB RON RUB SAR SEK SGD THB
+    TRY TWD UAH USD VND ZAR
+    """.split()
+)
+CURRENCY_CODE_ALTERNATION = "|".join(sorted(COMMON_CURRENCY_CODES))
+NUMBER_TOKEN = (
+    r"(?<![\d.,])(?:"
+    r"\d{1,3}(?:[,\u00a0\u202f ]\d{3})+(?:\.\d+)?|"
+    r"\d{1,3}(?:\.\d{3})+(?:,\d+)?|"
+    r"\d+(?:[.,]\d+)?"
+    r")(?![\d.,])"
+)
+REVIEW_COUNT_TOKEN = rf"{NUMBER_TOKEN}(?:\s*[kKmM万千])?"
+
+URL_PATTERN = re.compile(r"(?:https?|ftp|steam)://|www\.", re.IGNORECASE)
+DOMAIN_CANDIDATE_PATTERN = re.compile(r"(?:[\w-]+\.)+[\w-]+")
+ASCII_DOMAIN_LABEL_PATTERN = re.compile(
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
+    re.IGNORECASE,
+)
+APP_ID_PATTERN = re.compile(r"(?<![a-z])app[-_\s]*id(?![a-z])", re.IGNORECASE)
+CURRENCY_AMOUNT_PATTERN = re.compile(
+    rf"(?:"
+    rf"(?<![a-z])(?:{CURRENCY_CODE_ALTERNATION})(?![a-z])\s*{NUMBER_TOKEN}|"
+    rf"{NUMBER_TOKEN}\s*(?<![a-z])(?:{CURRENCY_CODE_ALTERNATION})(?![a-z])"
+    rf")",
+    re.IGNORECASE,
+)
+REVIEW_COUNT_PATTERNS = (
     re.compile(
-        r"(?:https?|ftp)://|www\.|steam://|"
-        r"(?<![a-z0-9@])(?:[a-z0-9-]+\.)+"
-        r"(?:com|net|org|cn|io|gg|co)(?=[/:?#]|[^a-z0-9-]|$)",
+        rf"{REVIEW_COUNT_TOKEN}\s*"
+        rf"(?:[a-z][a-z-]*\s+){{0,4}}(?:reviews?|ratings?)\b",
         re.IGNORECASE,
     ),
-    re.compile(r"(?<![a-z])app\s*id(?![a-z])", re.IGNORECASE),
+    re.compile(
+        rf"{REVIEW_COUNT_TOKEN}\s*(?:条|篇|个)?\s*"
+        rf"(?:(?:steam|用户|玩家|顾客|客户|近期|总计|有效)\s*){{0,4}}"
+        rf"(?:评测|评价|评论)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"(?:reviews?|ratings?)\s*(?:count|total)?\s*[:：=]?\s*"
+        rf"{REVIEW_COUNT_TOKEN}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"(?:评测|评价|评论)(?:数量|数|总数)?\s*[:：=为]?\s*"
+        rf"{REVIEW_COUNT_TOKEN}",
+        re.IGNORECASE,
+    ),
+)
+
+PROHIBITED_PATTERNS = (
     re.compile(
         r"(?:购买|商店|buy|purchase|store)\s*(?:链接|地址|link|url)",
         re.IGNORECASE,
@@ -41,15 +89,11 @@ PROHIBITED_PATTERNS = (
         r"(?<![a-z])(?:price|cost)(?![a-z])",
         re.IGNORECASE,
     ),
-    re.compile(
-        r"[$€£¥￥]|(?<![a-z])(?:cny|rmb|usd|jpy|eur|gbp|hkd|twd)(?![a-z])|"
-        r"\d+(?:\.\d+)?\s*(?:元|块(?:钱)?)",
-        re.IGNORECASE,
-    ),
+    re.compile(r"\d+(?:\.\d+)?\s*(?:元|块(?:钱)?)", re.IGNORECASE),
     re.compile(r"好评率|positive\s+review\s+rate", re.IGNORECASE),
     re.compile(
-        r"(?:评测|评价|评论)\s*(?:数量|数)|(?:review|rating)\s*count|"
-        r"\d+\s*(?:条|篇|个|万)?\s*(?:评测|评价|评论|reviews?)",
+        r"(?:评测|评价|评论)\s*(?:数量|数|总数)|"
+        r"(?:review|rating)\s*count",
         re.IGNORECASE,
     ),
     re.compile(
@@ -205,7 +249,7 @@ def normalize_text(value: str) -> str:
     without_formatting = "".join(
         character
         for character in value
-        if unicodedata.category(character) != "Cf"
+        if not is_visual_format_or_invisible_mark(character)
     )
     return re.sub(r"\s+", " ", without_formatting).strip()
 
@@ -216,8 +260,51 @@ def normalize_title(value: str) -> str:
 
 def reject_prohibited_text(value: str) -> None:
     normalized = unicodedata.normalize("NFKC", normalize_text(value))
-    if any(pattern.search(normalized) for pattern in PROHIBITED_PATTERNS):
+    contains_forbidden_content = (
+        contains_url_or_domain(normalized)
+        or APP_ID_PATTERN.search(normalized)
+        or CURRENCY_AMOUNT_PATTERN.search(normalized)
+        or any(unicodedata.category(character) == "Sc" for character in normalized)
+        or any(pattern.search(normalized) for pattern in REVIEW_COUNT_PATTERNS)
+        or any(pattern.search(normalized) for pattern in PROHIBITED_PATTERNS)
+    )
+    if contains_forbidden_content:
         raise LlmFallbackContractError("fallback response contains prohibited claims")
+
+
+def contains_url_or_domain(value: str) -> bool:
+    if URL_PATTERN.search(value):
+        return True
+    return any(
+        is_valid_domain_candidate(match.group(0))
+        for match in DOMAIN_CANDIDATE_PATTERN.finditer(value)
+    )
+
+
+def is_valid_domain_candidate(value: str) -> bool:
+    try:
+        ascii_domain = value.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        return False
+    if len(ascii_domain) > 253:
+        return False
+    labels = ascii_domain.split(".")
+    if len(labels) < 2 or any(
+        ASCII_DOMAIN_LABEL_PATTERN.fullmatch(label) is None
+        for label in labels
+    ):
+        return False
+    top_level_domain = labels[-1]
+    return top_level_domain.startswith("xn--") or (
+        2 <= len(top_level_domain) <= 63 and top_level_domain.isalpha()
+    )
+
+
+def is_visual_format_or_invisible_mark(character: str) -> bool:
+    if unicodedata.category(character) == "Cf":
+        return True
+    name = unicodedata.name(character, "")
+    return "VARIATION SELECTOR" in name or name == "COMBINING GRAPHEME JOINER"
 
 
 def dump_model(model: Any) -> dict[str, Any]:

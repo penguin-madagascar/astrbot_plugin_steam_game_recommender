@@ -156,6 +156,100 @@ class UnverifiedSuggestionContractTest(unittest.TestCase):
         with self.assertRaises(service.LlmFallbackContractError):
             service.parse_unverified_suggestions(raw, result_limit=1)
 
+    def test_rejects_independent_review_report_bypass_forms(self) -> None:
+        service = fallback_module()
+        prohibited = [
+            "仅需 20 CAD。",
+            "₩20000。",
+            "已有 1,234 user reviews。",
+            "已有 12,345 Steam customer reviews。",
+            "已有 12,345 条 Steam 用户评测。",
+            "对应 App-ID 123。",
+            "对应 App_ID 123。",
+            "详情见 example.dev/buy。",
+            "详情见 example.technology/buy。",
+            "详情见 例子.公司/购买。",
+            "对应 App\ufe0f-ID 123。",
+            "对应 App\u034f-ID 123。",
+            "使用 steam\ufe0f://run/123 启动。",
+        ]
+
+        for text in prohibited:
+            with self.subTest(text=text):
+                with self.assertRaises(service.LlmFallbackContractError):
+                    service.parse_unverified_suggestions(
+                        response_payload(suggestion(reason=text)),
+                        result_limit=1,
+                    )
+
+    def test_rejects_bypass_forms_hidden_in_overlimit_tail(self) -> None:
+        service = fallback_module()
+        prohibited_tail_values = [
+            "仅需 20 CAD。",
+            "₩20000。",
+            "已有 1,234 user reviews。",
+            "对应 App-ID 123。",
+            "详情见 example.dev/buy。",
+            "使用 steam\ufe0f://run/123 启动。",
+        ]
+
+        for text in prohibited_tail_values:
+            with self.subTest(text=text):
+                raw = response_payload(
+                    suggestion("Game A", "第一款理由。"),
+                    suggestion("Game B", "第二款理由。"),
+                    suggestion("Game C", text),
+                )
+
+                with self.assertRaises(service.LlmFallbackContractError):
+                    service.parse_unverified_suggestions(raw, result_limit=2)
+
+    def test_rejects_general_bare_domain_in_peripheral_response(self) -> None:
+        service = fallback_module()
+        raw = (
+            "详情见 example.solutions/buy\n"
+            + response_payload(suggestion("Game A", "符合合作偏好。"))
+        )
+
+        with self.assertRaises(service.LlmFallbackContractError):
+            service.parse_unverified_suggestions(raw, result_limit=1)
+
+    def test_removes_visual_format_and_invisible_marks_from_safe_output(self) -> None:
+        service = fallback_module()
+
+        parsed = service.parse_unverified_suggestions(
+            response_payload(
+                suggestion(
+                    "Game\ufe0f\u200b A",
+                    "合作\u034f解谜。",
+                )
+            ),
+            result_limit=1,
+        )
+
+        self.assertEqual(parsed[0].title, "Game A")
+        self.assertEqual(parsed[0].reason, "合作解谜。")
+
+    def test_allows_numbers_and_currency_abbreviations_without_forbidden_context(
+        self,
+    ) -> None:
+        service = fallback_module()
+        allowed = [
+            "适合 CAD 建模爱好者，提供 1,234 种关卡组合。",
+            "支持 Steam 用户合作，并以 customer support 为叙事题材。",
+            "强调 app design，并允许自定义玩家 ID。",
+            "版本 1.2 的玩法循环更顺畅。",
+        ]
+
+        for reason in allowed:
+            with self.subTest(reason=reason):
+                parsed = service.parse_unverified_suggestions(
+                    response_payload(suggestion(reason=reason)),
+                    result_limit=1,
+                )
+
+                self.assertEqual(parsed[0].reason, reason)
+
     def test_validates_every_item_before_truncating(self) -> None:
         service = fallback_module()
         raw = response_payload(
