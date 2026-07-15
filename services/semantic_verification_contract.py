@@ -159,9 +159,15 @@ def extract_json_object(raw_text: str) -> dict[str, Any]:
             value, _end = decoder.raw_decode(text[index:])
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
-        if isinstance(value, dict):
+        if (
+            isinstance(value, dict)
+            and set(value) == {"verdicts"}
+            and isinstance(value.get("verdicts"), list)
+        ):
             return value
-    raise FeatureVerificationContractError("verifier did not return a JSON object")
+    raise FeatureVerificationContractError(
+        "verifier did not return a valid verdict JSON object"
+    )
 
 
 def mapping_pair(value: Any) -> VerdictPair | None:
@@ -198,6 +204,29 @@ def expected_verdict_pairs(
         for candidate in selected_candidates
         for feature in selected_features
     )
+
+
+def recoverable_verdict_pairs(
+    features: Iterable[SoftFeature],
+    candidates: Iterable[GameCandidate],
+) -> tuple[VerdictPair, ...]:
+    """Return stable pair identities that can safely carry a contract failure."""
+    result: list[VerdictPair] = []
+    seen: set[VerdictPair] = set()
+    for candidate in candidates:
+        appid = candidate.appid
+        if type(appid) is not int or appid <= 0:
+            continue
+        for feature in features:
+            constraint_id = str(feature.constraint_id or "").strip()
+            polarity = str(feature.polarity or "").strip()
+            if not constraint_id or polarity not in {"positive", "negative"}:
+                continue
+            pair = (appid, constraint_id, polarity)
+            if pair not in seen:
+                result.append(pair)
+                seen.add(pair)
+    return tuple(result)
 
 
 def verdict_from_mapping(value: Any) -> FeatureVerdict:

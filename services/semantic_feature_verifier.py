@@ -33,6 +33,7 @@ from .semantic_verification_contract import (
     candidate_evidence_payload,
     canonical_json,
     expected_verdict_pairs,
+    recoverable_verdict_pairs,
     validate_verdict_response,
     verdict_cache_key,
     verdict_evidence_is_valid,
@@ -163,7 +164,13 @@ class SemanticFeatureVerifier:
         try:
             expected = expected_verdict_pairs(selected_features, selected_candidates)
         except FeatureVerificationContractError as exc:
-            return contract_failure(str(exc))
+            return contract_failure(
+                str(exc),
+                pairs=recoverable_verdict_pairs(
+                    selected_features,
+                    selected_candidates,
+                ),
+            )
 
         notices: list[FeatureVerificationNotice] = []
         failures: list[FeatureVerificationFailure] = []
@@ -203,6 +210,7 @@ class SemanticFeatureVerifier:
                     cached[pair] = verdict
 
         fresh_by_pair: dict[tuple[int, str, str], FeatureVerdict] = {}
+        cacheable_fresh_pairs: set[tuple[int, str, str]] = set()
         if missing:
             requests, oversized_pairs = build_verification_requests(
                 selected_features,
@@ -226,7 +234,11 @@ class SemanticFeatureVerifier:
                     for request in requests
                 )
             )
-            for result in results:
+            candidate_by_appid = {
+                int(candidate.appid or 0): candidate
+                for candidate in selected_candidates
+            }
+            for request, result in zip(requests, results):
                 notices.extend(result.notices)
                 failures.extend(result.failures)
                 fresh_by_pair.update(
@@ -235,11 +247,27 @@ class SemanticFeatureVerifier:
                         for item in result.verdicts
                     }
                 )
+                sent_evidence = {
+                    int(item.get("appid") or 0): item
+                    for item in request.payload.get("candidates", [])
+                    if isinstance(item, dict)
+                }
+                for verdict in result.verdicts:
+                    appid = int(verdict.appid)
+                    candidate = candidate_by_appid.get(appid)
+                    if (
+                        candidate is not None
+                        and sent_evidence.get(appid)
+                        == candidate_evidence_payload(candidate)
+                    ):
+                        cacheable_fresh_pairs.add(
+                            (appid, verdict.constraint_id, verdict.polarity)
+                        )
 
             now = float(self.clock())
             for pair in expected:
                 verdict = fresh_by_pair.get(pair)
-                if verdict is None:
+                if verdict is None or pair not in cacheable_fresh_pairs:
                     continue
                 try:
                     await self.cache.set_json(
@@ -648,7 +676,7 @@ def apply_feature_verdicts(
         (item.appid, item.constraint_id, item.polarity): item
         for item in outcome.failures
     }
-    applied: list[tuple[int, int, RankedGame]] = []
+    applied: list[tuple[int, RankedGame]] = []
     for original_index, game in enumerate(games):
         if game.score_breakdown.relevance_tier not in {"A", "B", "broad"}:
             continue
@@ -790,20 +818,23 @@ def apply_feature_verdicts(
         update = {
             "score_breakdown": updated_breakdown,
             "score": round(effective_score(updated_breakdown, fallback_score=game.score)),
+            "core_feature_verification": (
+                "technical_failure"
+                if has_unverified_required
+                else "verified" if required else "not_applicable"
+            ),
             "recommendation_evidence": evidence,
         }
         updated_game = copier(update=update) if copier else game.copy(update=update)
-        applied.append((original_index, int(has_unverified_required), updated_game))
+        applied.append((original_index, updated_game))
 
     applied.sort(
         key=lambda item: (
-            ranked_game_precedence_prefix(item[2])[0],
-            item[1],
-            *ranked_game_precedence_prefix(item[2])[1:],
+            *ranked_game_precedence_prefix(item[1]),
             item[0],
         )
     )
-    return [game for _index, _verification_group, game in applied]
+    return [game for _index, game in applied]
 
 
 async def verify_ranked_features(
@@ -889,10 +920,15 @@ def copy_score_breakdown(
     return copier(update=updates) if copier else breakdown.copy(update=updates)
 
 
-def contract_failure(message: str) -> FeatureVerificationOutcome:
+def contract_failure(
+    message: str,
+    *,
+    pairs: Iterable[tuple[int, str, str]] = (),
+) -> FeatureVerificationOutcome:
     logger.warning("Semantic feature contract failed: %s", message)
     return FeatureVerificationOutcome(
-        notices=(technical_failure_notice("contract"),)
+        notices=(technical_failure_notice("contract"),),
+        failures=failures_for_pairs(tuple(pairs), "contract"),
     )
 
 

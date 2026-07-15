@@ -896,6 +896,7 @@ class GamePriceSummary(BaseModel):
 class RankedGame(GameCandidate):
     score: int = 0
     score_breakdown: ScoreBreakdown = Field(default_factory=ScoreBreakdown)
+    core_feature_verification: str = "not_applicable"
     recommendation_evidence: list[RecommendationEvidence] = Field(default_factory=list)
     recommendation_reason: str = ""
     caution_reason: str | None = None
@@ -908,6 +909,13 @@ class RankedGame(GameCandidate):
         except (TypeError, ValueError):
             number = 0
         return min(max(number, 0), 100)
+
+    @validator("core_feature_verification", pre=True, always=True)
+    def _normalize_core_feature_verification(cls, value: Any) -> str:
+        status = str(value or "not_applicable").strip().lower()
+        if status not in {"not_applicable", "verified", "technical_failure"}:
+            raise ValueError("invalid core feature verification status")
+        return status
 
     @validator("recommendation_reason", pre=True)
     def _normalize_recommendation_reason(cls, value: Any) -> str:

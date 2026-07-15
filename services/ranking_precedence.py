@@ -9,6 +9,11 @@ _TIER_ORDER = {
     "C": 2,
 }
 _MISSING_RETRIEVAL_RANK = 1_000_000_000
+_CORE_VERIFICATION_ORDER = {
+    "not_applicable": 0,
+    "verified": 0,
+    "technical_failure": 1,
+}
 
 
 def effective_score(
@@ -33,7 +38,7 @@ def effective_score(
 
 def ranked_game_precedence_prefix(
     game: RankedGame,
-) -> tuple[int, float, int]:
+) -> tuple[int, int, float, int]:
     """Return the shared tier and within-tier ordering prefix."""
     breakdown = game.score_breakdown
     retrieval_rank = int(breakdown.retrieval_rank)
@@ -41,6 +46,7 @@ def ranked_game_precedence_prefix(
     # A/B/C candidates produced by one ranking request.
     return (
         _TIER_ORDER.get(breakdown.relevance_tier, 3),
+        _CORE_VERIFICATION_ORDER.get(game.core_feature_verification, 1),
         -effective_score(breakdown, fallback_score=game.score),
         retrieval_rank if retrieval_rank > 0 else _MISSING_RETRIEVAL_RANK,
     )

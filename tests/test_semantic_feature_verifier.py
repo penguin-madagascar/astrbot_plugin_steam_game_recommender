@@ -255,6 +255,7 @@ class SemanticFeatureVerifierContractTest(unittest.TestCase):
             f"analysis\n{raw}",
             f"{raw}\nthanks",
             f"```json\n{raw}\n```",
+            f"example={{}}\nactual={raw}",
         )
 
         for response in wrapped_responses:
@@ -897,6 +898,105 @@ class SemanticFeatureVerifierCacheTest(unittest.IsolatedAsyncioTestCase):
                 < module.MAX_DETAILED_DESCRIPTION_CHARS
                 for payload in payloads
                 for candidate in payload["candidates"]
+            )
+        )
+
+    async def test_compressed_evidence_does_not_fill_full_evidence_cache_key(self) -> None:
+        module = importlib.import_module(MODULE)
+        feature = SoftFeature(
+            constraint_id="persistent-world-state",
+            source_span="世界状态会持续变化",
+            normalized_text="persistent world state changes",
+            role="core",
+            polarity="positive",
+        )
+        candidates = [
+            GameCandidate(
+                appid=appid,
+                title=f"Candidate {appid}",
+                ordered_tags=[f"tag-{index}-" + "x" * 300 for index in range(40)],
+                genres=[f"genre-{index}-" + "y" * 300 for index in range(40)],
+                categories=[f"category-{index}-" + "z" * 300 for index in range(40)],
+                short_description="S" * 10_000,
+                detailed_description="D" * 20_000,
+            )
+            for appid in range(1, 11)
+        ]
+        context = EchoUnknownContext()
+        cache = MemoryCache()
+
+        await module.SemanticFeatureVerifier(
+            context,
+            cache,
+            batch_size=10,
+        ).verify(features=[feature], candidates=candidates)
+        first_call_count = len(context.calls)
+        self.assertTrue(
+            any(
+                len(candidate_payload["detailed_description"])
+                < module.MAX_DETAILED_DESCRIPTION_CHARS
+                for call in context.calls
+                for candidate_payload in request_payload(call)["candidates"]
+            )
+        )
+
+        await module.SemanticFeatureVerifier(
+            context,
+            cache,
+            batch_size=1,
+        ).verify(features=[feature], candidates=[candidates[0]])
+
+        self.assertEqual(len(context.calls), first_call_count + 1)
+        full_payload = request_payload(context.calls[-1])
+        self.assertEqual(
+            len(full_payload["candidates"][0]["detailed_description"]),
+            module.MAX_DETAILED_DESCRIPTION_CHARS,
+        )
+
+    async def test_preflight_contract_failure_reports_recoverable_pairs(self) -> None:
+        module = importlib.import_module(MODULE)
+        feature = SoftFeature(
+            constraint_id="branching",
+            source_span="必须有分支剧情",
+            normalized_text="branching story",
+            role="core",
+            polarity="positive",
+        )
+        context = FakeContext([])
+        verifier = module.SemanticFeatureVerifier(context, MemoryCache())
+        candidates = [
+            GameCandidate(appid=10, title="Duplicate A"),
+            GameCandidate(appid=10, title="Duplicate B"),
+        ]
+
+        outcome = await verifier.verify(
+            features=[feature],
+            candidates=candidates,
+        )
+
+        self.assertEqual(context.calls, [])
+        self.assertEqual(
+            [
+                (item.appid, item.constraint_id, item.polarity, item.kind)
+                for item in outcome.failures
+            ],
+            [(10, "branching", "positive", "contract")],
+        )
+        ranked = [
+            RankedGame.from_candidate(
+                candidate,
+                50,
+                ScoreBreakdown(relevance_tier="broad", layer_score=0.5),
+                [],
+            )
+            for candidate in candidates
+        ]
+        retained = module.apply_feature_verdicts(ranked, [feature], outcome)
+        self.assertEqual([item.title for item in retained], ["Duplicate A", "Duplicate B"])
+        self.assertTrue(
+            all(
+                item.core_feature_verification == "technical_failure"
+                for item in retained
             )
         )
 

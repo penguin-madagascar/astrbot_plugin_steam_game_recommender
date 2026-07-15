@@ -574,6 +574,42 @@ class PriceBridgeTest(unittest.IsolatedAsyncioTestCase):
 
 
 class BudgetScoringTest(unittest.TestCase):
+    def test_budget_resort_keeps_verified_core_before_technical_failure(self) -> None:
+        verified = RankedGame(
+            title="Verified",
+            score=30,
+            core_feature_verification="verified",
+            score_breakdown=ScoreBreakdown(relevance_tier="A", layer_score=0.30),
+        )
+        unverified = RankedGame(
+            title="Technical Failure",
+            score=90,
+            core_feature_verification="technical_failure",
+            score_breakdown=ScoreBreakdown(relevance_tier="A", layer_score=0.90),
+        )
+
+        adjusted_verified = attach_price_summary(
+            verified,
+            price_summary(current_cny=120, lowest_cny=110),
+            GamePreference(budget=100),
+        )
+        adjusted_unverified = attach_price_summary(
+            unverified,
+            price_summary(current_cny=60, lowest_cny=50),
+            GamePreference(budget=100),
+        )
+
+        self.assertEqual(
+            [
+                game.title
+                for game in sorted(
+                    [adjusted_unverified, adjusted_verified],
+                    key=ranked_game_sort_key,
+                )
+            ],
+            ["Verified", "Technical Failure"],
+        )
+
     def test_budget_adjustment_cannot_move_b_tier_ahead_of_a_tier(self) -> None:
         tier_a = RankedGame(
             title="Tier A",
