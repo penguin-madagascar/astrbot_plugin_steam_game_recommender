@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from ..storage.models import GamePreference
 from .company_preferences import normalize_company_name
 from .played_filter import detect_library_filter_mode
+from .recommendation_limits import (
+    DEFAULT_RECOMMENDATION_COUNT,
+    MAX_RECOMMENDATION_COUNT,
+)
 from .tag_normalizer import (
     canonical_tag_occurrences,
     canonical_tags_from_terms,
@@ -121,8 +125,28 @@ COMPANY_ENTITY_BEFORE_SPAN_PATTERN = re.compile(
     flags=re.I,
 )
 RESULT_QUANTITY_PATTERN = re.compile(
-    r"(?P<count>\d+|十|[一二两三四五六七八九])\s*"
-    r"(?:个|款|部|(?:games?|results?|titles?)\b)",
+    r"(?<![0-9一二两三四五六七八九十百])"
+    r"(?P<count>\d+|十|[一二两三四五六七八九])"
+    r"(?![0-9一二两三四五六七八九十百])\s*"
+    r"(?P<unit>个|款|部|(?:games?|results?|titles?)\b)",
+    flags=re.I,
+)
+RESULT_REQUEST_PATTERN = re.compile(
+    r"推荐|给我|列出|改成|改为|(?:^|\s)来(?:点|些|个|款)?|"
+    r"\brecommend(?:\s+me)?\b",
+    flags=re.I,
+)
+RESULT_GENERAL_REQUEST_PATTERN = re.compile(
+    r"想(?:找|要)|寻找|找|有没有|求|\b(?:look(?:ing)?\s+for|want|find)\b",
+    flags=re.I,
+)
+RESULT_NON_COUNT_SUFFIX_PATTERN = re.compile(
+    r"^\s*(?:人|朋友|玩家|队友|标签)",
+    flags=re.I,
+)
+RESULT_OWNED_CONTEXT_PATTERN = re.compile(
+    r"(?:已经?|曾经?)?(?:买过|玩过|已有|拥有)(?:了|过)?"
+    r"(?:大约|大概|超过|至少|近)?\s*$",
     flags=re.I,
 )
 BUDGET_CURRENCY_PATTERN = (
@@ -226,7 +250,7 @@ def infer_preference_from_text(
 
     budget, budget_currency, budget_is_required = extract_budget(lower)
 
-    result_count = extract_result_count(lower) or 5
+    result_count = extract_result_count(lower) or DEFAULT_RECOMMENDATION_COUNT
 
     difficulty = None
     if any(
@@ -388,7 +412,7 @@ def merge_text_preference(preference: GamePreference, text: str) -> GamePreferen
         if "mainstream" in {preference.quality_intent, inferred.quality_intent}
         else "normal"
     )
-    data["allow_unreleased"] = preference.allow_unreleased or inferred.allow_unreleased
+    data["allow_unreleased"] = inferred.allow_unreleased
     companies = validated_company_preferences(preference, text)
     company_reference_titles = [
         value
@@ -489,10 +513,9 @@ def merge_text_preference(preference: GamePreference, text: str) -> GamePreferen
             data[field] = getattr(inferred, field)
     if not preference.library_filter_mode:
         data["library_filter_mode"] = inferred.library_filter_mode
-    if explicit_count := extract_result_count(text):
-        data["result_count"] = explicit_count
-    elif not preference.result_count:
-        data["result_count"] = inferred.result_count
+    data["result_count"] = (
+        extract_result_count(text) or DEFAULT_RECOMMENDATION_COUNT
+    )
     validator = getattr(GamePreference, "model_validate", None)
     return validator(data) if validator else GamePreference.parse_obj(data)
 
@@ -753,9 +776,11 @@ def has_unreleased_intent(text: str) -> bool:
     terms = (
         "尚未发售",
         "未发售",
+        "待发售",
         "即将发售",
         "尚未发行",
         "未发行",
+        "待发行",
         "即将推出",
         "unreleased",
         "upcoming",
@@ -953,10 +978,6 @@ def expand_related_extra_tags(tags: list[str]) -> list[str]:
 
 
 def extract_result_count(text: str) -> int | None:
-    count_match = RESULT_QUANTITY_PATTERN.search(text)
-    if not count_match:
-        return None
-    raw_count = count_match.group("count")
     chinese_counts = {
         "一": 1,
         "二": 2,
@@ -968,9 +989,58 @@ def extract_result_count(text: str) -> int | None:
         "八": 8,
         "九": 9,
         "十": 10,
+        "两": 2,
     }
-    count = int(raw_count) if raw_count.isdigit() else chinese_counts[raw_count]
-    return min(max(count, 1), 10)
+    for count_match in RESULT_QUANTITY_PATTERN.finditer(text):
+        if not result_count_candidate_is_valid(text, count_match):
+            continue
+        raw_count = count_match.group("count")
+        count = int(raw_count) if raw_count.isdigit() else chinese_counts[raw_count]
+        if count >= 1:
+            return min(count, MAX_RECOMMENDATION_COUNT)
+    return None
+
+
+def result_count_candidate_is_valid(text: str, match: re.Match[str]) -> bool:
+    prefix = text[: match.start("count")]
+    if prefix.rstrip().endswith("第"):
+        return False
+    if RESULT_NON_COUNT_SUFFIX_PATTERN.match(text[match.end() :]):
+        return False
+
+    boundaries = ",，。；;!?！？\n"
+    clause_start = max((text.rfind(mark, 0, match.start()) for mark in boundaries), default=-1)
+    clause_ends = [
+        position
+        for mark in boundaries
+        if (position := text.find(mark, match.end())) >= 0
+    ]
+    clause_end = min(clause_ends, default=len(text))
+    clause = text[clause_start + 1 : clause_end]
+    local_start = match.start("count") - clause_start - 1
+    local_prefix = clause[:local_start]
+    if RESULT_OWNED_CONTEXT_PATTERN.search(local_prefix[-16:]):
+        return False
+
+    if RESULT_REQUEST_PATTERN.search(clause) or RESULT_GENERAL_REQUEST_PATTERN.search(clause):
+        return True
+
+    unit = match.group("unit").casefold()
+    suffix = text[match.end() : clause_end]
+    explicit_game_quantity = unit in {"game", "games", "result", "results", "title", "titles"}
+    explicit_game_quantity = explicit_game_quantity or bool(
+        re.match(r"^\s*(?:游戏|作品)", suffix)
+    )
+    if not explicit_game_quantity:
+        return False
+    standalone = clause.strip()
+    return match.start() == clause_start + 1 and bool(
+        re.fullmatch(
+            rf"{re.escape(match.group(0))}\s*(?:游戏|作品)?\s*(?:即可|就好|吧)?",
+            standalone,
+            flags=re.I,
+        )
+    )
 
 
 def extract_budget(text: str) -> tuple[float | None, str | None, bool]:

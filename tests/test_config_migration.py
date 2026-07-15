@@ -72,7 +72,6 @@ class ConfigMigrationTest(unittest.TestCase):
                 migrated["model_and_access"],
                 {
                     "llm_provider_id": "provider/custom-model",
-                    "llm_fallback_provider_id": "",
                     "steam_api_key": "test-steam-key",
                 },
             )
@@ -120,9 +119,9 @@ class ConfigMigrationTest(unittest.TestCase):
             "provider/new-model",
         )
         self.assertEqual(migrated["model_and_access"]["steam_api_key"], "legacy-key")
-        self.assertEqual(
-            migrated["model_and_access"]["llm_fallback_provider_id"],
-            "",
+        self.assertNotIn(
+            "llm_fallback_provider_id",
+            migrated["model_and_access"],
         )
         self.assertEqual(migrated["price_and_region"]["default_region"], "JP")
         self.assertTrue(
@@ -190,7 +189,7 @@ class ConfigMigrationTest(unittest.TestCase):
             )
             self.assertEqual(config_path.read_bytes(), raw)
 
-    def test_flat_and_grouped_legacy_fallback_flags_reset_provider_selection(self) -> None:
+    def test_flat_and_grouped_legacy_fallback_fields_are_removed(self) -> None:
         migration = load_migration_module()
         schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
         cases = [
@@ -209,12 +208,12 @@ class ConfigMigrationTest(unittest.TestCase):
         for config in cases:
             with self.subTest(config=config):
                 migrated, changed = migration.migrate_config_data(config, schema)
-                model_config = migrated["model_and_access"]
-
                 self.assertIs(changed, True)
                 self.assertNotIn("enable_llm_fallback", migrated)
+                self.assertNotIn("llm_fallback_provider_id", migrated)
+                model_config = migrated.get("model_and_access", {})
                 self.assertNotIn("enable_llm_fallback", model_config)
-                self.assertEqual(model_config["llm_fallback_provider_id"], "")
+                self.assertNotIn("llm_fallback_provider_id", model_config)
 
     def test_grouped_file_without_legacy_keys_is_not_rewritten(self) -> None:
         migration = load_migration_module()

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from typing import Any
+
+from pydantic import ValidationError
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
@@ -10,6 +13,7 @@ from astrbot.api.star import Context
 
 from ..storage.models import GamePreference
 from .preference_rules import infer_preference_from_text, merge_text_preference
+from .run_notices import RunNotice
 
 SYSTEM_PROMPT = """你是游戏推荐插件的偏好解析器。
 只把用户自然语言解析成 JSON，不要推荐游戏，不要补充解释，不要使用 Markdown。
@@ -43,7 +47,7 @@ PREFERENCE_SCHEMA_HINT = """
   "mood": null,
   "quality_intent": "normal",
   "allow_unreleased": false,
-  "result_count": 5
+  "result_count": 10
 }
 说明：
 - required_tags 只放用户用“必须”“一定要”“只接受”等措辞明确要求的硬条件，
@@ -89,51 +93,92 @@ PREFERENCE_SCHEMA_HINT = """
 """
 
 
+@dataclass(frozen=True)
+class ParseOutcome:
+    preference: GamePreference
+    path: str
+    prelude_messages: tuple[RunNotice, ...] = ()
+
+
+class PreferencePayloadError(ValueError):
+    pass
+
+
+class PreferenceProviderError(RuntimeError):
+    pass
+
+
 class PreferenceParser:
     def __init__(self, context: Context, provider_id: str = "") -> None:
         self.context = context
         self.provider_id = provider_id.strip()
 
-    async def parse_preference(self, event: AstrMessageEvent, text: str) -> GamePreference:
+    async def parse_preference(self, event: AstrMessageEvent, text: str) -> ParseOutcome:
         text = text.strip()
         if not text:
             logger.debug(
                 "recommendation_parse event=parse_complete path=%s",
                 "empty",
             )
-            return GamePreference(parse_warnings=["需求为空，已使用默认偏好。"])
+            return ParseOutcome(
+                GamePreference(parse_warnings=["需求为空，已使用默认偏好。"]),
+                "empty",
+            )
 
         try:
             raw = await self._llm_parse(event, text)
-            preference = merge_text_preference(parse_preference_json(raw), text)
+        except PreferenceProviderError as exc:
+            logger.warning(f"游戏推荐偏好模型不可用，使用关键词 fallback：{exc}")
+            return self._fallback_outcome(text)
+
+        try:
+            parsed = parse_preference_json(raw)
+        except PreferencePayloadError as exc:
+            logger.warning(f"游戏推荐偏好 JSON 无效，尝试修复一次：{exc}")
+        else:
+            preference = merge_text_preference(parsed, text)
             logger.debug(
                 "recommendation_parse event=parse_complete path=%s",
                 "llm",
             )
-            return preference
-        except Exception as exc:
-            logger.warning(f"游戏推荐偏好解析失败，尝试修复 JSON：{exc}")
+            return ParseOutcome(preference, "llm")
 
         try:
             fixed = await self._llm_repair(event, text)
-            preference = merge_text_preference(parse_preference_json(fixed), text)
+        except PreferenceProviderError as exc:
+            logger.warning(f"游戏推荐偏好 JSON 修复模型不可用，使用关键词 fallback：{exc}")
+            return self._fallback_outcome(text)
+
+        try:
+            parsed = parse_preference_json(fixed)
+        except PreferencePayloadError as exc:
+            logger.warning(f"游戏推荐偏好 JSON 修复无效，使用关键词 fallback：{exc}")
+            return self._fallback_outcome(text)
+        else:
+            preference = merge_text_preference(parsed, text)
             logger.debug(
                 "recommendation_parse event=parse_complete path=%s",
                 "llm_repair",
             )
-            return preference
-        except Exception as exc:
-            logger.warning(f"游戏推荐偏好 JSON 修复失败，使用关键词 fallback：{exc}")
+            return ParseOutcome(preference, "llm_repair")
 
+    def _fallback_outcome(self, text: str) -> ParseOutcome:
         preference = keyword_fallback(text)
-        preference.parse_warnings.append(
-            "LLM 偏好解析失败，已使用关键词 fallback，结果可能不完整。"
-        )
         logger.debug(
             "recommendation_parse event=parse_complete path=%s",
             "keyword_fallback",
         )
-        return preference
+        return ParseOutcome(
+            preference,
+            "keyword_fallback",
+            (
+                RunNotice(
+                    code="preference_parser_unavailable",
+                    severity="error",
+                    text="偏好解析模型暂时不可用，已使用关键词规则继续推荐，结果可能不完整。",
+                ),
+            ),
+        )
 
     async def _llm_parse(self, event: AstrMessageEvent, text: str) -> str:
         prompt = f"{PREFERENCE_SCHEMA_HINT}\n用户需求：{text}\n只返回 JSON："
@@ -145,10 +190,16 @@ class PreferenceParser:
 
     async def _llm_generate_text(self, event: AstrMessageEvent, prompt: str) -> str:
         kwargs: dict[str, Any] = {"prompt": prompt, "system_prompt": SYSTEM_PROMPT}
-        provider_id = await self._resolve_provider_id(event)
+        try:
+            provider_id = await self._resolve_provider_id(event)
+        except Exception as exc:
+            raise PreferenceProviderError("provider resolution failed") from exc
         if provider_id:
             kwargs["chat_provider_id"] = provider_id
-        response = await self.context.llm_generate(**kwargs)
+        try:
+            response = await self.context.llm_generate(**kwargs)
+        except Exception as exc:
+            raise PreferenceProviderError("provider request failed") from exc
         return str(getattr(response, "completion_text", "") or "").strip()
 
     async def _resolve_provider_id(self, event: AstrMessageEvent) -> str:
@@ -157,18 +208,33 @@ class PreferenceParser:
         getter = getattr(self.context, "get_current_chat_provider_id", None)
         if not getter:
             return ""
-        try:
-            return str(await getter(umo=event.unified_msg_origin) or "")
-        except Exception as exc:
-            logger.debug(f"获取当前 LLM provider 失败：{exc}")
-            return ""
+        return str(await getter(umo=event.unified_msg_origin) or "")
 
 
 def parse_preference_json(text: str) -> GamePreference:
-    payload = extract_json_object(text)
-    data = json.loads(payload)
-    validator = getattr(GamePreference, "model_validate", None)
-    return validator(data) if validator else GamePreference.parse_obj(data)
+    try:
+        payload = extract_json_object(text)
+        data = json.loads(payload)
+        validate_llm_payload_contract(data)
+        validator = getattr(GamePreference, "model_validate", None)
+        return validator(data) if validator else GamePreference.parse_obj(data)
+    except PreferencePayloadError:
+        raise
+    except (json.JSONDecodeError, ValidationError) as exc:
+        raise PreferencePayloadError(str(exc)) from exc
+
+
+def validate_llm_payload_contract(data: Any) -> None:
+    if not isinstance(data, dict):
+        raise PreferencePayloadError("preference payload must be an object")
+    for field_name in ("derived_intent_tags", "soft_features", "company_preferences"):
+        value = data.get(field_name, [])
+        if not isinstance(value, list):
+            raise PreferencePayloadError(f"{field_name} must be an array")
+        if len(value) > 3:
+            raise PreferencePayloadError(f"{field_name} exceeds the maximum of 3")
+        if any(not isinstance(item, dict) for item in value):
+            raise PreferencePayloadError(f"{field_name} items must be objects")
 
 
 def extract_json_object(text: str) -> str:
@@ -179,7 +245,7 @@ def extract_json_object(text: str) -> str:
     start = cleaned.find("{")
     end = cleaned.rfind("}")
     if start == -1 or end == -1 or end <= start:
-        raise ValueError("LLM did not return a JSON object")
+        raise PreferencePayloadError("LLM did not return a JSON object")
     return cleaned[start : end + 1]
 
 

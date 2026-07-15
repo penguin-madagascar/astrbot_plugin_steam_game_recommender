@@ -69,6 +69,7 @@ from .tag_normalizer import (
     register_steam_tag_aliases,
     static_canonical_tags,
 )
+from .tag_presentation import build_tag_presentations
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +188,7 @@ class SteamGameIndexService:
         self._steam_tag_ids: dict[str, int] = {}
         self._canonical_tag_by_id: dict[int, str] = {}
         self._steam_tag_aliases: dict[str, str] = {}
+        self._presentation_tag_names: dict[str, str] = {}
         self._tag_aliases_lock = asyncio.Lock()
         self._tag_aliases_task: asyncio.Task[bool] | None = None
         self._snapshot_lock = asyncio.Lock()
@@ -254,6 +256,7 @@ class SteamGameIndexService:
                 if hit.candidate.appid is not None
             },
             intent=recall_intent,
+            presentation_tags=self._presentation_tag_names,
         )
         ranked = exclude_previously_shown(ranked, excluded_appids, excluded_titles)
         ranked = [
@@ -333,6 +336,7 @@ class SteamGameIndexService:
             record_candidates,
             preference,
             intent=intent,
+            presentation_tags=self._presentation_tag_names,
         )
         seeds = select_recall_seeds(intent)
         tag_fetches = list(
@@ -1218,6 +1222,7 @@ class SteamGameIndexService:
                 if hit.candidate.appid is not None
             },
             intent=intent,
+            presentation_tags=self._presentation_tag_names,
         )
         ranked = exclude_previously_shown(
             ranked,
@@ -1300,6 +1305,7 @@ class SteamGameIndexService:
             self._steam_tag_ids.clear()
             self._canonical_tag_by_id.clear()
             self._steam_tag_aliases.clear()
+            self._presentation_tag_names.clear()
             return
 
         canonical_by_id: dict[int, str] = {}
@@ -1336,6 +1342,11 @@ class SteamGameIndexService:
             canonical: tag_id for tag_id, canonical in canonical_by_id.items()
         }
         self._canonical_tag_by_id = dict(canonical_by_id)
+        schinese = self._tag_vocabulary_payloads.get("schinese")
+        self._presentation_tag_names = build_tag_presentations(
+            english[0],
+            schinese[0] if schinese is not None else (),
+        )
 
     async def _request_tag_vocabularies(
         self,
@@ -2169,6 +2180,7 @@ def rank_entries(
     profile_tag_weights: dict[str, float] | None = None,
     retrieval_ranks: Mapping[int, int] | None = None,
     intent: RecommendationIntent | None = None,
+    presentation_tags: Mapping[str, str] | None = None,
 ) -> list[RankedGame]:
     positives = reference_candidates(preference, entries)
     negatives = negative_reference_candidates(preference, entries)
@@ -2189,6 +2201,7 @@ def rank_entries(
         negative_reference_candidates=negatives,
         retrieval_ranks=retrieval_ranks,
         language_profile=profile,
+        presentation_tag_names=presentation_tags,
     )
     if logger.isEnabledFor(logging.DEBUG):
         _log_ranking_diagnostics(resolved_intent, entries, ranked)

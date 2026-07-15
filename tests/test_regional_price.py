@@ -194,8 +194,11 @@ class RegionalBudgetAndFormattingTest(unittest.TestCase):
             "\n".join(
                 [
                     "1. 《Test Game》｜推荐分：86/100",
+                    "",
                     "推荐理由：玩法契合合作解谜偏好。评测规模较大，口碑稳定。",
+                    "",
                     "价格（US）：当前价 $60；历史最低 $40；最近促销 $50（结束于 12 天前）",
+                    "",
                     "购买链接：https://store.steampowered.com/app/123/",
                 ]
             ),
@@ -218,7 +221,8 @@ class RegionalBudgetAndFormattingTest(unittest.TestCase):
         self.assertEqual(plain[0], "找到 1 款 Steam 游戏，按推荐分从高到低排列。")
         self.assertEqual(
             warned[0],
-            "找到 1 款 Steam 游戏，按推荐分从高到低排列。\n偏好解析提示：已排除已有游戏",
+            "找到 1 款 Steam 游戏，按推荐分从高到低排列。\n"
+            "偏好解析提示：\n- 已排除已有游戏",
         )
 
     def test_intro_uses_tier_first_wording_when_ranked_results_have_anchor_tiers(self) -> None:
@@ -259,8 +263,9 @@ class RegionalBudgetAndFormattingTest(unittest.TestCase):
 
         text = "\n".join(format_game_block(1, relaxed))
 
-        self.assertIn("推荐理由：Steam 口碑表现较稳定。宽松匹配：", text)
-        self.assertIn("核心特征为soulslike", text)
+        self.assertIn("推荐理由：Steam 口碑表现较稳定。", text)
+        self.assertIn("不推荐理由：宽松匹配：", text)
+        self.assertIn("核心特征为类魂", text)
 
     def test_relaxed_tier_without_core_evidence_still_discloses_limited_match(self) -> None:
         relaxed = RankedGame(
@@ -273,8 +278,8 @@ class RegionalBudgetAndFormattingTest(unittest.TestCase):
 
         text = "\n".join(format_game_block(1, relaxed))
 
-        self.assertIn("宽松匹配", text)
-        self.assertIn("核心特征", text)
+        self.assertNotIn("宽松匹配", text)
+        self.assertNotIn("不推荐理由：", text)
 
     def test_relaxed_tier_adds_label_when_core_evidence_uses_plain_wording(self) -> None:
         relaxed = RankedGame(
@@ -296,7 +301,7 @@ class RegionalBudgetAndFormattingTest(unittest.TestCase):
 
         text = "\n".join(format_game_block(1, relaxed))
 
-        self.assertIn("宽松匹配：核心特征 soulslike 缺失", text)
+        self.assertIn("不推荐理由：核心特征 类魂 缺失", text)
 
 
 class TrackingPriceService:

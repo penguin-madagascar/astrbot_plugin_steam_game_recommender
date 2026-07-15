@@ -49,6 +49,7 @@ from .tag_normalizer import (
     canonical_tags_from_terms,
     normalize_tag,
 )
+from .tag_presentation import presentation_tags
 
 LANGUAGE_LABELS = {
     "schinese": "简体中文",
@@ -62,6 +63,9 @@ LANGUAGE_LABELS = {
     "russian": "俄语",
     "portuguese": "葡萄牙语",
 }
+UNRELEASED_QUALITY_CAUTION = (
+    "使用 60/100 未发售质量先验，仅用于排序，不代表玩家实评或实际知名度"
+)
 
 
 @dataclass(frozen=True)
@@ -134,6 +138,7 @@ def rank_steam_candidates(
     negative_reference_candidates: list[GameCandidate] | None = None,
     retrieval_ranks: Mapping[int, int] | None = None,
     language_profile: SteamTagProfile | None = None,
+    presentation_tag_names: Mapping[str, str] | None = None,
 ) -> list[RankedGame]:
     intent, compatibility_profile = resolve_rank_intent(intent_or_profile)
     profile = language_profile or compatibility_profile or SteamTagProfile()
@@ -201,16 +206,31 @@ def rank_steam_candidates(
             supporting_value,
             negative_value,
         )
-        wilson_value = (
-            wilson_lower_bound(candidate.review_positive_ratio, candidate.review_total)
-            if candidate.review_positive_ratio is not None
-            else 0.0
-        )
-        popularity_value = popularity(candidate.review_total)
-        quality_value = quality_score(
-            candidate.review_positive_ratio,
-            candidate.review_total,
-        )
+        has_actual_reviews = valid_actual_reviews(candidate)
+        if has_actual_reviews:
+            wilson_value = wilson_lower_bound(
+                candidate.review_positive_ratio,
+                candidate.review_total,
+            )
+            reputation_value = wilson_value
+            popularity_value = popularity(candidate.review_total)
+            quality_value = quality_score(
+                candidate.review_positive_ratio,
+                candidate.review_total,
+            )
+            quality_source = "actual_reviews"
+        elif candidate.coming_soon:
+            wilson_value = 0.0
+            reputation_value = 0.60
+            popularity_value = 0.60
+            quality_value = 0.60
+            quality_source = "unreleased_prior"
+        else:
+            wilson_value = 0.0
+            reputation_value = 0.0
+            popularity_value = 0.0
+            quality_value = 0.0
+            quality_source = "none"
         layer_value = layer_score(
             semantic_value,
             quality_value,
@@ -240,8 +260,9 @@ def rank_steam_candidates(
             tag_coverage=anchor_value if tier is not RelevanceTier.BROAD else supporting_value,
             positive_reference=None,
             library_profile=library_match_score(candidate_evidence, library_tags),
-            review_reputation=wilson_value,
+            review_reputation=reputation_value,
             popularity=popularity_value,
+            quality_source=quality_source,
             positive_score=layer_value * 100,
             negative_reference_penalty=min(negative_value * 25.0, 20.0),
             unknown_constraints_penalty=0.0,
@@ -258,6 +279,8 @@ def rank_steam_candidates(
             wilson_value=wilson_value,
             library_tags=library_tags,
             has_positive_references=bool(positive_references),
+            presentation_tag_names=presentation_tag_names,
+            quality_source=quality_source,
         )
         append_company_evidence(explanation, candidate, company_preferences)
         ranked.append(
@@ -416,6 +439,8 @@ def build_anchor_tier_evidence(
     wilson_value: float,
     library_tags: set[str],
     has_positive_references: bool,
+    presentation_tag_names: Mapping[str, str] | None = None,
+    quality_source: str = "none",
 ) -> list[RecommendationEvidence]:
     evidence: list[RecommendationEvidence] = []
     anchors = [
@@ -427,24 +452,38 @@ def build_anchor_tier_evidence(
         tag for tag in anchors if candidate_evidence.direct.get(tag, 0.0) > 0.0
     ]
     if matched_anchors:
+        labels = presentation_tags(matched_anchors, presentation_tag_names)
         evidence.append(
             evidence_item(
                 "core_match",
                 "core",
                 "positive",
-                f"命中核心标签：{'、'.join(matched_anchors[:5])}",
+                (
+                    f"命中核心玩法特征：{'、'.join(labels)}"
+                    if labels
+                    else "命中核心玩法特征"
+                ),
             )
         )
     if tier in {RelevanceTier.B, RelevanceTier.C}:
         missing = [
             tag for tag in anchors if candidate_evidence.direct.get(tag, 0.0) < 0.60
         ]
+        missing_labels = presentation_tags(
+            missing or anchors,
+            presentation_tag_names,
+        )
         evidence.append(
             evidence_item(
                 "core_missing",
                 "core",
                 "uncertain",
-                f"宽松匹配：缺失或证据不足的核心特征为{'、'.join((missing or anchors)[:5])}",
+                (
+                    "宽松匹配：缺失或证据不足的核心特征为"
+                    f"{'、'.join(missing_labels)}"
+                    if missing_labels
+                    else "宽松匹配：部分核心特征缺失或证据不足"
+                ),
                 important=True,
             )
         )
@@ -456,24 +495,37 @@ def build_anchor_tier_evidence(
         and candidate_evidence.supporting.get(intent_tag.tag, 0.0) > 0.0
     ]
     if supporting:
+        supporting_labels = presentation_tags(supporting, presentation_tag_names)
         evidence.append(
             evidence_item(
                 "supporting_match",
                 "supporting",
                 "positive",
-                f"命中辅助标签：{'、'.join(supporting[:5])}",
+                (
+                    f"命中辅助玩法特征：{'、'.join(supporting_labels)}"
+                    if supporting_labels
+                    else "命中辅助玩法特征"
+                ),
             )
         )
     matched_library = [
         tag for tag in library_tags if candidate_evidence.supporting.get(tag, 0.0) > 0.0
     ]
     if matched_library:
+        library_labels = presentation_tags(
+            sorted(matched_library),
+            presentation_tag_names,
+        )
         evidence.append(
             evidence_item(
                 "library_profile",
                 "library",
                 "positive",
-                f"命中游戏库辅助偏好：{'、'.join(sorted(matched_library)[:5])}",
+                (
+                    f"命中游戏库辅助偏好：{'、'.join(library_labels)}"
+                    if library_labels
+                    else "命中游戏库辅助玩法偏好"
+                ),
             )
         )
     if has_positive_references:
@@ -496,7 +548,7 @@ def build_anchor_tier_evidence(
             )
         )
 
-    if candidate.review_total and candidate.review_positive_ratio is not None:
+    if quality_source == "actual_reviews":
         evidence.append(
             evidence_item(
                 "review_confidence",
@@ -507,6 +559,16 @@ def build_anchor_tier_evidence(
                     f"共 {candidate.review_total} 条评测；"
                     f"Wilson 置信下界 {wilson_value:.0%}"
                 ),
+            )
+        )
+    elif quality_source == "unreleased_prior":
+        evidence.append(
+            evidence_item(
+                "unreleased_quality_prior",
+                "reviews",
+                "uncertain",
+                UNRELEASED_QUALITY_CAUTION,
+                important=True,
             )
         )
     else:
@@ -530,6 +592,16 @@ def build_anchor_tier_evidence(
 
     append_language_evidence(evidence, candidate, profile)
     return dedupe_evidence(evidence)
+
+
+def valid_actual_reviews(candidate: GameCandidate) -> bool:
+    count = candidate.review_total
+    ratio = candidate.review_positive_ratio
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        return False
+    if isinstance(ratio, bool) or not isinstance(ratio, (int, float)):
+        return False
+    return math.isfinite(float(ratio)) and 0.0 <= float(ratio) <= 1.0
 
 
 def append_language_evidence(

@@ -290,7 +290,7 @@ class EmptyFallbackFormattingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context.calls, [])
         self.assertIn("Verified Game", messages[1])
 
-    async def test_empty_recommendations_do_not_call_llm_when_fallback_is_disabled(self) -> None:
+    async def test_empty_recommendations_never_generate_unverified_game_list(self) -> None:
         context = FakeLlmContext(
             "LLM 兜底建议（未经过 Steam 索引验证）\n1. 《Mario Kart 8 Deluxe》：适合聚会。"
         )
@@ -302,70 +302,10 @@ class EmptyFallbackFormattingTest(unittest.IsolatedAsyncioTestCase):
             GamePreference(result_count=2),
             [],
             limit=2,
-            fallback_provider_id="",
-            raw_query="Switch 聚会游戏",
         )
 
         self.assertEqual(context.calls, [])
         self.assertEqual(context.current_provider_calls, 0)
-        self.assertEqual(len(messages), 1)
-        self.assertIn("暂时没有找到满足当前条件的游戏", messages[0])
-
-    async def test_empty_recommendations_use_explicit_fallback_provider(self) -> None:
-        context = FakeLlmContext(
-            "LLM 兜底建议（未经过 Steam 索引验证）\n1. 《Mario Kart 8 Deluxe》：适合轻松多人竞速。"
-        )
-
-        messages = await format_recommendation_messages_with_llm(
-            context,
-            FakeEvent(),
-            "provider-1",
-            GamePreference(platforms=["nintendo switch"], result_count=2),
-            [],
-            limit=2,
-            fallback_provider_id="provider-1",
-            raw_query="Switch 聚会游戏",
-        )
-
-        self.assertEqual(len(context.calls), 1)
-        self.assertEqual(context.calls[0]["chat_provider_id"], "provider-1")
-        self.assertEqual(context.current_provider_calls, 0)
-        self.assertEqual(len(messages), 1)
-        self.assertTrue(messages[0].startswith("⚠️"))
-        self.assertIn("LLM 兜底建议（未经过 Steam 索引验证）", messages[0])
-        self.assertIn("Mario Kart 8 Deluxe", messages[0])
-        prompt = context.calls[0]["prompt"]
-        for excluded in ("DLC", "原声", "工具", "套餐", "不同版本"):
-            self.assertIn(excluded, prompt)
-
-    async def test_empty_recommendations_fall_back_when_llm_returns_blank_text(self) -> None:
-        messages = await format_recommendation_messages_with_llm(
-            FakeLlmContext(""),
-            FakeEvent(),
-            "provider-1",
-            GamePreference(result_count=2),
-            [],
-            limit=2,
-            fallback_provider_id="provider-1",
-            raw_query="Switch 聚会游戏",
-        )
-
-        self.assertEqual(len(messages), 1)
-        self.assertIn("暂时没有找到满足当前条件的游戏", messages[0])
-
-    async def test_empty_recommendations_fall_back_when_llm_raises(self) -> None:
-        with patch("astrbot_plugin_steam_game_recommender.services.formatter.logger.warning"):
-            messages = await format_recommendation_messages_with_llm(
-                FakeLlmContext(RuntimeError("provider unavailable")),
-                FakeEvent(),
-                "provider-1",
-                GamePreference(result_count=2),
-                [],
-                limit=2,
-                fallback_provider_id="missing-provider",
-                raw_query="Switch 聚会游戏",
-            )
-
         self.assertEqual(len(messages), 1)
         self.assertIn("暂时没有找到满足当前条件的游戏", messages[0])
 

@@ -9,6 +9,7 @@ from typing import Any
 
 from ..storage.models import GameCandidate, RankedGame, RecommendationEvidence
 from .recommendation_scoring import popularity
+from .tag_presentation import sanitize_user_facing_tag_text
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,14 @@ class ValidatedReason:
     evidence_ids: list[str]
 
 
+@dataclass(frozen=True)
+class ValidatedRecommendationReasons:
+    recommendation_reason: str
+    caution_reason: str | None
+    recommendation_evidence_ids: list[str]
+    caution_evidence_ids: list[str]
+
+
 async def generate_recommendation_reasons(
     context: Any,
     event: Any,
@@ -38,7 +47,7 @@ async def generate_recommendation_reasons(
         return []
     resolved_provider = await resolve_provider_id(context, event, provider_id)
     if not resolved_provider:
-        return [with_reason(game, fallback_reason(game.recommendation_evidence)) for game in games]
+        return [with_fallback_reasons(game) for game in games]
 
     semaphore = asyncio.Semaphore(MAX_REASON_CONCURRENCY)
 
@@ -46,22 +55,36 @@ async def generate_recommendation_reasons(
         evidence = select_reason_evidence(game.recommendation_evidence)
         try:
             async with semaphore:
-                raw = await generate_reason_text(
-                    context,
-                    resolved_provider,
-                    appid=game.appid,
-                    title=game.title,
-                    evidence=evidence,
-                    unplayed=False,
+                response = await context.llm_generate(
+                    chat_provider_id=resolved_provider,
+                    prompt=recommendation_reason_prompt(
+                        game.appid,
+                        game.title,
+                        evidence,
+                    ),
+                    system_prompt=SYSTEM_PROMPT,
                 )
-            result = validate_reason_response(raw, game.appid, evidence)
+            raw = str(getattr(response, "completion_text", "") or "").strip()
+            result = validate_recommendation_reason_response(
+                raw,
+                game.appid,
+                evidence,
+            )
         except Exception as exc:
             logger.warning(
                 "Steam recommendation reason generation failed for %s: %s", game.appid, exc
             )
             result = None
-        reason = result.reason if result else fallback_reason(evidence)
-        return with_reason(game, reason)
+        if result is None:
+            return with_fallback_reasons(game, evidence)
+        recommendation_reason = result.recommendation_reason
+        if any(item.evidence_id == "unreleased_quality_prior" for item in evidence):
+            recommendation_reason = fallback_reason(evidence)
+        return with_reasons(
+            game,
+            recommendation_reason,
+            fallback_caution_reason(evidence),
+        )
 
     return list(await asyncio.gather(*(generate_one(game) for game in games)))
 
@@ -150,6 +173,119 @@ def reason_prompt(
     )
 
 
+def recommendation_reason_prompt(
+    appid: int | None,
+    title: str,
+    evidence: list[RecommendationEvidence],
+) -> str:
+    positive = positive_reason_evidence(evidence)
+    cautions = caution_evidence(evidence)
+    numbered = "\n".join(
+        (
+            f"{index}. ID={item.evidence_id} | {item.sentiment} | {item.category} | "
+            f"{user_facing_evidence_text(item.text)}"
+        )
+        for index, item in enumerate([*positive, *cautions], start=1)
+    )
+    caution_ids = [item.evidence_id for item in cautions]
+    mainstream_rule = (
+        "大作意图只能表述为高知名度/大作倾向，不得声称 AAA 制作预算。\n"
+        if any(item.evidence_id == "mainstream_intent" for item in evidence)
+        else ""
+    )
+    return (
+        f"APPID={appid if appid is not None else 'null'}\n"
+        f"TITLE={title}\n"
+        f"{mainstream_rule}"
+        "推荐理由只能概括 positive 证据，写 2 至 3 句中文，总长度不超过 180 字。\n"
+        "不推荐理由只能概括下列允许的风险证据；不得创造风险。"
+        "有风险时必须覆盖全部风险 ID，无风险时返回 null。\n"
+        f"必须覆盖的风险 ID：{json.dumps(caution_ids, ensure_ascii=False)}\n"
+        f"可信证据：\n{numbered}\n"
+        "只返回 JSON："
+        '{"appid":123,"recommendation_reason":"……。……。",'
+        '"recommendation_evidence_ids":["正向证据ID"],'
+        '"caution_reason":"……。","caution_evidence_ids":["风险证据ID"]}'
+    )
+
+
+def validate_recommendation_reason_response(
+    raw_text: str,
+    appid: int | None,
+    evidence: list[RecommendationEvidence],
+) -> ValidatedRecommendationReasons | None:
+    positive = positive_reason_evidence(evidence)
+    cautions = caution_evidence(evidence)
+    try:
+        payload = json.loads(extract_json_object(raw_text))
+    except Exception:
+        return None
+    if not isinstance(payload, dict) or normalize_appid(payload.get("appid")) != appid:
+        return None
+
+    # Keep accepting the former positive-only response contract so older providers
+    # degrade cleanly while risk-bearing recommendations use the split contract.
+    if "recommendation_reason" not in payload and not cautions:
+        legacy = validate_reason_response(raw_text, appid, positive)
+        if legacy is None:
+            return None
+        return ValidatedRecommendationReasons(
+            recommendation_reason=legacy.reason,
+            caution_reason=None,
+            recommendation_evidence_ids=legacy.evidence_ids,
+            caution_evidence_ids=[],
+        )
+
+    reason = normalize_reason_text(payload.get("recommendation_reason"))
+    if not valid_reason_text(reason, minimum_sentences=2):
+        return None
+    positive_ids = normalize_evidence_ids(payload.get("recommendation_evidence_ids"))
+    available_positive_ids = {item.evidence_id for item in positive}
+    if any(evidence_id not in available_positive_ids for evidence_id in positive_ids):
+        return None
+    if positive and not positive_ids:
+        return None
+    selected_positive = [
+        item for item in positive if item.evidence_id in set(positive_ids)
+    ]
+    if not positive_reason_claims_are_supported(reason, selected_positive):
+        return None
+
+    caution_text = normalize_reason_text(payload.get("caution_reason"))
+    caution_ids = normalize_evidence_ids(payload.get("caution_evidence_ids"))
+    required_caution_ids = {item.evidence_id for item in cautions}
+    if required_caution_ids:
+        if set(caution_ids) != required_caution_ids:
+            return None
+        if not valid_reason_text(caution_text, minimum_sentences=1):
+            return None
+        for item in cautions:
+            if (
+                item.evidence_id == "unreleased_quality_prior"
+                and user_facing_evidence_text(item.text).rstrip("。")
+                not in caution_text.rstrip("。")
+            ):
+                return None
+            if (
+                item.evidence_id != "unreleased_quality_prior"
+                and not important_risk_is_mentioned(item, caution_text)
+            ):
+                return None
+    elif caution_text or caution_ids:
+        return None
+
+    if any(item.evidence_id == "mainstream_intent" for item in evidence) and re.search(
+        r"AAA|3A", reason, flags=re.I
+    ):
+        return None
+    return ValidatedRecommendationReasons(
+        recommendation_reason=reason,
+        caution_reason=caution_text or None,
+        recommendation_evidence_ids=positive_ids,
+        caution_evidence_ids=caution_ids,
+    )
+
+
 def validate_reason_response(
     raw_text: str,
     appid: int | None,
@@ -199,7 +335,10 @@ def select_reason_evidence(
 ) -> list[RecommendationEvidence]:
     maximum = max(int(limit), 1)
     important = [
-        item for item in evidence if item.important and item.sentiment in {"negative", "uncertain"}
+        item
+        for item in evidence
+        if item.sentiment == "negative"
+        or (item.important and item.sentiment == "uncertain")
     ]
     priority = {
         "core": 0,
@@ -227,16 +366,11 @@ def select_reason_evidence(
 
 
 def fallback_reason(evidence: list[RecommendationEvidence]) -> str:
-    selected = select_reason_evidence(evidence)
+    selected = positive_reason_evidence(select_reason_evidence(evidence))
     positives = [
         user_facing_evidence_text(item.text)
         for item in selected
         if item.sentiment == "positive"
-    ]
-    important_risks = [
-        user_facing_evidence_text(item.text)
-        for item in selected
-        if item.important and item.sentiment in {"negative", "uncertain"}
     ]
     sentences: list[str] = []
     if positives:
@@ -245,12 +379,36 @@ def fallback_reason(evidence: list[RecommendationEvidence]) -> str:
         sentences.append("现有 Steam 数据只能提供有限的匹配信息。")
     if len(positives) > 1:
         sentences.append(short_sentence(positives[1], 55))
-    elif not important_risks:
+    else:
         sentences.append("建议结合实际玩法偏好再做最终选择。")
-    if important_risks:
-        risk_text = "；".join(important_risks[:2])
-        sentences.append(short_sentence(risk_text, 60))
     return "".join(sentences[:3])
+
+
+def fallback_caution_reason(evidence: list[RecommendationEvidence]) -> str | None:
+    risks = caution_evidence(evidence)
+    if not risks:
+        return None
+    return "".join(
+        short_sentence(user_facing_evidence_text(item.text), MAX_REASON_LENGTH)
+        for item in risks
+    )
+
+
+def positive_reason_evidence(
+    evidence: list[RecommendationEvidence],
+) -> list[RecommendationEvidence]:
+    return [item for item in evidence if item.sentiment == "positive"]
+
+
+def caution_evidence(
+    evidence: list[RecommendationEvidence],
+) -> list[RecommendationEvidence]:
+    return [
+        item
+        for item in evidence
+        if item.sentiment == "negative"
+        or (item.sentiment == "uncertain" and item.important)
+    ]
 
 
 def fallback_unplayed_reason(evidence: list[RecommendationEvidence]) -> str:
@@ -284,12 +442,38 @@ def important_risk_is_mentioned(item: RecommendationEvidence, reason: str) -> bo
         return any(word in text for word in ("硬条件", "未确认", "不支持", "缺失", "未知"))
     return any(
         word in text
-        for word in ("未确认", "不支持", "高于", "不一致", "未命中", "相似", "缺失", "未知")
+        for word in (
+            "未确认",
+            "不支持",
+            "高于",
+            "不一致",
+            "未命中",
+            "未匹配",
+            "相似",
+            "缺失",
+            "未知",
+        )
     )
 
 
+def positive_reason_claims_are_supported(
+    reason: str,
+    evidence: list[RecommendationEvidence],
+) -> bool:
+    evidence_ids = {item.evidence_id for item in evidence}
+    has_review_facts = "review_confidence" in evidence_ids or "reviews" in evidence_ids
+    has_popularity_facts = has_review_facts or "popularity" in evidence_ids
+    if re.search(r"好评率|评测|玩家评价|玩家评[分论]|口碑|reviews?", reason, flags=re.I):
+        if not has_review_facts:
+            return False
+    if re.search(r"知名度|热门|热度|关注度|popularity", reason, flags=re.I):
+        if not has_popularity_facts:
+            return False
+    return True
+
+
 def user_facing_evidence_text(value: str) -> str:
-    return str(value or "").replace(
+    return sanitize_user_facing_tag_text(str(value or "")).replace(
         "Wilson 置信下界",
         "95% Wilson 好评率下界",
     )
@@ -378,10 +562,49 @@ def extract_json_object(text: str) -> str:
 
 
 def with_reason(game: RankedGame, reason: str) -> RankedGame:
+    return with_reasons(game, reason, game.caution_reason)
+
+
+def with_fallback_reasons(
+    game: RankedGame,
+    evidence: list[RecommendationEvidence] | None = None,
+) -> RankedGame:
+    selected = evidence if evidence is not None else select_reason_evidence(
+        game.recommendation_evidence
+    )
+    return with_reasons(
+        game,
+        fallback_reason(selected),
+        fallback_caution_reason(selected),
+    )
+
+
+def with_reasons(
+    game: RankedGame,
+    recommendation_reason: str,
+    caution_reason: str | None,
+) -> RankedGame:
     copier = getattr(game, "model_copy", None)
+    update = {
+        "recommendation_reason": recommendation_reason,
+        "caution_reason": caution_reason,
+    }
     if copier:
-        return copier(update={"recommendation_reason": reason})
-    return game.copy(update={"recommendation_reason": reason})
+        return copier(update=update)
+    return game.copy(update=update)
+
+
+def normalize_reason_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def valid_reason_text(value: str, *, minimum_sentences: int) -> bool:
+    if not value or len(value) > MAX_REASON_LENGTH:
+        return False
+    count = sentence_count(value)
+    if count < minimum_sentences or count > 3:
+        return False
+    return value.endswith(("。", "！", "？", ".", "!", "?"))
 
 
 async def resolve_provider_id(context: Any, event: Any, provider_id: str) -> str:

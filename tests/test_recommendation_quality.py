@@ -60,7 +60,7 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(ranked[0].title, "Focused Co-op Puzzle")
         self.assertNotIn("It Takes Two", [game.title for game in ranked])
-        self.assertTrue(any("puzzle" in item.text for item in ranked[0].recommendation_evidence))
+        self.assertTrue(any("解谜" in item.text for item in ranked[0].recommendation_evidence))
         self.assertTrue(any(call["search"] == "双人成行" for call in steam.calls))
 
     async def test_reference_search_terms_and_tags_find_dark_souls_like_games(self) -> None:

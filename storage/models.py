@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import math
 import re
 from typing import Any, Callable
 
 from pydantic import BaseModel, Field, validator
+
+from ..services.recommendation_limits import (
+    DEFAULT_RECOMMENDATION_COUNT,
+    MAX_RECOMMENDATION_COUNT,
+)
 
 COMPANY_ALIAS_LIMIT = 5
 
@@ -366,7 +372,7 @@ class GamePreference(BaseModel):
     mood: str | None = None
     quality_intent: str = "normal"
     allow_unreleased: bool = False
-    result_count: int = 5
+    result_count: int = DEFAULT_RECOMMENDATION_COUNT
     parse_warnings: list[str] = Field(default_factory=list)
 
     @validator("platforms", pre=True)
@@ -379,11 +385,23 @@ class GamePreference(BaseModel):
         "extra_tags",
         "genres_dislike",
         "required_tags",
-        "parse_warnings",
         pre=True,
     )
     def _normalize_text_lists(cls, value: Any) -> list[str]:
         return split_text_list(value)
+
+    @validator("parse_warnings", pre=True)
+    def _normalize_parse_warnings(cls, value: Any) -> list[str]:
+        values = value if isinstance(value, (list, tuple, set)) else [value]
+        result: list[str] = []
+        seen: set[str] = set()
+        for item in values:
+            text = re.sub(r"\s+", " ", str(item or "")).strip()
+            key = text.casefold()
+            if text and key not in seen:
+                result.append(text)
+                seen.add(key)
+        return result
 
     @validator("reference_search_terms", pre=True)
     def _normalize_reference_search_terms(cls, value: Any) -> list[str]:
@@ -459,8 +477,8 @@ class GamePreference(BaseModel):
         try:
             count = int(value)
         except (TypeError, ValueError):
-            count = 5
-        return min(max(count, 1), 10)
+            count = DEFAULT_RECOMMENDATION_COUNT
+        return min(max(count, 1), MAX_RECOMMENDATION_COUNT)
 
     class Config:
         extra = "ignore"
@@ -643,6 +661,30 @@ class GameCandidate(BaseModel):
         text = re.sub(r"\s+", " ", str(value or "")).strip()
         return text or None
 
+    @validator("review_total", pre=True)
+    def _normalize_review_total(cls, value: Any) -> int | None:
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(number) or not number.is_integer() or number < 0:
+            return None
+        return int(number)
+
+    @validator("review_positive_ratio", "review_recent_ratio", pre=True)
+    def _normalize_review_ratio(cls, value: Any) -> float | None:
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(number) or not 0.0 <= number <= 1.0:
+            return None
+        return number
+
     @validator("supported_languages", pre=True)
     def _normalize_supported_languages(cls, value: Any) -> list[str]:
         return split_language_list(value)
@@ -702,6 +744,7 @@ class ScoreBreakdown(BaseModel):
     language_adjustment: float = 0.0
     budget_adjustment: float = 0.0
     company_adjustment: float = 0.0
+    quality_source: str = "none"
 
     @validator(
         "anchor_coverage",
@@ -731,6 +774,13 @@ class ScoreBreakdown(BaseModel):
     def _normalize_relevance_tier(cls, value: Any) -> str:
         tier = str(value or "").strip()
         return tier if tier in {"A", "B", "C", "broad"} else "broad"
+
+    @validator("quality_source", pre=True, always=True)
+    def _normalize_quality_source(cls, value: Any) -> str:
+        source = str(value or "none").strip().lower()
+        if source not in {"actual_reviews", "unreleased_prior", "none"}:
+            raise ValueError("invalid quality source")
+        return source
 
     @validator("retrieval_rank", pre=True)
     def _normalize_retrieval_rank(cls, value: Any) -> int:
@@ -837,6 +887,7 @@ class RankedGame(GameCandidate):
     score_breakdown: ScoreBreakdown = Field(default_factory=ScoreBreakdown)
     recommendation_evidence: list[RecommendationEvidence] = Field(default_factory=list)
     recommendation_reason: str = ""
+    caution_reason: str | None = None
     price_summary: GamePriceSummary | None = None
 
     @validator("score", pre=True)
@@ -848,8 +899,13 @@ class RankedGame(GameCandidate):
         return min(max(number, 0), 100)
 
     @validator("recommendation_reason", pre=True)
-    def _normalize_reason(cls, value: Any) -> str:
+    def _normalize_recommendation_reason(cls, value: Any) -> str:
         return re.sub(r"\s+", " ", str(value or "")).strip()
+
+    @validator("caution_reason", pre=True)
+    def _normalize_caution_reason(cls, value: Any) -> str | None:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        return text or None
 
     @classmethod
     def from_candidate(

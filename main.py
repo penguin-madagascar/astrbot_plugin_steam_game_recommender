@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -37,7 +36,12 @@ from .services.played_filter import (
     resolve_library_filter_mode,
 )
 from .services.preference_parser import PreferenceParser
-from .services.recommendation_limits import effective_result_limit
+from .services.preference_rules import extract_result_count
+from .services.recommendation_limits import (
+    DEFAULT_RECOMMENDATION_COUNT,
+    MAX_RECOMMENDATION_COUNT,
+    effective_result_limit,
+)
 from .services.recommendation_memory import (
     PreferencePatch,
     RecommendationMemory,
@@ -56,10 +60,10 @@ from .services.retry_command import (
     parse_retry_request,
 )
 from .services.semantic_feature_verifier import (
-    FeatureVerificationNotice,
     SemanticFeatureVerifier,
     verify_ranked_features,
 )
+from .services.run_notices import RunNotice, dedupe_run_notices
 from .services.steam_index import (
     STEAM_INDEX_FALLBACK_WARNING,
     STEAM_TAG_RECALL_DEGRADED_WARNING,
@@ -87,6 +91,7 @@ class PreparedRecommendation:
     raw_query: str
     preference: GamePreference
     result_limit: int
+    run_notices: tuple[RunNotice, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -96,7 +101,7 @@ class RecommendationRun:
     preference: GamePreference
     result_limit: int
     raw_query: str
-    semantic_feature_notices: tuple[FeatureVerificationNotice, ...] = ()
+    run_notices: tuple[RunNotice, ...] = ()
 
 
 @register(
@@ -120,13 +125,16 @@ class SteamGameRecommenderPlugin(Star):
 
         timeout = safe_int(cache_config.get("timeout_seconds"), 15)
         self.max_results = min(
-            max(safe_int(self.recommendation_config.get("max_results"), 5), 1),
-            10,
+            max(
+                safe_int(
+                    self.recommendation_config.get("max_results"),
+                    DEFAULT_RECOMMENDATION_COUNT,
+                ),
+                1,
+            ),
+            MAX_RECOMMENDATION_COUNT,
         )
         self.provider_id = str(model_config.get("llm_provider_id", "") or "").strip()
-        self.fallback_provider_id = str(
-            model_config.get("llm_fallback_provider_id", "") or ""
-        ).strip()
         self.default_region = normalize_region(str(price_config.get("default_region") or "CN"))
         self.http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout),
@@ -186,21 +194,18 @@ class SteamGameRecommenderPlugin(Star):
             )
             return
 
-        semantic_feature_notices: list[FeatureVerificationNotice] = []
         try:
             retry_request = parse_retry_request(raw_text)
             if retry_request.is_retry:
                 messages = await self._retry_recommendation_messages(
                     event,
                     retry_request.supplement,
-                    semantic_feature_notices=semantic_feature_notices,
                 )
             else:
                 prepared = await self._prepare_recommendation(event, raw_text)
                 run = await self._run_recommendation(event, prepared)
                 await self._save_recent_recommendation(event, run)
                 messages = run.messages
-                semantic_feature_notices.extend(run.semantic_feature_notices)
         except SteamApiError as exc:
             logger.warning(f"Steam game recommendation failed: {exc}")
             yield event.plain_result(f"Steam 查询失败：{exc}")
@@ -213,8 +218,6 @@ class SteamGameRecommenderPlugin(Star):
             yield event.plain_result(f"游戏推荐失败：{exc}")
             return
 
-        for notice in semantic_feature_notices:
-            yield event.plain_result(notice.message)
         yield self._recommendation_result(event, messages)
 
     @filter.command(
@@ -223,12 +226,10 @@ class SteamGameRecommenderPlugin(Star):
         desc="基于最近一次游戏推荐换一批候选。",
     )
     async def retry_recommend_games(self, event: AstrMessageEvent, query: GreedyStr):
-        semantic_feature_notices: list[FeatureVerificationNotice] = []
         try:
             messages = await self._retry_recommendation_messages(
                 event,
                 str(query).strip(),
-                semantic_feature_notices=semantic_feature_notices,
             )
         except SteamApiError as exc:
             logger.warning(f"Steam retry recommendation failed: {exc}")
@@ -242,8 +243,6 @@ class SteamGameRecommenderPlugin(Star):
             yield event.plain_result(f"重新推荐失败：{exc}")
             return
 
-        for notice in semantic_feature_notices:
-            yield event.plain_result(notice.message)
         yield self._recommendation_result(event, messages)
 
     @filter.command(
@@ -451,7 +450,8 @@ class SteamGameRecommenderPlugin(Star):
                 "请输入游戏需求，例如：/gamerec 排除已有 Steam 双人合作解谜"
             )
         text_filter_mode = detect_library_filter_mode(text)
-        preference = await self.preference_parser.parse_preference(event, text)
+        parse_outcome = await self.preference_parser.parse_preference(event, text)
+        preference = parse_outcome.preference
         preference.region = region_query.region
         if preference.budget is not None and not preference.budget_currency:
             preference.budget_currency = region_currency(region_query.region)
@@ -463,13 +463,12 @@ class SteamGameRecommenderPlugin(Star):
         preference.library_filter_mode = library_filter_mode
         if warning := steam_only_scope_warning_for(preference):
             preference.parse_warnings.append(warning)
-        if not has_supported_steam_platform(preference) and not self.fallback_provider_id:
-            raise LibraryFilterModeError(preference.parse_warnings[-1])
         result_limit = effective_result_limit(self.max_results, preference.result_count)
         return PreparedRecommendation(
             raw_query=raw_text,
             preference=preference,
             result_limit=result_limit,
+            run_notices=parse_outcome.prelude_messages,
         )
 
     async def _run_recommendation(
@@ -495,7 +494,7 @@ class SteamGameRecommenderPlugin(Star):
         retrieved_count = 0
         filtered_count = 0
         degradation_reason = "none"
-        semantic_feature_notices: tuple[FeatureVerificationNotice, ...] = ()
+        semantic_feature_notices = ()
         semantic_feature_candidate_count = 0
         if has_supported_steam_platform(preference):
             candidate_pool_size = min(60, max(30, result_limit * 6))
@@ -602,6 +601,15 @@ class SteamGameRecommenderPlugin(Star):
             phase_times.get("final_selection", 0.0),
             phase_times.get("reasons", 0.0),
         )
+        run_notices = dedupe_run_notices(
+            [
+                *prepared.run_notices,
+                *(
+                    RunNotice(notice.code, "warning", notice.message)
+                    for notice in semantic_feature_notices
+                ),
+            ]
+        )
         messages = await format_recommendation_messages_with_llm(
             self.context,
             event,
@@ -609,15 +617,7 @@ class SteamGameRecommenderPlugin(Star):
             preference,
             ranked_games,
             limit=result_limit,
-            fallback_provider_id=(
-                ""
-                if any(
-                    feature.role in {"required", "core"}
-                    for feature in preference.soft_features
-                )
-                else self.fallback_provider_id
-            ),
-            raw_query=prepared.raw_query,
+            run_notices=run_notices,
         )
         return RecommendationRun(
             messages=messages,
@@ -625,14 +625,13 @@ class SteamGameRecommenderPlugin(Star):
             preference=preference,
             result_limit=result_limit,
             raw_query=prepared.raw_query,
-            semantic_feature_notices=semantic_feature_notices,
+            run_notices=run_notices,
         )
 
     async def _retry_recommendation_messages(
         self,
         event: AstrMessageEvent,
         supplement: str = "",
-        semantic_feature_notices: list[FeatureVerificationNotice] | None = None,
     ) -> list[str]:
         chat_platform, chat_user_id = chat_identity_from_event(event)
         memory = await load_recommendation_memory(
@@ -654,6 +653,7 @@ class SteamGameRecommenderPlugin(Star):
             patch = parsed_patch.patch
             preference = memory.preference
             result_limit = memory.result_limit
+            run_notices: tuple[RunNotice, ...] = ()
             if parsed_patch.residual_text:
                 supplemental = await self._prepare_recommendation(
                     event,
@@ -666,6 +666,7 @@ class SteamGameRecommenderPlugin(Star):
                 )
                 if explicitly_changes_result_count(parsed_patch.residual_text):
                     result_limit = supplemental.result_limit
+                run_notices = supplemental.run_notices
             preference, patch_excluded_appids, patch_excluded_titles = apply_preference_patch(
                 preference,
                 patch,
@@ -676,6 +677,7 @@ class SteamGameRecommenderPlugin(Star):
                 raw_query=f"{memory.raw_query} {supplement}".strip(),
                 preference=preference,
                 result_limit=result_limit,
+                run_notices=run_notices,
             )
         else:
             prepared = PreparedRecommendation(
@@ -696,8 +698,6 @@ class SteamGameRecommenderPlugin(Star):
             run,
             patch if supplement else None,
         )
-        if semantic_feature_notices is not None:
-            semantic_feature_notices.extend(run.semantic_feature_notices)
         return run.messages
 
     async def _save_recent_recommendation(
@@ -793,4 +793,4 @@ def config_section(config: Mapping[str, Any], name: str) -> Mapping[str, Any]:
 
 
 def explicitly_changes_result_count(text: str) -> bool:
-    return bool(re.search(r"\d+\s*(?:款|个|部)", str(text or "")))
+    return extract_result_count(str(text or "")) is not None

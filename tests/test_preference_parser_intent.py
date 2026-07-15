@@ -91,9 +91,10 @@ class PreferenceParserDiagnosticsTest(unittest.IsolatedAsyncioTestCase):
         parser = PreferenceParser(SimpleNamespace(), provider_id="provider/test")
 
         with patch.object(parser_module.logger, "debug") as debug:
-            preference = await parser.parse_preference(object(), "  ")
+            outcome = await parser.parse_preference(object(), "  ")
 
-        self.assertIn("需求为空", preference.parse_warnings[0])
+        self.assertIn("需求为空", outcome.preference.parse_warnings[0])
+        self.assertEqual(outcome.path, "empty")
         debug.assert_called_once_with(
             "recommendation_parse event=parse_complete path=%s",
             "empty",
@@ -111,9 +112,9 @@ class PreferenceParserDiagnosticsTest(unittest.IsolatedAsyncioTestCase):
         parser = PreferenceParser(context, provider_id="provider/test")
 
         with patch.object(parser_module.logger, "debug") as debug:
-            preference = await parser.parse_preference(object(), "想玩解谜游戏")
+            outcome = await parser.parse_preference(object(), "想玩解谜游戏")
 
-        self.assertIn("puzzle", preference.genres_like)
+        self.assertIn("puzzle", outcome.preference.genres_like)
         debug.assert_called_once_with(
             "recommendation_parse event=parse_complete path=%s",
             "llm",
@@ -135,9 +136,9 @@ class PreferenceParserDiagnosticsTest(unittest.IsolatedAsyncioTestCase):
             provider_id="provider/test",
         )
         with patch.object(parser_module.logger, "debug") as debug:
-            preference = await parser.parse_preference(object(), "想玩解谜游戏")
+            outcome = await parser.parse_preference(object(), "想玩解谜游戏")
 
-        self.assertIn("puzzle", preference.genres_like)
+        self.assertIn("puzzle", outcome.preference.genres_like)
         debug.assert_called_once_with(
             "recommendation_parse event=parse_complete path=%s",
             "llm_repair",
@@ -152,9 +153,10 @@ class PreferenceParserDiagnosticsTest(unittest.IsolatedAsyncioTestCase):
             provider_id="provider/test",
         )
         with patch.object(parser_module.logger, "debug") as debug:
-            preference = await parser.parse_preference(object(), "想玩解谜游戏")
+            outcome = await parser.parse_preference(object(), "想玩解谜游戏")
 
-        self.assertTrue(any("关键词 fallback" in item for item in preference.parse_warnings))
+        self.assertEqual(outcome.preference.parse_warnings, [])
+        self.assertEqual(outcome.prelude_messages[0].code, "preference_parser_unavailable")
         debug.assert_called_once_with(
             "recommendation_parse event=parse_complete path=%s",
             "keyword_fallback",

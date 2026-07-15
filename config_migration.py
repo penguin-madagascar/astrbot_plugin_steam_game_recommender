@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Any
 
 PLUGIN_NAME = "astrbot_plugin_steam_game_recommender"
-LEGACY_FALLBACK_FLAG = "enable_llm_fallback"
+OBSOLETE_LLM_FALLBACK_KEYS = frozenset(
+    {"enable_llm_fallback", "llm_fallback_provider_id"}
+)
 OBSOLETE_SCORING_WEIGHT_KEYS = frozenset(
     {
         "tag_coverage_weight",
@@ -21,7 +23,6 @@ OBSOLETE_SCORING_WEIGHT_KEYS = frozenset(
 GROUP_LEGACY_KEYS = {
     "model_and_access": (
         "llm_provider_id",
-        "llm_fallback_provider_id",
         "steam_api_key",
     ),
     "price_and_region": (
@@ -41,7 +42,7 @@ GROUP_LEGACY_KEYS = {
 }
 LEGACY_KEYS = frozenset(
     {
-        LEGACY_FALLBACK_FLAG,
+        *OBSOLETE_LLM_FALLBACK_KEYS,
         *(key for group_keys in GROUP_LEGACY_KEYS.values() for key in group_keys),
     }
 )
@@ -52,9 +53,11 @@ def migrate_config_data(
     schema: Mapping[str, Any],
 ) -> tuple[dict[str, Any], bool]:
     existing_model_config = config.get("model_and_access")
-    has_legacy_fallback_flag = LEGACY_FALLBACK_FLAG in config or (
+    has_obsolete_llm_fallback = any(
+        key in config for key in OBSOLETE_LLM_FALLBACK_KEYS
+    ) or (
         isinstance(existing_model_config, Mapping)
-        and LEGACY_FALLBACK_FLAG in existing_model_config
+        and any(key in existing_model_config for key in OBSOLETE_LLM_FALLBACK_KEYS)
     )
     existing_scoring_config = config.get("recommendation_and_scoring")
     has_obsolete_scoring_weights = any(
@@ -63,12 +66,23 @@ def migrate_config_data(
         isinstance(existing_scoring_config, Mapping)
         and any(key in existing_scoring_config for key in OBSOLETE_SCORING_WEIGHT_KEYS)
     )
-    has_legacy_values = any(key in config for key in LEGACY_KEYS)
-    if not has_legacy_values and not has_legacy_fallback_flag:
-        if has_obsolete_scoring_weights:
+    has_flat_legacy_values = any(
+        key in config
+        for key in LEGACY_KEYS
+        if key not in OBSOLETE_LLM_FALLBACK_KEYS
+    )
+    if not has_flat_legacy_values:
+        if has_obsolete_scoring_weights or has_obsolete_llm_fallback:
             cleaned = dict(config)
             for key in OBSOLETE_SCORING_WEIGHT_KEYS:
                 cleaned.pop(key, None)
+            for key in OBSOLETE_LLM_FALLBACK_KEYS:
+                cleaned.pop(key, None)
+            if isinstance(existing_model_config, Mapping):
+                model_config = dict(existing_model_config)
+                for key in OBSOLETE_LLM_FALLBACK_KEYS:
+                    model_config.pop(key, None)
+                cleaned["model_and_access"] = model_config
             if isinstance(existing_scoring_config, Mapping):
                 scoring_config = dict(existing_scoring_config)
                 for key in OBSOLETE_SCORING_WEIGHT_KEYS:
@@ -89,7 +103,8 @@ def migrate_config_data(
             continue
         existing = config.get(group_name)
         group_values = dict(existing) if isinstance(existing, Mapping) else {}
-        group_values.pop(LEGACY_FALLBACK_FLAG, None)
+        for key in OBSOLETE_LLM_FALLBACK_KEYS:
+            group_values.pop(key, None)
         if group_name == "recommendation_and_scoring":
             for key in OBSOLETE_SCORING_WEIGHT_KEYS:
                 group_values.pop(key, None)
@@ -100,8 +115,6 @@ def migrate_config_data(
                 group_values[item_name] = config[item_name]
             else:
                 group_values[item_name] = item_schema.get("default")
-        if group_name == "model_and_access" and has_legacy_fallback_flag:
-            group_values["llm_fallback_provider_id"] = ""
         migrated[group_name] = group_values
     return migrated, True
 

@@ -336,7 +336,7 @@ class PreferenceRulesTest(unittest.TestCase):
         self.assertEqual(preference.extra_tags, [])
         self.assertEqual(preference.quality_intent, "mainstream")
         self.assertFalse(preference.allow_unreleased)
-        self.assertEqual(preference.result_count, 5)
+        self.assertEqual(preference.result_count, 10)
 
     def test_normal_query_keeps_default_quality_and_release_policy(self) -> None:
         preference = infer_preference_from_text("推荐轻松解谜游戏")
@@ -347,6 +347,8 @@ class PreferenceRulesTest(unittest.TestCase):
     def test_explicit_upcoming_query_allows_unreleased_games(self) -> None:
         cases = (
             "推荐尚未发售的单人游戏",
+            "推荐待发售的单人游戏",
+            "推荐待发行的单人游戏",
             "show me upcoming single-player games",
             "推荐 coming-soon games",
         )

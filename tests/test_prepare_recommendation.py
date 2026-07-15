@@ -5,7 +5,7 @@ import types
 import unittest
 import json
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 class FakeStar:
@@ -57,11 +57,13 @@ try:
         SteamGameRecommenderPlugin,
     )
     from astrbot_plugin_steam_game_recommender.services.played_filter import LibraryFilterModeError
-    from astrbot_plugin_steam_game_recommender.services.steam_index import STEAM_ONLY_SCOPE_WARNING
-    from astrbot_plugin_steam_game_recommender.services.semantic_feature_verifier import (
-        FeatureVerificationNotice,
-        verdict_cache_key,
+    from astrbot_plugin_steam_game_recommender.services.preference_parser import ParseOutcome
+    from astrbot_plugin_steam_game_recommender.services.recommendation_memory import (
+        RecommendationMemory,
     )
+    from astrbot_plugin_steam_game_recommender.services.run_notices import RunNotice
+    from astrbot_plugin_steam_game_recommender.services.steam_index import STEAM_ONLY_SCOPE_WARNING
+    from astrbot_plugin_steam_game_recommender.services.semantic_feature_verifier import verdict_cache_key
     from astrbot_plugin_steam_game_recommender.storage.models import (
         GameCandidate,
         GamePreference,
@@ -77,13 +79,18 @@ except ModuleNotFoundError as exc:
 
 
 class FakePreferenceParser:
-    def __init__(self, preference: GamePreference) -> None:
+    def __init__(
+        self,
+        preference: GamePreference,
+        notices: tuple[RunNotice, ...] = (),
+    ) -> None:
         self.preference = preference
+        self.notices = notices
         self.seen_text = ""
 
-    async def parse_preference(self, _event, text: str) -> GamePreference:
+    async def parse_preference(self, _event, text: str) -> ParseOutcome:
         self.seen_text = text
-        return self.preference
+        return ParseOutcome(self.preference, "llm", self.notices)
 
 
 class PluginDashboardConfigTest(unittest.TestCase):
@@ -91,7 +98,6 @@ class PluginDashboardConfigTest(unittest.TestCase):
         config = {
             "model_and_access": {
                 "llm_provider_id": "provider/nested",
-                "llm_fallback_provider_id": "provider/fallback",
                 "steam_api_key": "nested-steam-key",
             },
             "price_and_region": {
@@ -141,7 +147,7 @@ class PluginDashboardConfigTest(unittest.TestCase):
             plugin = SteamGameRecommenderPlugin(object(), config)
 
         self.assertEqual(plugin.provider_id, "provider/nested")
-        self.assertEqual(plugin.fallback_provider_id, "provider/fallback")
+        self.assertFalse(hasattr(plugin, "fallback_provider_id"))
         self.assertEqual(plugin.default_region, "JP")
         self.assertEqual(plugin.max_results, 8)
         self.assertEqual(
@@ -170,14 +176,13 @@ class PluginDashboardConfigTest(unittest.TestCase):
         )
 
 
-class PrepareRecommendationLlmFallbackTest(unittest.IsolatedAsyncioTestCase):
+class PrepareRecommendationTest(unittest.IsolatedAsyncioTestCase):
     async def test_prepare_applies_query_region_and_region_local_budget_currency(self) -> None:
         preference = GamePreference(platforms=["steam"], budget=50, result_count=3)
         parser = FakePreferenceParser(preference)
         plugin = object.__new__(SteamGameRecommenderPlugin)
         plugin.max_results = 5
         plugin.default_region = "CN"
-        plugin.fallback_provider_id = ""
         plugin.preference_parser = parser
 
         prepared = await plugin._prepare_recommendation(
@@ -189,7 +194,7 @@ class PrepareRecommendationLlmFallbackTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prepared.preference.region, "US")
         self.assertEqual(prepared.preference.budget_currency, "USD")
 
-    async def test_prepare_rejects_non_steam_platform_without_fallback_provider(self) -> None:
+    async def test_prepare_keeps_non_steam_scope_warning_for_empty_explanation(self) -> None:
         preference = GamePreference(
             platforms=["nintendo switch"],
             genres_like=["party"],
@@ -197,36 +202,34 @@ class PrepareRecommendationLlmFallbackTest(unittest.IsolatedAsyncioTestCase):
         )
         plugin = object.__new__(SteamGameRecommenderPlugin)
         plugin.max_results = 5
-        plugin.fallback_provider_id = ""
-        plugin.preference_parser = FakePreferenceParser(preference)
-
-        with self.assertRaises(LibraryFilterModeError) as raised:
-            await plugin._prepare_recommendation(object(), "Switch 聚会游戏")
-
-        self.assertIn("仅支持 Steam", str(raised.exception))
-
-    async def test_prepare_allows_non_steam_platform_with_explicit_fallback_provider(self) -> None:
-        preference = GamePreference(
-            platforms=["nintendo switch"],
-            genres_like=["party"],
-            result_count=3,
-        )
-        plugin = object.__new__(SteamGameRecommenderPlugin)
-        plugin.max_results = 5
-        plugin.fallback_provider_id = "provider/fallback"
         plugin.preference_parser = FakePreferenceParser(preference)
 
         prepared = await plugin._prepare_recommendation(object(), "Switch 聚会游戏")
 
-        self.assertEqual(prepared.preference.platforms, ["nintendo switch"])
+        self.assertIn(STEAM_ONLY_SCOPE_WARNING, prepared.preference.parse_warnings)
         self.assertEqual(prepared.result_limit, 3)
+
+    async def test_prepare_carries_parser_notice_without_putting_it_in_warnings(self) -> None:
+        preference = GamePreference(
+            platforms=["nintendo switch"],
+            genres_like=["party"],
+            result_count=3,
+        )
+        plugin = object.__new__(SteamGameRecommenderPlugin)
+        plugin.max_results = 5
+        notice = RunNotice("parser", "error", "偏好模型不可用")
+        plugin.preference_parser = FakePreferenceParser(preference, (notice,))
+
+        prepared = await plugin._prepare_recommendation(object(), "Switch 聚会游戏")
+
+        self.assertEqual(prepared.run_notices, (notice,))
+        self.assertNotIn("偏好模型不可用", prepared.preference.parse_warnings)
         self.assertIn(STEAM_ONLY_SCOPE_WARNING, prepared.preference.parse_warnings)
 
-    async def test_run_uses_llm_fallback_without_calling_steam_index_for_non_steam_only(
+    async def test_non_steam_only_returns_verified_empty_explanation_without_llm(
         self,
     ) -> None:
         plugin = object.__new__(SteamGameRecommenderPlugin)
-        plugin.fallback_provider_id = "provider/fallback"
         plugin.provider_id = "provider-1"
         plugin.context = FakeLlmContext(
             "LLM 兜底建议（未经过 Steam 索引验证）\n1. 《Mario Kart 8 Deluxe》：适合轻松多人竞速。"
@@ -252,15 +255,88 @@ class PrepareRecommendationLlmFallbackTest(unittest.IsolatedAsyncioTestCase):
         run = await plugin._run_recommendation(FakeEvent(), prepared)
 
         self.assertEqual(run.ranked_games, [])
-        self.assertEqual(len(plugin.context.calls), 1)
-        self.assertIn("LLM 兜底建议（未经过 Steam 索引验证）", run.messages[0])
-        self.assertIn("Mario Kart 8 Deluxe", run.messages[0])
+        self.assertEqual(plugin.context.calls, [])
+        self.assertEqual(len(run.messages), 1)
+        self.assertIn("暂时没有找到满足当前条件的游戏", run.messages[0])
+        self.assertIn(STEAM_ONLY_SCOPE_WARNING, run.messages[0])
+
+    async def test_retry_parser_notice_is_request_local_and_not_replayed(self) -> None:
+        notice = RunNotice(
+            "preference_parser_unavailable",
+            "error",
+            "偏好解析模型暂时不可用，已使用关键词规则继续处理。",
+        )
+        memory = RecommendationMemory(
+            chat_platform="qq",
+            chat_user_id="test",
+            raw_query="合作游戏",
+            preference=GamePreference(platforms=["steam"], result_count=5),
+            result_limit=5,
+            shown_appids=[],
+            shown_titles=[],
+            created_at=1,
+        )
+        plugin = object.__new__(SteamGameRecommenderPlugin)
+        plugin.cache = object()
+        prepared_runs: list[PreparedRecommendation] = []
+
+        async def prepare(_event, text, default_region=None):
+            self.assertEqual(text, "改成三款解谜游戏")
+            self.assertIsNone(default_region)
+            return PreparedRecommendation(
+                raw_query=text,
+                preference=GamePreference(
+                    platforms=["steam"],
+                    genres_like=["puzzle"],
+                    result_count=3,
+                ),
+                result_limit=3,
+                run_notices=(notice,),
+            )
+
+        async def execute(_event, prepared, **_kwargs):
+            prepared_runs.append(prepared)
+            return RecommendationRun(
+                messages=[
+                    *(item.text for item in prepared.run_notices),
+                    f"结果数量：{prepared.result_limit}",
+                ],
+                ranked_games=[],
+                preference=prepared.preference,
+                result_limit=prepared.result_limit,
+                raw_query=prepared.raw_query,
+                run_notices=prepared.run_notices,
+            )
+
+        async def save(*_args, **_kwargs):
+            return None
+
+        plugin._prepare_recommendation = prepare
+        plugin._run_recommendation = execute
+        plugin._save_retry_memory = save
+
+        with patch.object(
+            main_module,
+            "load_recommendation_memory",
+            AsyncMock(return_value=memory),
+        ):
+            first_messages = await plugin._retry_recommendation_messages(
+                FakeEvent(),
+                "改成三款解谜游戏",
+            )
+            second_messages = await plugin._retry_recommendation_messages(FakeEvent())
+
+        self.assertEqual(first_messages[0], notice.text)
+        self.assertEqual(first_messages[-1], "结果数量：3")
+        self.assertEqual(second_messages, ["结果数量：5"])
+        self.assertEqual(prepared_runs[0].run_notices, (notice,))
+        self.assertEqual(prepared_runs[1].run_notices, ())
+        self.assertNotIn(notice.text, memory.preference.parse_warnings)
 
 
 class RecommendationPipelineTest(unittest.IsolatedAsyncioTestCase):
     async def test_library_snapshot_is_loaded_once_for_profile_and_filtering(self) -> None:
         plugin = object.__new__(SteamGameRecommenderPlugin)
-        plugin.fallback_provider_id = ""
         plugin.provider_id = ""
         plugin.context = FakeLlmContext("")
         plugin.cache = BoundAccountCache()
@@ -285,7 +361,6 @@ class RecommendationPipelineTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_only_owned_passes_owned_appids_as_edition_preference(self) -> None:
         plugin = object.__new__(SteamGameRecommenderPlugin)
-        plugin.fallback_provider_id = ""
         plugin.provider_id = ""
         plugin.context = FakeLlmContext("")
         plugin.cache = BoundAccountCache()
@@ -319,7 +394,6 @@ class RecommendationPipelineTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_final_output_guard_drops_unconfirmed_or_non_game_candidates(self) -> None:
         plugin = object.__new__(SteamGameRecommenderPlugin)
-        plugin.fallback_provider_id = ""
         plugin.provider_id = ""
         plugin.context = FakeLlmContext("")
         plugin.cache = BoundAccountCache()
@@ -392,7 +466,7 @@ class SemanticFeatureMainPipelineTest(unittest.IsolatedAsyncioTestCase):
             list(range(1, 21)),
         )
         self.assertEqual([game.appid for game in run.ranked_games], list(range(1, 21)))
-        self.assertEqual(run.semantic_feature_notices, ())
+        self.assertEqual(run.run_notices, ())
         self.assertEqual(preference.parse_warnings, [])
         expected_keys = {
             verdict_cache_key(
@@ -429,7 +503,6 @@ class SemanticFeatureMainPipelineTest(unittest.IsolatedAsyncioTestCase):
         )
         cache = SemanticMemoryCache()
         plugin = semantic_pipeline_plugin(context, cache, [semantic_ranked_game(1)])
-        plugin.fallback_provider_id = "provider/fallback"
         prepared = PreparedRecommendation("分支剧情", preference, 5)
 
         async def identity_reasons(_context, _event, _provider_id, ranked_games):
@@ -443,7 +516,7 @@ class SemanticFeatureMainPipelineTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(run.ranked_games, [])
         self.assertEqual(
-            [notice.code for notice in run.semantic_feature_notices],
+            [notice.code for notice in run.run_notices],
             ["semantic_feature_contract_failure"],
         )
         self.assertEqual(preference.parse_warnings, [])
@@ -462,13 +535,13 @@ class SemanticFeatureMainPipelineTest(unittest.IsolatedAsyncioTestCase):
         plugin = object.__new__(SteamGameRecommenderPlugin)
         preference = GamePreference()
         run = RecommendationRun(
-            messages=["recommendations"],
+            messages=["notice", "recommendations"],
             ranked_games=[],
             preference=preference,
             result_limit=5,
             raw_query="query",
-            semantic_feature_notices=(
-                FeatureVerificationNotice("semantic_feature_contract_failure", "notice"),
+            run_notices=(
+                RunNotice("semantic_feature_contract_failure", "warning", "notice"),
             ),
         )
         saved: list[RecommendationRun] = []
@@ -489,7 +562,7 @@ class SemanticFeatureMainPipelineTest(unittest.IsolatedAsyncioTestCase):
 
         results = [item async for item in plugin.recommend_games(event, "query")]
 
-        self.assertEqual(results, [("plain", "notice"), ("plain", "recommendations")])
+        self.assertEqual(results, [("plain", "notice\n\nrecommendations")])
         self.assertEqual(saved, [run])
         self.assertEqual(preference.parse_warnings, [])
 
@@ -569,7 +642,6 @@ def semantic_pipeline_plugin(
     games: list[RankedGame],
 ) -> SteamGameRecommenderPlugin:
     plugin = object.__new__(SteamGameRecommenderPlugin)
-    plugin.fallback_provider_id = ""
     plugin.provider_id = ""
     plugin.context = context
     plugin.cache = cache

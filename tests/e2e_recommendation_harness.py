@@ -302,7 +302,9 @@ async def run_e2e_scenario(
 ) -> E2ERun:
     llm_context = FrozenLLMContext(scenario)
     parser = PreferenceParser(llm_context, provider_id="frozen-e2e")
-    preference = await parser.parse_preference(object(), str(scenario["query"]))
+    preference = (
+        await parser.parse_preference(object(), str(scenario["query"]))
+    ).preference
     client = FrozenSteamClient(fixture)
     index = RecordingSteamGameIndexService(
         client,

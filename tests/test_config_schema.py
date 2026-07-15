@@ -30,7 +30,7 @@ class ConfigSchemaTest(unittest.TestCase):
         self.assertEqual(list(schema), GROUP_KEYS)
         self.assertEqual(
             list(group_items(schema, "model_and_access")),
-            ["llm_provider_id", "llm_fallback_provider_id", "steam_api_key"],
+            ["llm_provider_id", "steam_api_key"],
         )
         self.assertEqual(
             list(group_items(schema, "price_and_region")),
@@ -64,15 +64,6 @@ class ConfigSchemaTest(unittest.TestCase):
         )
         self.assertTrue(items["llm_provider_id"]["hint"].startswith("‼️留空时"))
         self.assertEqual(items["llm_provider_id"]["_special"], "select_provider")
-        fallback = items["llm_fallback_provider_id"]
-        self.assertEqual(fallback["type"], "string")
-        self.assertEqual(fallback["_special"], "select_provider")
-        self.assertEqual(fallback["default"], "")
-        self.assertTrue(fallback["hint"].startswith("⚠️"))
-        self.assertIn("Steam 应用类型", fallback["hint"])
-        self.assertIn("版本", fallback["hint"])
-        self.assertIn("套餐", fallback["hint"])
-
         steam_key = items["steam_api_key"]
         self.assertEqual(steam_key["type"], "string")
         self.assertEqual(steam_key["default"], "")
@@ -101,6 +92,7 @@ class ConfigSchemaTest(unittest.TestCase):
         items = group["items"]
 
         self.assertEqual(items["steam_index_ttl_hours"]["default"], 168)
+        self.assertEqual(items["max_results"]["default"], 10)
         self.assertEqual(items["steam_min_review_count"]["default"], 50)
         self.assertEqual(items["steam_min_positive_ratio"]["default"], 0.65)
         self.assertIn("/gamerec", group["hint"])

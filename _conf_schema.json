@@ -2,19 +2,12 @@
   "model_and_access": {
     "type": "object",
     "description": "模型与鉴权",
-    "hint": "配置偏好解析、推荐兜底和 Steam 游戏库访问",
+    "hint": "配置偏好解析、推荐理由和 Steam 游戏库访问",
     "items": {
       "llm_provider_id": {
         "type": "string",
         "description": "用于偏好解析和推荐理由的 LLM 提供商",
         "hint": "‼️留空时尝试使用当前会话模型；偏好解析失败会降级为关键词规则，单款理由失败会降级为可信证据规则理由。",
-        "_special": "select_provider",
-        "default": ""
-      },
-      "llm_fallback_provider_id": {
-        "type": "string",
-        "description": "用于空结果兜底的 LLM 提供商",
-        "hint": "⚠️ 仅在 Steam 索引或过滤后为空时使用；这些 LLM 建议未经过 Steam 应用类型、同作版本和套餐校验，可能包含 DLC、原声、工具、套餐或不同版本。留空即关闭。",
         "_special": "select_provider",
         "default": ""
       },
@@ -56,7 +49,7 @@
         "type": "int",
         "description": "默认推荐数量上限",
         "hint": "每次默认返回的推荐条数，范围 1-10；用户明确要求数量时会优先采用用户数量但不超过该上限。",
-        "default": 5
+        "default": 10
       },
       "steam_index_ttl_hours": {
         "type": "int",
