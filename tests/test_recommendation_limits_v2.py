@@ -58,7 +58,7 @@ class RecommendationLimitsV2Test(unittest.TestCase):
         self.assertEqual(effective_result_limit(None, None), 10)
         self.assertEqual(effective_result_limit(99, 99), 10)
 
-    def test_new_schema_defaults_to_ten_and_removes_llm_game_list_fallback(self) -> None:
+    def test_new_schema_defaults_to_ten_and_keeps_fallback_opt_in(self) -> None:
         root = Path(__file__).resolve().parents[1]
         schema = json.loads((root / "_conf_schema.json").read_text(encoding="utf-8"))
 
@@ -66,12 +66,11 @@ class RecommendationLimitsV2Test(unittest.TestCase):
             schema["recommendation_and_scoring"]["items"]["max_results"]["default"],
             10,
         )
-        self.assertNotIn(
-            "llm_fallback_provider_id",
-            schema["model_and_access"]["items"],
-        )
+        fallback = schema["model_and_access"]["items"]["llm_fallback_provider_id"]
+        self.assertEqual(fallback["default"], "")
+        self.assertEqual(fallback["_special"], "select_provider")
 
-    def test_migration_drops_old_fallback_fields_but_keeps_saved_limit(self) -> None:
+    def test_migration_drops_old_bool_but_keeps_provider_and_saved_limit(self) -> None:
         root = Path(__file__).resolve().parents[1]
         schema = json.loads((root / "_conf_schema.json").read_text(encoding="utf-8"))
         migrated, changed = migrate_config_data(
@@ -89,7 +88,10 @@ class RecommendationLimitsV2Test(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(
             migrated["model_and_access"],
-            {"llm_provider_id": "provider/current"},
+            {
+                "llm_provider_id": "provider/current",
+                "llm_fallback_provider_id": "provider/old-fallback",
+            },
         )
         self.assertEqual(migrated["recommendation_and_scoring"]["max_results"], 5)
 

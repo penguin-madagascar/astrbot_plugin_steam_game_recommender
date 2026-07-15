@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import time
 import types
 import unittest
 import json
@@ -51,19 +52,36 @@ command_stub.GreedyStr = getattr(command_stub, "GreedyStr", str)
 
 try:
     from astrbot_plugin_steam_game_recommender import main as main_module
+    from astrbot_plugin_steam_game_recommender.clients.steam import SteamApiError
     from astrbot_plugin_steam_game_recommender.main import (
         PreparedRecommendation,
         RecommendationRun,
         SteamGameRecommenderPlugin,
     )
-    from astrbot_plugin_steam_game_recommender.services.played_filter import LibraryFilterModeError
+    from astrbot_plugin_steam_game_recommender.services.played_filter import (
+        LIBRARY_FILTER_EXCLUDE_OWNED,
+        LibraryFilterModeError,
+    )
+    from astrbot_plugin_steam_game_recommender.services.llm_fallback import (
+        UnverifiedGameSuggestion,
+    )
     from astrbot_plugin_steam_game_recommender.services.preference_parser import ParseOutcome
     from astrbot_plugin_steam_game_recommender.services.recommendation_memory import (
         RecommendationMemory,
+        RecommendationResultSummary,
+        dump_memory,
+        recommendation_memory_key,
     )
     from astrbot_plugin_steam_game_recommender.services.run_notices import RunNotice
     from astrbot_plugin_steam_game_recommender.services.steam_index import STEAM_ONLY_SCOPE_WARNING
-    from astrbot_plugin_steam_game_recommender.services.semantic_feature_verifier import verdict_cache_key
+    from astrbot_plugin_steam_game_recommender.services.steam_recall import (
+        RecallHealth,
+        RecallUnavailableError,
+    )
+    from astrbot_plugin_steam_game_recommender.services.semantic_feature_verifier import (
+        RankedFeatureVerificationOutcome,
+        verdict_cache_key,
+    )
     from astrbot_plugin_steam_game_recommender.storage.models import (
         GameCandidate,
         GamePreference,
@@ -98,6 +116,7 @@ class PluginDashboardConfigTest(unittest.TestCase):
         config = {
             "model_and_access": {
                 "llm_provider_id": "provider/nested",
+                "llm_fallback_provider_id": "provider/fallback",
                 "semantic_verification_batch_size": "99",
                 "steam_api_key": "nested-steam-key",
             },
@@ -150,7 +169,7 @@ class PluginDashboardConfigTest(unittest.TestCase):
 
         self.assertEqual(plugin.provider_id, "provider/nested")
         self.assertEqual(getattr(plugin, "semantic_verification_batch_size", None), 10)
-        self.assertFalse(hasattr(plugin, "fallback_provider_id"))
+        self.assertEqual(plugin.fallback_provider_id, "provider/fallback")
         self.assertEqual(plugin.default_region, "JP")
         self.assertEqual(plugin.max_results, 8)
         self.assertEqual(
@@ -236,6 +255,25 @@ class PluginDashboardConfigTest(unittest.TestCase):
         self.assertIs(enabled_plugin.reuse_identical_query_cache, True)
         self.assertIs(enabled_kwargs["reuse_cache"], True)
 
+    def test_fallback_provider_defaults_empty_and_does_not_read_flat_config(self) -> None:
+        with (
+            patch.object(main_module.httpx, "AsyncClient", return_value=object()),
+            patch.object(main_module, "SQLiteCacheRepository", return_value=object()),
+            patch.object(main_module, "SteamClient"),
+            patch.object(main_module, "PreferenceParser"),
+            patch.object(main_module, "SteamGameIndexService"),
+            patch.object(main_module, "SteamPriceBridge") as price_bridge,
+        ):
+            price_bridge.return_value.is_available.return_value = False
+            default_plugin = SteamGameRecommenderPlugin(object(), {})
+            flat_plugin = SteamGameRecommenderPlugin(
+                object(),
+                {"llm_fallback_provider_id": "provider/legacy-flat"},
+            )
+
+        self.assertEqual(default_plugin.fallback_provider_id, "")
+        self.assertEqual(flat_plugin.fallback_provider_id, "")
+
 
 class PrepareRecommendationTest(unittest.IsolatedAsyncioTestCase):
     async def test_prepare_applies_query_region_and_region_local_budget_currency(self) -> None:
@@ -287,13 +325,21 @@ class PrepareRecommendationTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("偏好模型不可用", prepared.preference.parse_warnings)
         self.assertIn(STEAM_ONLY_SCOPE_WARNING, prepared.preference.parse_warnings)
 
-    async def test_non_steam_only_returns_verified_empty_explanation_without_llm(
+    async def test_non_steam_empty_keeps_rule_result_when_fallback_is_disabled(
         self,
     ) -> None:
         plugin = object.__new__(SteamGameRecommenderPlugin)
         plugin.provider_id = "provider-1"
+        plugin.fallback_provider_id = ""
         plugin.context = FakeLlmContext(
-            "LLM 兜底建议（未经过 Steam 索引验证）\n1. 《Mario Kart 8 Deluxe》：适合轻松多人竞速。"
+            json.dumps(
+                {
+                    "suggestions": [
+                        {"title": "Game A", "reason": "符合多人偏好。"}
+                    ]
+                },
+                ensure_ascii=False,
+            )
         )
         plugin.steam_index = RaisingSteamIndex()
         plugin.price_bridge = RaisingPriceBridge()
@@ -470,6 +516,398 @@ class RecommendationPipelineTest(unittest.IsolatedAsyncioTestCase):
         run = await plugin._run_recommendation(FakeEvent(), prepared)
 
         self.assertEqual([game.title for game in run.ranked_games], ["Base Game"])
+
+
+class LlmFallbackMainPipelineTest(unittest.IsolatedAsyncioTestCase):
+    async def test_explicit_provider_adds_structured_fallback_after_non_steam_rule_result(
+        self,
+    ) -> None:
+        context = FakeLlmContext(
+            json.dumps(
+                {
+                    "suggestions": [
+                        {"title": "Game A", "reason": "符合多人合作偏好。"}
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        )
+        plugin = empty_pipeline_plugin(context)
+        prepared = PreparedRecommendation(
+            raw_query="非 Steam 多人合作",
+            preference=GamePreference(
+                platforms=["other"],
+                parse_warnings=[STEAM_ONLY_SCOPE_WARNING],
+            ),
+            result_limit=2,
+            run_notices=(RunNotice("parser", "warning", "解析通知"),),
+        )
+
+        run = await plugin._run_recommendation(FakeEvent(), prepared)
+
+        self.assertEqual(len(context.calls), 1)
+        self.assertEqual(
+            context.calls[0]["chat_provider_id"],
+            "provider/explicit-fallback",
+        )
+        self.assertEqual(run.ranked_games, [])
+        self.assertEqual(
+            run.unverified_suggestions,
+            (UnverifiedGameSuggestion("Game A", "符合多人合作偏好。"),),
+        )
+        self.assertTrue(run.used_unverified_fallback)
+        self.assertEqual(run.messages[0], "解析通知")
+        self.assertIn("暂时没有找到满足当前条件的游戏", run.messages[1])
+        self.assertIn(STEAM_ONLY_SCOPE_WARNING, run.messages[1])
+        self.assertEqual(
+            run.messages[2],
+            "⚠️ LLM 兜底建议（未经过 Steam 数据验证）",
+        )
+        self.assertEqual(
+            run.messages[3],
+            "1. 《Game A》\n模型判断理由：符合多人合作偏好。",
+        )
+
+    async def test_healthy_language_constrained_steam_empty_result_uses_fallback(
+        self,
+    ) -> None:
+        context = FakeLlmContext(
+            json.dumps(
+                {
+                    "suggestions": [
+                        {"title": "Game A", "reason": "符合解谜偏好。"}
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        )
+        plugin = empty_pipeline_plugin(context)
+
+        run = await plugin._run_recommendation(
+            FakeEvent(),
+            PreparedRecommendation(
+                "Steam 解谜",
+                GamePreference(
+                    platforms=["steam"],
+                    genres_like=["puzzle"],
+                    required_languages=["schinese"],
+                ),
+                2,
+            ),
+        )
+
+        self.assertEqual(len(context.calls), 1)
+        self.assertTrue(run.used_unverified_fallback)
+
+    async def test_semantic_filter_empty_result_uses_fallback(self) -> None:
+        context = FakeLlmContext(
+            json.dumps(
+                {
+                    "suggestions": [
+                        {"title": "Game A", "reason": "符合分支剧情偏好。"}
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        )
+        plugin = empty_pipeline_plugin(
+            context,
+            games=[RankedGame(appid=1, title="Candidate", app_type="game", score=80)],
+        )
+        plugin.provider_id = "provider/semantic-verifier"
+        preference = GamePreference(
+            platforms=["steam"],
+            soft_features=[
+                {
+                    "constraint_id": "branching",
+                    "source_span": "分支剧情",
+                    "normalized_text": "branching story",
+                    "role": "required",
+                    "polarity": "positive",
+                }
+            ],
+        )
+
+        with patch.object(
+            main_module,
+            "verify_ranked_features",
+            AsyncMock(return_value=RankedFeatureVerificationOutcome()),
+        ):
+            run = await plugin._run_recommendation(
+                FakeEvent(),
+                PreparedRecommendation("必须有分支剧情", preference, 2),
+            )
+
+        self.assertEqual(len(context.calls), 1)
+        self.assertTrue(run.used_unverified_fallback)
+
+    async def test_library_filter_empty_result_uses_fallback(self) -> None:
+        context = FakeLlmContext(
+            json.dumps(
+                {
+                    "suggestions": [
+                        {"title": "Game A", "reason": "符合动作玩法偏好。"}
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        )
+        plugin = empty_pipeline_plugin(
+            context,
+            games=[RankedGame(appid=1, title="Owned Game", app_type="game", score=80)],
+        )
+
+        async def owned_games(_event, required):
+            self.assertTrue(required)
+            return [SteamOwnedGame(appid=1, name="Owned Game")]
+
+        plugin._owned_games_for_recommendation = owned_games
+        run = await plugin._run_recommendation(
+            FakeEvent(),
+            PreparedRecommendation(
+                "排除已有的动作游戏",
+                GamePreference(
+                    platforms=["steam"],
+                    genres_like=["action"],
+                    library_filter_mode=LIBRARY_FILTER_EXCLUDE_OWNED,
+                ),
+                2,
+            ),
+        )
+
+        self.assertEqual(len(context.calls), 1)
+        self.assertTrue(run.used_unverified_fallback)
+
+    async def test_budget_price_filter_empty_result_uses_fallback(self) -> None:
+        context = FakeLlmContext(
+            json.dumps(
+                {
+                    "suggestions": [
+                        {"title": "Game A", "reason": "符合预算需求。"}
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        )
+        plugin = empty_pipeline_plugin(
+            context,
+            games=[RankedGame(appid=1, title="Candidate", app_type="game", score=80)],
+        )
+        plugin.price_bridge = EmptyPriceBridge()
+
+        run = await plugin._run_recommendation(
+            FakeEvent(),
+            PreparedRecommendation(
+                "预算内的动作游戏",
+                GamePreference(
+                    platforms=["steam"],
+                    genres_like=["action"],
+                    budget=50,
+                ),
+                2,
+            ),
+        )
+
+        self.assertEqual(len(context.calls), 1)
+        self.assertTrue(run.used_unverified_fallback)
+
+    async def test_contract_failure_repairs_once_then_keeps_rule_empty_result(
+        self,
+    ) -> None:
+        context = FakeLlmContext("not json")
+        plugin = empty_pipeline_plugin(context)
+
+        run = await plugin._run_recommendation(
+            FakeEvent(),
+            PreparedRecommendation("Steam 解谜", GamePreference(platforms=["steam"]), 2),
+        )
+
+        self.assertEqual(len(context.calls), 2)
+        self.assertEqual(run.unverified_suggestions, ())
+        self.assertEqual(
+            [notice.code for notice in run.run_notices],
+            ["llm_fallback_unavailable"],
+        )
+        self.assertEqual(
+            run.messages[0],
+            "LLM 兜底服务暂时不可用，本次仅保留规则空结果。",
+        )
+        self.assertIn("暂时没有找到满足当前条件的游戏", run.messages[1])
+        self.assertNotIn("LLM 兜底建议", "\n".join(run.messages))
+
+    async def test_provider_failure_calls_once_then_keeps_rule_empty_result(
+        self,
+    ) -> None:
+        context = FailingProviderContext()
+        plugin = empty_pipeline_plugin(context)
+
+        run = await plugin._run_recommendation(
+            FakeEvent(),
+            PreparedRecommendation("Steam 解谜", GamePreference(platforms=["steam"]), 2),
+        )
+
+        self.assertEqual(context.calls, 1)
+        self.assertEqual(run.unverified_suggestions, ())
+        self.assertEqual(
+            [notice.code for notice in run.run_notices],
+            ["llm_fallback_unavailable"],
+        )
+        self.assertNotIn("LLM 兜底建议", "\n".join(run.messages))
+
+    async def test_verified_ranked_result_never_calls_fallback(self) -> None:
+        context = RaisingLlmContext()
+        plugin = empty_pipeline_plugin(
+            context,
+            games=[RankedGame(appid=1, title="Verified Game", app_type="game", score=80)],
+        )
+
+        run = await plugin._run_recommendation(
+            FakeEvent(),
+            PreparedRecommendation(
+                "Steam action",
+                GamePreference(platforms=["steam"], genres_like=["action"]),
+                2,
+            ),
+        )
+
+        self.assertEqual([game.title for game in run.ranked_games], ["Verified Game"])
+        self.assertEqual(context.calls, 0)
+        self.assertFalse(run.used_unverified_fallback)
+
+    async def test_typed_steam_and_unknown_pipeline_errors_do_not_trigger_fallback(
+        self,
+    ) -> None:
+        errors = [
+            RecallUnavailableError(RecallHealth()),
+            SteamApiError("steam failed"),
+            RuntimeError("programming error"),
+        ]
+
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                context = RaisingLlmContext()
+                plugin = empty_pipeline_plugin(context)
+                plugin.steam_index = ErrorSteamIndex(error)
+
+                with self.assertRaises(type(error)):
+                    await plugin._run_recommendation(
+                        FakeEvent(),
+                        PreparedRecommendation(
+                            "Steam query",
+                            GamePreference(platforms=["steam"]),
+                            2,
+                        ),
+                    )
+
+                self.assertEqual(context.calls, 0)
+
+    async def test_identical_empty_runs_call_provider_each_time(self) -> None:
+        context = FakeLlmContext(
+            json.dumps(
+                {
+                    "suggestions": [
+                        {"title": "Game A", "reason": "符合玩法偏好。"}
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        )
+        plugin = empty_pipeline_plugin(context)
+        prepared = PreparedRecommendation(
+            "same query",
+            GamePreference(platforms=["other"]),
+            1,
+        )
+
+        await plugin._run_recommendation(FakeEvent(), prepared)
+        await plugin._run_recommendation(FakeEvent(), prepared)
+
+        self.assertEqual(len(context.calls), 2)
+
+
+class LlmFallbackMemoryIsolationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_initial_fallback_result_does_not_write_recommendation_memory(
+        self,
+    ) -> None:
+        plugin = object.__new__(SteamGameRecommenderPlugin)
+        plugin.cache = object()
+        run = RecommendationRun(
+            messages=["fallback"],
+            ranked_games=[],
+            preference=GamePreference(platforms=["steam"]),
+            result_limit=1,
+            raw_query="query",
+            unverified_suggestions=(
+                UnverifiedGameSuggestion("Fallback Game", "模型匹配理由。"),
+            ),
+        )
+
+        with patch.object(
+            main_module,
+            "save_recommendation_memory",
+            AsyncMock(),
+        ) as save_memory:
+            await plugin._save_recent_recommendation(FakeEvent(), run)
+
+        save_memory.assert_not_awaited()
+
+    async def test_retry_fallback_preserves_verified_memory_and_exclusions(
+        self,
+    ) -> None:
+        memory = RecommendationMemory(
+            chat_platform="qq",
+            chat_user_id="test",
+            raw_query="verified query",
+            preference=GamePreference(platforms=["steam"], genres_like=["action"]),
+            result_limit=2,
+            shown_appids=[42],
+            shown_titles=["verified game"],
+            created_at=time.time(),
+            last_results=[
+                RecommendationResultSummary(
+                    appid=42,
+                    title="Verified Game",
+                    tags=["action"],
+                )
+            ],
+        )
+        cache = SemanticMemoryCache()
+        key = recommendation_memory_key("qq", "test")
+        original_payload = dump_memory(memory)
+        cache.payloads[key] = original_payload
+        plugin = object.__new__(SteamGameRecommenderPlugin)
+        plugin.cache = cache
+        excluded_calls: list[tuple[list[int], list[str]]] = []
+
+        async def execute(_event, prepared, **kwargs):
+            excluded_calls.append(
+                (list(kwargs["excluded_appids"]), list(kwargs["excluded_titles"]))
+            )
+            return RecommendationRun(
+                messages=["fallback"],
+                ranked_games=[],
+                preference=prepared.preference,
+                result_limit=prepared.result_limit,
+                raw_query=prepared.raw_query,
+                unverified_suggestions=(
+                    UnverifiedGameSuggestion("Fallback Game", "模型匹配理由。"),
+                ),
+            )
+
+        plugin._run_recommendation = execute
+        plugin._save_retry_memory = AsyncMock()
+
+        await plugin._retry_recommendation_messages(FakeEvent())
+        await plugin._retry_recommendation_messages(FakeEvent())
+
+        plugin._save_retry_memory.assert_not_awaited()
+        self.assertEqual(
+            excluded_calls,
+            [([42], ["verified game"]), ([42], ["verified game"])],
+        )
+        self.assertNotIn("Fallback Game", excluded_calls[1][1])
+        self.assertEqual(cache.payloads[key], original_payload)
+        self.assertEqual(cache.writes, [])
 
 
 class SemanticFeatureMainPipelineTest(unittest.IsolatedAsyncioTestCase):
@@ -810,6 +1248,58 @@ class FakeLlmContext:
         return FakeLlmResponse(self.response)
 
 
+class RaisingLlmContext:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def llm_generate(self, **_kwargs):
+        self.calls += 1
+        raise AssertionError("fallback provider must not be called")
+
+
+class FailingProviderContext:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def llm_generate(self, **_kwargs):
+        self.calls += 1
+        raise RuntimeError("provider unavailable")
+
+
+class ErrorSteamIndex:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    async def recommend(self, _preference, **_kwargs):
+        raise self.error
+
+
+def empty_pipeline_plugin(
+    context,
+    games: list[RankedGame] | None = None,
+) -> SteamGameRecommenderPlugin:
+    plugin = object.__new__(SteamGameRecommenderPlugin)
+    plugin.provider_id = ""
+    plugin.fallback_provider_id = "provider/explicit-fallback"
+    plugin.semantic_verification_batch_size = 5
+    plugin.context = context
+    plugin.cache = object()
+    plugin.steam_client = SimpleNamespace(language="schinese")
+    plugin.steam_index = StaticSemanticSteamIndex(games or [])
+    plugin.price_bridge = IdentityPriceBridge()
+
+    async def no_owned_games(_event, required):
+        del required
+        return []
+
+    async def no_profile(_event, _owned_games):
+        return {}
+
+    plugin._owned_games_for_recommendation = no_owned_games
+    plugin._user_profile_tag_weights = no_profile
+    return plugin
+
+
 class RaisingSteamIndex:
     async def recommend(self, **_kwargs):
         raise AssertionError("pure non-Steam fallback must not call Steam index")
@@ -829,6 +1319,11 @@ class IdentityPriceBridge:
 
     async def enrich_ranked_games(self, games, _preference):
         return games
+
+
+class EmptyPriceBridge:
+    async def enrich_ranked_games(self, _games, _preference):
+        return []
 
 
 class BoundAccountCache:

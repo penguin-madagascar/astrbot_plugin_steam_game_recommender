@@ -32,6 +32,7 @@ class ConfigSchemaTest(unittest.TestCase):
             list(group_items(schema, "model_and_access")),
             [
                 "llm_provider_id",
+                "llm_fallback_provider_id",
                 "semantic_verification_batch_size",
                 "steam_api_key",
             ],
@@ -68,6 +69,16 @@ class ConfigSchemaTest(unittest.TestCase):
         )
         self.assertTrue(items["llm_provider_id"]["hint"].startswith("‼️留空时"))
         self.assertEqual(items["llm_provider_id"]["_special"], "select_provider")
+        fallback = items["llm_fallback_provider_id"]
+        self.assertEqual(fallback["type"], "string")
+        self.assertEqual(fallback["_special"], "select_provider")
+        self.assertEqual(fallback["default"], "")
+        self.assertIn("留空", fallback["hint"])
+        self.assertIn("关闭", fallback["hint"])
+        self.assertIn("正常", fallback["hint"])
+        self.assertIn("零结果", fallback["hint"])
+        self.assertIn("未经过 Steam", fallback["hint"])
+        self.assertIn("绝不自动使用当前会话模型", fallback["hint"])
         batch_size = items.get("semantic_verification_batch_size")
         self.assertIsNotNone(batch_size)
         self.assertEqual(batch_size["type"], "int")

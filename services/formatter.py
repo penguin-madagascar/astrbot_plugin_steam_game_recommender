@@ -12,8 +12,11 @@ from .explanation_builder import (
     fallback_reason,
     user_facing_evidence_text,
 )
+from .llm_fallback import UnverifiedGameSuggestion
 from .recommendation_limits import DEFAULT_RECOMMENDATION_COUNT
 from .run_notices import RunNotice
+
+UNVERIFIED_FALLBACK_DISCLAIMER = "⚠️ LLM 兜底建议（未经过 Steam 数据验证）"
 
 
 def format_recommendations(
@@ -31,6 +34,7 @@ def format_recommendation_messages(
     ranked_games: list[RankedGame],
     limit: int | None = None,
     run_notices: list[RunNotice] | tuple[RunNotice, ...] = (),
+    unverified_suggestions: tuple[UnverifiedGameSuggestion, ...] = (),
 ) -> list[str]:
     notice_messages = [notice.text for notice in run_notices]
     count = min(
@@ -44,7 +48,14 @@ def format_recommendation_messages(
         ]
         if preference.parse_warnings:
             lines.append(format_parse_warnings(preference.parse_warnings))
-        return [*notice_messages, "\n".join(lines)]
+        messages = [*notice_messages, "\n".join(lines)]
+        if unverified_suggestions:
+            messages.append(UNVERIFIED_FALLBACK_DISCLAIMER)
+            messages.extend(
+                format_unverified_suggestion(index, suggestion)
+                for index, suggestion in enumerate(unverified_suggestions, start=1)
+            )
+        return messages
 
     displayed_games = ranked_games[:count]
     has_anchor_tiers = any(
@@ -64,6 +75,13 @@ def format_recommendation_messages(
     for index, game in enumerate(ranked_games[:count], start=1):
         messages.append("\n".join(format_game_block(index, game, region=preference.region or "CN")))
     return messages
+
+
+def format_unverified_suggestion(
+    index: int,
+    suggestion: UnverifiedGameSuggestion,
+) -> str:
+    return f"{index}. 《{suggestion.title}》\n模型判断理由：{suggestion.reason}"
 
 
 async def format_recommendations_with_llm(

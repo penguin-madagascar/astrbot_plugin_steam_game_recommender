@@ -8,9 +8,7 @@ from pathlib import Path
 from typing import Any
 
 PLUGIN_NAME = "astrbot_plugin_steam_game_recommender"
-OBSOLETE_LLM_FALLBACK_KEYS = frozenset(
-    {"enable_llm_fallback", "llm_fallback_provider_id"}
-)
+OBSOLETE_LLM_FALLBACK_KEYS = frozenset({"enable_llm_fallback"})
 OBSOLETE_SCORING_WEIGHT_KEYS = frozenset(
     {
         "tag_coverage_weight",
@@ -23,6 +21,7 @@ OBSOLETE_SCORING_WEIGHT_KEYS = frozenset(
 GROUP_LEGACY_KEYS = {
     "model_and_access": (
         "llm_provider_id",
+        "llm_fallback_provider_id",
         "steam_api_key",
     ),
     "price_and_region": (

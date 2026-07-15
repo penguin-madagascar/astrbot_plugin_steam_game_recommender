@@ -23,8 +23,14 @@ from .services.explanation_builder import (
     generate_unplayed_reason,
     resolve_provider_id,
 )
-from .services.formatter import format_recommendation_messages_with_llm
+from .services.formatter import format_recommendation_messages
 from .services.game_identity import is_confirmed_base_game
+from .services.llm_fallback import (
+    LlmFallbackContractError,
+    LlmFallbackProviderError,
+    UnverifiedGameSuggestion,
+    generate_unverified_game_suggestions,
+)
 from .services.message_delivery import build_forward_message_chain
 from .services.played_filter import (
     LIBRARY_FILTER_EXCLUDE_OWNED,
@@ -102,6 +108,11 @@ class RecommendationRun:
     result_limit: int
     raw_query: str
     run_notices: tuple[RunNotice, ...] = ()
+    unverified_suggestions: tuple[UnverifiedGameSuggestion, ...] = ()
+
+    @property
+    def used_unverified_fallback(self) -> bool:
+        return bool(self.unverified_suggestions)
 
 
 @register(
@@ -139,6 +150,9 @@ class SteamGameRecommenderPlugin(Star):
             MAX_RECOMMENDATION_COUNT,
         )
         self.provider_id = str(model_config.get("llm_provider_id", "") or "").strip()
+        self.fallback_provider_id = str(
+            model_config.get("llm_fallback_provider_id", "") or ""
+        ).strip()
         self.semantic_verification_batch_size = min(
             max(
                 safe_int(
@@ -631,14 +645,39 @@ class SteamGameRecommenderPlugin(Star):
                 ),
             ]
         )
-        messages = await format_recommendation_messages_with_llm(
-            self.context,
-            event,
-            self.provider_id,
+        unverified_suggestions: tuple[UnverifiedGameSuggestion, ...] = ()
+        fallback_provider_id = str(
+            getattr(self, "fallback_provider_id", "") or ""
+        ).strip()
+        if not ranked_games and fallback_provider_id:
+            try:
+                unverified_suggestions = (
+                    await generate_unverified_game_suggestions(
+                        self.context,
+                        fallback_provider_id,
+                        raw_query=prepared.raw_query,
+                        preference=preference,
+                        result_limit=result_limit,
+                    )
+                )
+            except (LlmFallbackContractError, LlmFallbackProviderError) as exc:
+                logger.warning("LLM empty-result fallback unavailable: %s", exc)
+                run_notices = dedupe_run_notices(
+                    [
+                        *run_notices,
+                        RunNotice(
+                            "llm_fallback_unavailable",
+                            "warning",
+                            "LLM 兜底服务暂时不可用，本次仅保留规则空结果。",
+                        ),
+                    ]
+                )
+        messages = format_recommendation_messages(
             preference,
             ranked_games,
             limit=result_limit,
             run_notices=run_notices,
+            unverified_suggestions=unverified_suggestions,
         )
         return RecommendationRun(
             messages=messages,
@@ -647,6 +686,7 @@ class SteamGameRecommenderPlugin(Star):
             result_limit=result_limit,
             raw_query=prepared.raw_query,
             run_notices=run_notices,
+            unverified_suggestions=unverified_suggestions,
         )
 
     async def _retry_recommendation_messages(
@@ -712,13 +752,14 @@ class SteamGameRecommenderPlugin(Star):
             excluded_appids=list(dict.fromkeys([*memory.shown_appids, *patch_excluded_appids])),
             excluded_titles=list(dict.fromkeys([*memory.shown_titles, *patch_excluded_titles])),
         )
-        await self._save_retry_memory(
-            chat_platform,
-            chat_user_id,
-            memory,
-            run,
-            patch if supplement else None,
-        )
+        if not run.used_unverified_fallback:
+            await self._save_retry_memory(
+                chat_platform,
+                chat_user_id,
+                memory,
+                run,
+                patch if supplement else None,
+            )
         return run.messages
 
     async def _save_recent_recommendation(

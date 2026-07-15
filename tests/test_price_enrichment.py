@@ -268,7 +268,7 @@ class PriceFormattingTest(unittest.TestCase):
         self.assertIn("建议结合个人偏好选择", text)
 
 
-class EmptyFallbackFormattingTest(unittest.IsolatedAsyncioTestCase):
+class FormatterLlmIoBoundaryTest(unittest.IsolatedAsyncioTestCase):
     async def test_non_empty_recommendations_never_call_llm_polishing(self) -> None:
         context = FakeLlmContext(AssertionError("per-game LLM polishing must stay disabled"))
 
@@ -290,9 +290,11 @@ class EmptyFallbackFormattingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context.calls, [])
         self.assertIn("Verified Game", messages[1])
 
-    async def test_empty_recommendations_never_generate_unverified_game_list(self) -> None:
+    async def test_legacy_empty_formatter_wrapper_remains_pure_rule_rendering(
+        self,
+    ) -> None:
         context = FakeLlmContext(
-            "LLM 兜底建议（未经过 Steam 索引验证）\n1. 《Mario Kart 8 Deluxe》：适合聚会。"
+            '{"suggestions":[{"title":"Game A","reason":"符合玩法偏好。"}]}'
         )
 
         messages = await format_recommendation_messages_with_llm(

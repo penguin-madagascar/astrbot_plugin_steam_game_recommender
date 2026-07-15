@@ -73,6 +73,7 @@ class ConfigMigrationTest(unittest.TestCase):
                 migrated["model_and_access"],
                 {
                     "llm_provider_id": "provider/custom-model",
+                    "llm_fallback_provider_id": "",
                     "semantic_verification_batch_size": 5,
                     "steam_api_key": "test-steam-key",
                 },
@@ -125,10 +126,7 @@ class ConfigMigrationTest(unittest.TestCase):
             "provider/new-model",
         )
         self.assertEqual(migrated["model_and_access"]["steam_api_key"], "legacy-key")
-        self.assertNotIn(
-            "llm_fallback_provider_id",
-            migrated["model_and_access"],
-        )
+        self.assertEqual(migrated["model_and_access"]["llm_fallback_provider_id"], "")
         self.assertEqual(migrated["price_and_region"]["default_region"], "JP")
         self.assertTrue(
             migration.OBSOLETE_SCORING_WEIGHT_KEYS.isdisjoint(
@@ -195,20 +193,13 @@ class ConfigMigrationTest(unittest.TestCase):
             )
             self.assertEqual(config_path.read_bytes(), raw)
 
-    def test_flat_and_grouped_legacy_fallback_fields_are_removed(self) -> None:
+    def test_only_obsolete_fallback_bool_is_removed_without_enabling_provider(self) -> None:
         migration = load_migration_module()
         schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
         cases = [
-            {
-                "enable_llm_fallback": False,
-                "llm_fallback_provider_id": "provider/flat-selection",
-            },
-            {
-                "model_and_access": {
-                    "enable_llm_fallback": True,
-                    "llm_fallback_provider_id": "provider/grouped-selection",
-                }
-            },
+            {"enable_llm_fallback": True},
+            {"enable_llm_fallback": False},
+            {"model_and_access": {"enable_llm_fallback": True}},
         ]
 
         for config in cases:
@@ -220,6 +211,66 @@ class ConfigMigrationTest(unittest.TestCase):
                 model_config = migrated.get("model_and_access", {})
                 self.assertNotIn("enable_llm_fallback", model_config)
                 self.assertNotIn("llm_fallback_provider_id", model_config)
+
+    def test_explicit_fallback_provider_is_migrated_and_preserved_with_bool(self) -> None:
+        migration = load_migration_module()
+        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        cases = [
+            (
+                {
+                    "enable_llm_fallback": False,
+                    "llm_fallback_provider_id": "provider/flat-selection",
+                },
+                "provider/flat-selection",
+            ),
+            (
+                {
+                    "model_and_access": {
+                        "enable_llm_fallback": True,
+                        "llm_fallback_provider_id": "provider/grouped-selection",
+                    }
+                },
+                "provider/grouped-selection",
+            ),
+        ]
+
+        for config, expected in cases:
+            with self.subTest(config=config):
+                migrated, changed = migration.migrate_config_data(config, schema)
+
+                self.assertIs(changed, True)
+                self.assertNotIn("enable_llm_fallback", migrated)
+                self.assertEqual(
+                    migrated["model_and_access"]["llm_fallback_provider_id"],
+                    expected,
+                )
+                self.assertNotIn(
+                    "enable_llm_fallback",
+                    migrated["model_and_access"],
+                )
+
+    def test_nested_fallback_provider_wins_over_flat_value_even_when_empty(self) -> None:
+        migration = load_migration_module()
+        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+
+        for nested in ("provider/nested-selection", ""):
+            with self.subTest(nested=nested):
+                migrated, changed = migration.migrate_config_data(
+                    {
+                        "model_and_access": {
+                            "llm_fallback_provider_id": nested,
+                        },
+                        "llm_fallback_provider_id": "provider/flat-selection",
+                    },
+                    schema,
+                )
+
+                self.assertIs(changed, True)
+                self.assertEqual(
+                    migrated["model_and_access"]["llm_fallback_provider_id"],
+                    nested,
+                )
+                self.assertNotIn("llm_fallback_provider_id", migrated)
 
     def test_grouped_file_without_legacy_keys_is_not_rewritten(self) -> None:
         migration = load_migration_module()

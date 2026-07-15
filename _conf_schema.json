@@ -11,6 +11,13 @@
         "_special": "select_provider",
         "default": ""
       },
+      "llm_fallback_provider_id": {
+        "type": "string",
+        "description": "用于正常零结果兜底的 LLM 提供商",
+        "hint": "留空即关闭；仅在推荐流程正常完成但得到零结果时使用。建议未经过 Steam 数据验证，绝不自动使用当前会话模型。",
+        "_special": "select_provider",
+        "default": ""
+      },
       "semantic_verification_batch_size": {
         "type": "int",
         "description": "语义特征核验的单批候选数",
