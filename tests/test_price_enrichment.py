@@ -437,6 +437,35 @@ class PriceBridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enriched[0].score, 98)
         self.assertEqual(enriched[1].score, 95)
 
+    async def test_budget_lookup_limit_marks_unchecked_steam_candidates_unknown(self) -> None:
+        bridge = FixedPriceBridge(
+            {
+                f"Game {index}": price_summary(current_cny=40, lowest_cny=30)
+                for index in range(10)
+            }
+        )
+        games = [
+            RankedGame(
+                title=f"Game {index}",
+                score=100 - index,
+                platforms=["PC"],
+                stores=["Steam"],
+            )
+            for index in range(11)
+        ]
+
+        enriched = await bridge.enrich_ranked_games(games, GamePreference(budget=50))
+
+        unchecked = next(game for game in enriched if game.title == "Game 10")
+        self.assertEqual(len(bridge.lookup_calls), 10)
+        self.assertEqual(unchecked.score_breakdown.budget_adjustment, -2)
+        self.assertTrue(
+            any(
+                item.evidence_id == "budget_price_unknown"
+                for item in unchecked.recommendation_evidence
+            )
+        )
+
     async def test_no_budget_price_lookup_preserves_final_order(self) -> None:
         bridge = FixedPriceBridge(
             {
@@ -681,9 +710,11 @@ class FixedPriceBridge(SteamPriceBridge):
             service_factory=lambda _config, _client: object(),
         )
         self.summaries = summaries
+        self.lookup_calls: list[str] = []
 
     async def lookup(self, title: str, country: str | None = None) -> GamePriceSummary | None:
         del country
+        self.lookup_calls.append(title)
         return self.summaries.get(title)
 
 

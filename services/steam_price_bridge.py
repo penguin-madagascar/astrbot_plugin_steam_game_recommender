@@ -153,8 +153,14 @@ class SteamPriceBridge:
         semaphore = asyncio.Semaphore(PRICE_LOOKUP_CONCURRENCY)
 
         async def enrich_one(index: int, game: RankedGame) -> RankedGame:
-            if index >= self.lookup_limit or not has_steam_purchase_signal(game):
+            if not has_steam_purchase_signal(game):
                 return game
+            if index >= self.lookup_limit:
+                return (
+                    attach_missing_price_warning(game)
+                    if preference.budget is not None
+                    else game
+                )
             async with semaphore:
                 summary = await self.lookup(game.title, country)
             return attach_price_summary(game, summary, preference)
