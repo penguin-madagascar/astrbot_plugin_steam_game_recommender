@@ -435,7 +435,7 @@ class SemanticFeatureMainPipelineTest(unittest.IsolatedAsyncioTestCase):
                         "constraint_id": "branching",
                         "polarity": "positive",
                         "status": "satisfied",
-                        "evidence_quote": f"Game {appid}",
+                        "evidence_quote": "branching choices",
                     }
                     for appid in range(1, 21)
                 ]
