@@ -35,8 +35,9 @@ NUMBER_TOKEN = (
 REVIEW_COUNT_TOKEN = rf"{NUMBER_TOKEN}(?:\s*[kKmM万千])?"
 
 URL_PATTERN = re.compile(r"(?:https?|ftp|steam)://|www\.", re.IGNORECASE)
-IDNA_DOT_TRANSLATION = str.maketrans(
-    {"\u3002": ".", "\uff0e": ".", "\uff61": "."}
+DIRECT_IDNA_DOT_TRANSLATION = str.maketrans({"\uff0e": ".", "\uff61": "."})
+IDEOGRAPHIC_URL_CANDIDATE_PATTERN = re.compile(
+    r"(?:[\w-]+[.\u3002])+[\w-]+(?=[/:?#])"
 )
 DOMAIN_CANDIDATE_PATTERN = re.compile(r"(?:[\w-]+\.)+[\w-]+")
 ASCII_DOMAIN_LABEL_PATTERN = re.compile(
@@ -262,9 +263,10 @@ def normalize_title(value: str) -> str:
 
 
 def reject_prohibited_text(value: str) -> None:
-    normalized = unicodedata.normalize("NFKC", normalize_text(value))
+    normalized_text = normalize_text(value)
+    normalized = unicodedata.normalize("NFKC", normalized_text)
     contains_forbidden_content = (
-        contains_url_or_domain(normalized.translate(IDNA_DOT_TRANSLATION))
+        contains_url_or_domain(normalize_domain_detection_text(normalized_text))
         or APP_ID_PATTERN.search(normalized)
         or CURRENCY_AMOUNT_PATTERN.search(normalized)
         or any(unicodedata.category(character) == "Sc" for character in normalized)
@@ -273,6 +275,17 @@ def reject_prohibited_text(value: str) -> None:
     )
     if contains_forbidden_content:
         raise LlmFallbackContractError("fallback response contains prohibited claims")
+
+
+def normalize_domain_detection_text(value: str) -> str:
+    normalized = unicodedata.normalize(
+        "NFKC",
+        value.translate(DIRECT_IDNA_DOT_TRANSLATION),
+    )
+    return IDEOGRAPHIC_URL_CANDIDATE_PATTERN.sub(
+        lambda match: match.group(0).replace("\u3002", "."),
+        normalized,
+    )
 
 
 def contains_url_or_domain(value: str) -> bool:

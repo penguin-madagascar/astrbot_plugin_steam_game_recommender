@@ -254,6 +254,25 @@ class UnverifiedSuggestionContractTest(unittest.TestCase):
                 with self.assertRaises(service.LlmFallbackContractError):
                     service.parse_unverified_suggestions(raw, result_limit=2)
 
+    def test_allows_ordinary_multisentence_chinese_reasons(self) -> None:
+        service = fallback_module()
+        allowed = [
+            "适合合作。支持联机。",
+            "玩法轻松。节奏舒缓。适合朋友一起体验。",
+            "支持单人。也支持多人联机。",
+            "画面清晰。操作简单。上手直接。",
+            "剧情分为序章。中章。终章。整体节奏连贯。",
+        ]
+
+        for reason in allowed:
+            with self.subTest(reason=reason):
+                parsed = service.parse_unverified_suggestions(
+                    response_payload(suggestion(reason=reason)),
+                    result_limit=1,
+                )
+
+                self.assertEqual(parsed[0].reason, reason)
+
     def test_removes_visual_format_and_invisible_marks_from_safe_output(self) -> None:
         service = fallback_module()
 
