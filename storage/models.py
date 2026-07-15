@@ -601,6 +601,7 @@ class GameCandidate(BaseModel):
     released: str | None = None
     release_date: str | None = None
     coming_soon: bool = False
+    release_status_checked_at: float | None = None
     playtime: int | None = None
     stores: list[str] = Field(default_factory=list)
     raw_url: str | None = None
@@ -672,6 +673,16 @@ class GameCandidate(BaseModel):
         if not math.isfinite(number) or not number.is_integer() or number < 0:
             return None
         return int(number)
+
+    @validator("release_status_checked_at", pre=True)
+    def _normalize_release_status_checked_at(cls, value: Any) -> float | None:
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) and number >= 0 else None
 
     @validator("review_positive_ratio", "review_recent_ratio", pre=True)
     def _normalize_review_ratio(cls, value: Any) -> float | None:

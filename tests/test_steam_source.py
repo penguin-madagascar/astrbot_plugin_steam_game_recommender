@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 from typing import Any
 
+import httpx
+
 from astrbot_plugin_steam_game_recommender.clients.steam import (
     SteamApiError,
     SteamClient,
@@ -157,6 +159,65 @@ class SteamClientTest(unittest.IsolatedAsyncioTestCase):
         await client.search_games(search="co-op", page_size=2)
 
         self.assertEqual(http_client.call_count, 3)
+
+    async def test_game_detail_release_status_refreshes_after_one_hour(self) -> None:
+        now = [1.0]
+        cache = TimedMemoryCache(lambda: now[0])
+        upcoming = steam_detail_payload()
+        upcoming["release_date"] = {
+            "date": "Coming soon",
+            "coming_soon": True,
+        }
+        http_client = MutableDetailHttpClient(upcoming)
+        client = SteamClient(
+            http_client,
+            cache,
+            cache_ttl_hours=24,
+            clock=lambda: now[0],
+        )
+
+        first = await client.get_game_detail(123)
+        now[0] += 60 * 60 - 1
+        still_fresh = await client.get_game_detail(123)
+        http_client.payload = steam_detail_payload()
+        now[0] += 2
+        refreshed = await client.get_game_detail(123)
+
+        self.assertTrue(first.coming_soon)
+        self.assertTrue(still_fresh.coming_soon)
+        self.assertFalse(refreshed.coming_soon)
+        self.assertEqual(http_client.call_count, 2)
+
+    async def test_game_detail_uses_stale_release_status_for_at_most_six_hours(
+        self,
+    ) -> None:
+        now = [1.0]
+        cache = TimedMemoryCache(lambda: now[0])
+        upcoming = steam_detail_payload()
+        upcoming["release_date"] = {
+            "date": "Coming soon",
+            "coming_soon": True,
+        }
+        http_client = MutableDetailHttpClient(upcoming)
+        client = SteamClient(
+            http_client,
+            cache,
+            cache_ttl_hours=24,
+            clock=lambda: now[0],
+        )
+
+        await client.get_game_detail(123)
+        http_client.failure = httpx.ConnectError("offline")
+        now[0] += 60 * 60 + 1
+        stale = await client.get_game_detail(123)
+
+        self.assertTrue(stale.coming_soon)
+        self.assertEqual(http_client.call_count, 3)
+
+        now[0] += 5 * 60 * 60 + 1
+        with self.assertRaises(SteamApiError):
+            await client.get_game_detail(123)
+        self.assertEqual(http_client.call_count, 5)
 
     async def test_search_games_skips_non_games_and_failed_details(self) -> None:
         http_client = FakeHttpClient(
@@ -424,6 +485,50 @@ class MemoryCache:
     async def set_json(self, key: str, payload: Any) -> None:
         self.keys.append(key)
         self.payloads[key] = payload
+
+
+class TimedMemoryCache:
+    def __init__(self, clock: Any) -> None:
+        self.clock = clock
+        self.payloads: dict[str, tuple[Any, float]] = {}
+
+    async def get_json(self, key: str, ttl_hours: int) -> Any | None:
+        stored = self.payloads.get(key)
+        if stored is None:
+            return None
+        payload, stored_at = stored
+        if self.clock() - stored_at > max(int(ttl_hours), 0) * 60 * 60:
+            return None
+        return payload
+
+    async def set_json(self, key: str, payload: Any) -> None:
+        self.payloads[key] = (payload, self.clock())
+
+
+class MutableDetailHttpClient:
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.payload = payload
+        self.failure: httpx.HTTPError | None = None
+        self.call_count = 0
+
+    async def get(
+        self,
+        url: str,
+        params: dict[str, Any],
+        **_kwargs: Any,
+    ) -> FakeResponse:
+        self.call_count += 1
+        if self.failure is not None:
+            request = httpx.Request("GET", url, params=params)
+            raise type(self.failure)(str(self.failure), request=request)
+        return FakeResponse(
+            {
+                str(params["appids"]): {
+                    "success": True,
+                    "data": self.payload,
+                }
+            }
+        )
 
 
 if __name__ == "__main__":

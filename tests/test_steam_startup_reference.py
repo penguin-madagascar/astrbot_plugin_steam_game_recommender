@@ -639,6 +639,43 @@ class BootstrapAndMigrationRegressionTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(client.detail_appids, [99])
 
+    async def test_old_current_upcoming_candidate_is_revalidated_before_output(
+        self,
+    ) -> None:
+        upcoming = game(77, "Transition RPG", ["RPG"])
+        upcoming.coming_soon = True
+        cache = MemoryCache(
+            {STEAM_INDEX_CACHE_KEY: current_snapshot_payload(upcoming)}
+        )
+        client = ReleaseTransitionClient()
+        service = SteamGameIndexService(client, cache, clock=lambda: 10_000.0)
+
+        ranked = await service.recommend(
+            GamePreference(genres_like=["RPG"]),
+            limit=1,
+        )
+
+        self.assertEqual(client.detail_calls, [(77, True)])
+        self.assertEqual([item.appid for item in ranked], [77])
+        self.assertFalse(ranked[0].coming_soon)
+
+    async def test_old_current_upcoming_reference_is_revalidated_before_resolution(
+        self,
+    ) -> None:
+        upcoming = game(77, "Transition RPG", ["RPG"])
+        upcoming.coming_soon = True
+        cache = MemoryCache(
+            {STEAM_INDEX_CACHE_KEY: current_snapshot_payload(upcoming)}
+        )
+        client = ReleaseTransitionClient()
+        service = SteamGameIndexService(client, cache, clock=lambda: 10_000.0)
+        preference = GamePreference(reference_games_like=["Transition RPG"])
+
+        await service.refresh_entries(preference, [], target_pool=1)
+
+        self.assertEqual(client.detail_calls, [(77, True)])
+        self.assertEqual(preference.resolved_reference_games[0].appid, 77)
+
 
 class MemoryCache:
     def __init__(self, payloads: dict[str, Any] | None = None) -> None:
@@ -990,6 +1027,41 @@ class FailingLegacyValidationClient(VocabularyClient):
     async def get_game_detail(self, appid: int) -> GameCandidate:
         self.detail_appids.append(appid)
         raise SteamApiError("detail unavailable")
+
+
+class ReleaseTransitionClient(VocabularyClient):
+    def __init__(self) -> None:
+        self.detail_calls: list[tuple[int, bool]] = []
+
+    async def search_storefront_tag(
+        self,
+        tag_id: int,
+        page_size: int = 20,
+    ) -> SteamStorefrontPage:
+        del tag_id, page_size
+        return SteamStorefrontPage(
+            hits=(SteamSearchHit(appid=77, title="Transition RPG", tag_ids=[1]),),
+            total_count=1,
+            start=0,
+        )
+
+    async def get_game_detail(
+        self,
+        appid: int,
+        bypass_cache: bool = False,
+    ) -> GameCandidate:
+        self.detail_calls.append((appid, bypass_cache))
+        return game(appid, "Transition RPG", ["RPG"])
+
+    async def get_store_page_tags(self, _appid: int) -> list[str]:
+        return ["RPG"]
+
+    async def get_review_summary(self, _appid: int) -> Any:
+        return SimpleNamespace(
+            total_reviews=500,
+            positive_ratio=0.9,
+            recent_positive_ratio=0.9,
+        )
 
 
 if __name__ == "__main__":

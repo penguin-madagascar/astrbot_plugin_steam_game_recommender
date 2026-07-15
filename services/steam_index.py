@@ -85,6 +85,8 @@ STEAM_HTTP_CONCURRENCY = 6
 REFERENCE_TAG_COUNT_PREFETCH_PER_GAME = 5
 STEAM_TAG_ALIASES_FRESH_SECONDS = 24 * 60 * 60
 STEAM_TAG_ALIASES_STALE_SECONDS = 7 * STEAM_TAG_ALIASES_FRESH_SECONDS
+RELEASE_STATUS_FRESH_SECONDS = 60 * 60
+RELEASE_STATUS_STALE_SECONDS = 6 * 60 * 60
 SNAPSHOT_STORAGE_TTL_HOURS = 24 * 3650
 REFERENCE_MATCH_THRESHOLD = 0.75
 
@@ -1116,11 +1118,17 @@ class SteamGameIndexService:
         company_preferences_by_source: Mapping[str, CompanyPreference] | None = None,
     ) -> RecallValidationBatch:
         company_preferences_by_source = company_preferences_by_source or {}
+        now = float(self.clock())
+        records_by_appid = {
+            int(record.candidate.appid): record
+            for record in records.values()
+            if record.candidate.appid is not None
+        }
         existing = {
             int(record.candidate.appid): record.candidate
             for record in records.values()
             if record.candidate.appid is not None
-            and entry_is_validated(record)
+            and entry_is_current(record, now)
         }
         legacy_appids = {
             int(record.candidate.appid)
@@ -1132,7 +1140,14 @@ class SteamGameIndexService:
             hit: CandidateHit,
         ) -> tuple[CandidateHit | None, RecallSourceStatus | None]:
             appid = int(hit.candidate.appid or 0)
+            local_record = records_by_appid.get(appid)
             candidate = existing.get(appid)
+            validation_status: RecallSourceStatus | None = None
+            force_release_refresh = (
+                local_record is not None
+                and entry_is_validated(local_record)
+                and not entry_release_status_is_fresh(local_record, now)
+            )
             company_hits = [
                 source
                 for source in hit.source_hits
@@ -1157,10 +1172,37 @@ class SteamGameIndexService:
                     candidate = await self._fetch_candidate(
                         appid,
                         prefetched,
-                        bypass_cache=appid in legacy_appids or force_company_refresh,
+                        bypass_cache=(
+                            appid in legacy_appids
+                            or force_company_refresh
+                            or force_release_refresh
+                        ),
                     )
                 except Exception as exc:
-                    return None, failure_status(exc)
+                    status = failure_status(exc)
+                    if (
+                        status is RecallSourceStatus.TRANSIENT_FAILURE
+                        and local_record is not None
+                        and entry_release_status_is_usable_stale(local_record, now)
+                    ):
+                        candidate = local_record.candidate
+                        validation_status = status
+                    else:
+                        return None, status
+                else:
+                    if candidate is not None:
+                        refreshed_record = SteamIndexEntry(candidate, now)
+                        if (
+                            not entry_release_status_is_fresh(refreshed_record, now)
+                            and not entry_release_status_is_usable_stale(
+                                refreshed_record,
+                                now,
+                            )
+                        ):
+                            return None, RecallSourceStatus.TRANSIENT_FAILURE
+                        if not entry_release_status_is_fresh(refreshed_record, now):
+                            validation_status = RecallSourceStatus.TRANSIENT_FAILURE
+                        records[entry_key(candidate)] = refreshed_record
             if candidate is None or not is_confirmed_base_game(candidate):
                 return None, None
             retained_sources = tuple(
@@ -1187,7 +1229,7 @@ class SteamGameIndexService:
                     source_hits=retained_sources,
                     rrf_score=max(hit.rrf_score - removed_company_contribution, 0.0),
                 ),
-                None,
+                validation_status,
             )
 
         validated = await asyncio.gather(*(validate(hit) for hit in hits))
@@ -1549,13 +1591,15 @@ class SteamGameIndexService:
                 int(record.candidate.appid)
                 for record in records.values()
                 if record.candidate.appid is not None
-                and entry_is_validated(record)
+                and entry_is_current(record, now)
             }
-            legacy_appids = {
+            revalidation_appids = {
                 int(record.candidate.appid)
                 for record in records.values()
-                if record.candidate.appid is not None
-                and record.needs_revalidation
+                if record.candidate.appid is not None and (
+                    record.needs_revalidation
+                    or not entry_release_status_is_fresh(record, now)
+                )
             }
             new_hits: list[SteamSearchHit] = []
             for hit in observed_hits:
@@ -1567,7 +1611,7 @@ class SteamGameIndexService:
             enriched = await self._enrich_hits(
                 new_hits[:remaining],
                 prefetched,
-                bypass_cache_appids=legacy_appids,
+                bypass_cache_appids=revalidation_appids,
             )
             enriched_count += len(enriched)
             for candidate in enriched:
@@ -1655,7 +1699,7 @@ class SteamGameIndexService:
             )
             candidate = (
                 matched_record.candidate
-                if matched_record is not None and entry_is_validated(matched_record)
+                if matched_record is not None and entry_is_current(matched_record, now)
                 else None
             )
             refreshed_at = (
@@ -1682,7 +1726,7 @@ class SteamGameIndexService:
                     if observed_match is not None
                     else None
                 )
-                if existing_record is not None and entry_is_validated(existing_record):
+                if existing_record is not None and entry_is_current(existing_record, now):
                     match = observed_match
                     evidence_hit = max(
                         (
@@ -1714,12 +1758,13 @@ class SteamGameIndexService:
                             known_candidates={
                                 appid: record.candidate
                                 for appid, record in records_by_appid.items()
-                                if entry_is_validated(record)
+                                if entry_is_current(record, now)
                             },
                             bypass_cache_appids={
                                 appid
                                 for appid, record in records_by_appid.items()
                                 if record.needs_revalidation
+                                or not entry_release_status_is_fresh(record, now)
                             },
                         )
                     )
@@ -1740,7 +1785,10 @@ class SteamGameIndexService:
                         if selected_record is None:
                             enriched_count += 1
                             refreshed_at = now
-                        elif selected_record.needs_revalidation:
+                        elif (
+                            selected_record.needs_revalidation
+                            or not entry_release_status_is_fresh(selected_record, now)
+                        ):
                             refreshed_at = now
                         else:
                             refreshed_at = selected_record.refreshed_at
@@ -2052,6 +2100,13 @@ class SteamGameIndexService:
             )
             async with self._steam_semaphore:
                 candidate = await detail_getter(appid, **kwargs)
+            if (
+                candidate is not None
+                and candidate.release_status_checked_at is None
+            ):
+                data = dump_model(candidate)
+                data["release_status_checked_at"] = float(self.clock())
+                candidate = validate_candidate(data)
         if (
             candidate is None
             or candidate.appid is None
@@ -2685,6 +2740,37 @@ def is_legacy_snapshot_payload(payload: Any) -> bool:
 
 def entry_is_validated(record: SteamIndexEntry) -> bool:
     return not record.needs_revalidation and is_confirmed_base_game(record.candidate)
+
+
+def release_status_age(candidate: GameCandidate, now: float) -> float | None:
+    checked_at = candidate.release_status_checked_at
+    if checked_at is None:
+        return None
+    return max(float(now) - checked_at, 0.0)
+
+
+def entry_release_status_is_fresh(
+    record: SteamIndexEntry,
+    now: float,
+) -> bool:
+    if not record.candidate.coming_soon:
+        return True
+    age = release_status_age(record.candidate, now)
+    return age is not None and age <= RELEASE_STATUS_FRESH_SECONDS
+
+
+def entry_release_status_is_usable_stale(
+    record: SteamIndexEntry,
+    now: float,
+) -> bool:
+    if not entry_is_validated(record) or not record.candidate.coming_soon:
+        return False
+    age = release_status_age(record.candidate, now)
+    return age is not None and age <= RELEASE_STATUS_STALE_SECONDS
+
+
+def entry_is_current(record: SteamIndexEntry, now: float) -> bool:
+    return entry_is_validated(record) and entry_release_status_is_fresh(record, now)
 
 
 def entry_is_recall_usable(record: SteamIndexEntry) -> bool:

@@ -29,6 +29,9 @@ STEAM_STOREFRONT_SEARCH_URL = "https://store.steampowered.com/search/results"
 STEAM_MORE_LIKE_URL = "https://store.steampowered.com/recommended/morelike/app/{appid}/"
 STOREFRONT_FRESH_TTL_HOURS = 24
 STOREFRONT_STALE_TTL_HOURS = 24 * 7
+APPDETAILS_RELEASE_FRESH_TTL_HOURS = 1
+APPDETAILS_RELEASE_STALE_TTL_HOURS = 6
+APPDETAILS_CACHE_VERSION = 1
 STORE_PAGE_TAG_CACHE_VERSION = 1
 STEAM_AGE_COOKIES = {
     "birthtime": "0",
@@ -337,22 +340,22 @@ class SteamClient:
         appid: int,
         bypass_cache: bool = False,
     ) -> GameCandidate:
-        payload = await self._get_json(
-            STEAM_APP_DETAILS_URL,
-            {
-                "appids": appid,
-                "cc": self.default_country,
-                "l": self.language,
-            },
+        params = {
+            "appids": appid,
+            "cc": self.default_country,
+            "l": self.language,
+        }
+        payload, fetched_at = await self._get_game_detail_payload(
+            appid,
+            params,
             bypass_cache=bypass_cache,
         )
-        entry = payload.get(str(appid)) if isinstance(payload, dict) else None
-        if not isinstance(entry, dict) or not entry.get("success"):
-            raise SteamApiError(f"Steam 商店没有返回 appid={appid} 的游戏资料。")
-        data = entry.get("data")
-        if not isinstance(data, dict):
-            raise SteamApiError(f"Steam 商店返回了无效的游戏资料：appid={appid}")
-        return parse_steam_game(appid, data)
+        data = validate_appdetails_payload(appid, payload)
+        return parse_steam_game(
+            appid,
+            data,
+            release_status_checked_at=fetched_at,
+        )
 
     async def get_review_summary(self, appid: int) -> SteamReviewSummary:
         data = await self._get_json(
@@ -594,6 +597,61 @@ class SteamClient:
             validator(data)
         await self.cache.set_json(cache_key, data)
         return data
+
+    async def _get_game_detail_payload(
+        self,
+        appid: int,
+        params: dict[str, Any],
+        *,
+        bypass_cache: bool,
+    ) -> tuple[dict[str, Any], float]:
+        cache_key = (
+            f"{self._cache_key(STEAM_APP_DETAILS_URL, params)}:"
+            f"appdetails:v{APPDETAILS_CACHE_VERSION}"
+        )
+        fresh_key = f"{cache_key}:fresh"
+        stale_key = f"{cache_key}:stale"
+        if not bypass_cache:
+            fresh = await self.cache.get_json(
+                fresh_key,
+                APPDETAILS_RELEASE_FRESH_TTL_HOURS,
+            )
+            if fresh is not None:
+                try:
+                    payload, fetched_at = parse_appdetails_snapshot(fresh)
+                    validate_appdetails_payload(appid, payload)
+                except SteamApiError:
+                    pass
+                else:
+                    return payload, fetched_at
+
+        try:
+            response = await self._request_get(STEAM_APP_DETAILS_URL, params)
+        except SteamTransientError as error:
+            stale = await self.cache.get_json(
+                stale_key,
+                APPDETAILS_RELEASE_STALE_TTL_HOURS,
+            )
+            if stale is not None:
+                try:
+                    payload, fetched_at = parse_appdetails_snapshot(stale)
+                    validate_appdetails_payload(appid, payload)
+                except SteamApiError:
+                    pass
+                else:
+                    return payload, fetched_at
+            raise error
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise SteamApiError("Steam 返回了无法解析的 JSON。") from exc
+        validate_appdetails_payload(appid, payload)
+        fetched_at = max(float(self.clock()), 0.0)
+        snapshot = appdetails_snapshot_payload(payload, fetched_at)
+        await self.cache.set_json(fresh_key, snapshot)
+        await self.cache.set_json(stale_key, snapshot)
+        return payload, fetched_at
 
     async def _get_storefront_page(self, params: dict[str, Any]) -> SteamStorefrontPage:
         cache_key = self._cache_key(STEAM_STOREFRONT_SEARCH_URL, params)
@@ -1020,7 +1078,46 @@ def section_name(attributes: dict[str, str | None]) -> str | None:
     return None
 
 
-def parse_steam_game(appid: int, data: dict[str, Any]) -> GameCandidate:
+def validate_appdetails_payload(appid: int, payload: Any) -> dict[str, Any]:
+    entry = payload.get(str(appid)) if isinstance(payload, dict) else None
+    if not isinstance(entry, dict) or not entry.get("success"):
+        raise SteamApiError(f"Steam 商店没有返回 appid={appid} 的游戏资料。")
+    data = entry.get("data")
+    if not isinstance(data, dict):
+        raise SteamApiError(f"Steam 商店返回了无效的游戏资料：appid={appid}")
+    return data
+
+
+def appdetails_snapshot_payload(
+    payload: dict[str, Any],
+    fetched_at: float,
+) -> dict[str, Any]:
+    return {
+        "fetched_at": fetched_at,
+        "payload": payload,
+    }
+
+
+def parse_appdetails_snapshot(payload: Any) -> tuple[dict[str, Any], float]:
+    if not isinstance(payload, dict) or not isinstance(payload.get("payload"), dict):
+        raise SteamApiError("Steam 游戏资料缓存无效。")
+    fetched_at = payload.get("fetched_at")
+    if (
+        isinstance(fetched_at, bool)
+        or not isinstance(fetched_at, (int, float))
+        or not math.isfinite(float(fetched_at))
+        or float(fetched_at) < 0
+    ):
+        raise SteamApiError("Steam 游戏资料缓存时间无效。")
+    return payload["payload"], float(fetched_at)
+
+
+def parse_steam_game(
+    appid: int,
+    data: dict[str, Any],
+    *,
+    release_status_checked_at: float | None = None,
+) -> GameCandidate:
     genres = description_list(data.get("genres"))
     genre_ids = id_list(data.get("genres"))
     categories = description_list(data.get("categories"))
@@ -1051,6 +1148,7 @@ def parse_steam_game(appid: int, data: dict[str, Any]) -> GameCandidate:
         released=release_date,
         release_date=release_date,
         coming_soon=release.get("coming_soon") is True,
+        release_status_checked_at=release_status_checked_at,
         stores=["Steam"],
         raw_url=f"{STEAM_STORE_BASE_URL}/{appid}/",
         supported_languages=languages,
