@@ -35,6 +35,9 @@ NUMBER_TOKEN = (
 REVIEW_COUNT_TOKEN = rf"{NUMBER_TOKEN}(?:\s*[kKmM万千])?"
 
 URL_PATTERN = re.compile(r"(?:https?|ftp|steam)://|www\.", re.IGNORECASE)
+IDNA_DOT_TRANSLATION = str.maketrans(
+    {"\u3002": ".", "\uff0e": ".", "\uff61": "."}
+)
 DOMAIN_CANDIDATE_PATTERN = re.compile(r"(?:[\w-]+\.)+[\w-]+")
 ASCII_DOMAIN_LABEL_PATTERN = re.compile(
     r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
@@ -261,7 +264,7 @@ def normalize_title(value: str) -> str:
 def reject_prohibited_text(value: str) -> None:
     normalized = unicodedata.normalize("NFKC", normalize_text(value))
     contains_forbidden_content = (
-        contains_url_or_domain(normalized)
+        contains_url_or_domain(normalized.translate(IDNA_DOT_TRANSLATION))
         or APP_ID_PATTERN.search(normalized)
         or CURRENCY_AMOUNT_PATTERN.search(normalized)
         or any(unicodedata.category(character) == "Sc" for character in normalized)

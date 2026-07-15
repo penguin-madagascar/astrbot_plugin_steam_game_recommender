@@ -214,6 +214,46 @@ class UnverifiedSuggestionContractTest(unittest.TestCase):
         with self.assertRaises(service.LlmFallbackContractError):
             service.parse_unverified_suggestions(raw, result_limit=1)
 
+    def test_rejects_idna_dot_separators_inside_item_fields(self) -> None:
+        service = fallback_module()
+
+        for domain in idna_separator_domains():
+            with self.subTest(domain=domain):
+                with self.assertRaises(service.LlmFallbackContractError):
+                    service.parse_unverified_suggestions(
+                        response_payload(
+                            suggestion(reason=f"详情见 {domain}。")
+                        ),
+                        result_limit=1,
+                    )
+
+    def test_rejects_idna_dot_separators_in_peripheral_raw_response(self) -> None:
+        service = fallback_module()
+
+        for domain in idna_separator_domains():
+            with self.subTest(domain=domain):
+                raw = (
+                    f"详情见 {domain}\n"
+                    + response_payload(suggestion("Game A", "符合合作偏好。"))
+                )
+
+                with self.assertRaises(service.LlmFallbackContractError):
+                    service.parse_unverified_suggestions(raw, result_limit=1)
+
+    def test_rejects_idna_dot_separators_in_overlimit_tail(self) -> None:
+        service = fallback_module()
+
+        for domain in idna_separator_domains():
+            with self.subTest(domain=domain):
+                raw = response_payload(
+                    suggestion("Game A", "第一款理由。"),
+                    suggestion("Game B", "第二款理由。"),
+                    suggestion("Game C", f"详情见 {domain}。"),
+                )
+
+                with self.assertRaises(service.LlmFallbackContractError):
+                    service.parse_unverified_suggestions(raw, result_limit=2)
+
     def test_removes_visual_format_and_invisible_marks_from_safe_output(self) -> None:
         service = fallback_module()
 
@@ -470,6 +510,17 @@ class JsonModePreference:
         if mode != "json":
             raise AssertionError("preference payload must use JSON serialization mode")
         return {"serialization": mode}
+
+
+def idna_separator_domains() -> list[str]:
+    return [
+        f"{first_label}{separator}{top_level_domain}/buy"
+        for separator in ("\u3002", "\uff0e", "\uff61")
+        for first_label, top_level_domain in (
+            ("example", "dev"),
+            ("例子", "公司"),
+        )
+    ]
 
 
 if __name__ == "__main__":
