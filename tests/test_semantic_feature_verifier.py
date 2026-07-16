@@ -1953,7 +1953,231 @@ class TechnicalFailureVerifier(RecordingVerifier):
         )
 
 
+class StatusVerifier(RecordingVerifier):
+    def __init__(
+        self,
+        module,
+        *,
+        status_by_appid: dict[int, str] | None = None,
+        default_status: str = "satisfied",
+        repeated_notice=None,
+    ) -> None:
+        super().__init__(module)
+        self.status_by_appid = status_by_appid or {}
+        self.default_status = default_status
+        self.repeated_notice = repeated_notice
+
+    async def verify(self, *, features, candidates):
+        selected_features = list(features)
+        selected_candidates = list(candidates)
+        self.calls.append((selected_features, selected_candidates))
+        verdicts = []
+        for candidate in selected_candidates:
+            status = self.status_by_appid.get(
+                int(candidate.appid),
+                self.default_status,
+            )
+            verdicts.extend(
+                self.module.FeatureVerdict(
+                    int(candidate.appid),
+                    feature.constraint_id,
+                    feature.polarity,
+                    status,
+                    candidate.title if status == "satisfied" else "",
+                )
+                for feature in selected_features
+            )
+        return self.module.FeatureVerificationOutcome(
+            verdicts=tuple(verdicts),
+            notices=(self.repeated_notice,) if self.repeated_notice else (),
+        )
+
+
 class SemanticFeaturePipelineTest(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def ranked_games(count: int) -> list[RankedGame]:
+        return [
+            RankedGame.from_candidate(
+                GameCandidate(
+                    appid=appid,
+                    title=f"Game {appid}",
+                    app_type="game",
+                ),
+                80 - appid,
+                ScoreBreakdown(
+                    relevance_tier="broad",
+                    semantic_score=0.5,
+                    quality_score=0.5,
+                    layer_score=0.5,
+                    positive_score=50,
+                    retrieval_rank=appid,
+                ),
+                [],
+            )
+            for appid in range(1, count + 1)
+        ]
+
+    @staticmethod
+    def core_feature() -> SoftFeature:
+        return SoftFeature(
+            constraint_id="branching",
+            source_span="必须有分支剧情",
+            normalized_text="branching story",
+            role="core",
+            polarity="positive",
+        )
+
+    async def test_core_verification_advances_until_second_window_meets_target(
+        self,
+    ) -> None:
+        module = importlib.import_module(MODULE)
+        repeated_notice = module.FeatureVerificationNotice(
+            "semantic_feature_cache_failure",
+            "cache notice",
+        )
+        verifier = StatusVerifier(
+            module,
+            status_by_appid={
+                appid: "satisfied" if 21 <= appid <= 25 else "unknown"
+                for appid in range(1, 46)
+            },
+            repeated_notice=repeated_notice,
+        )
+
+        outcome = await module.verify_ranked_features(
+            self.ranked_games(45),
+            [self.core_feature()],
+            verifier,
+            result_limit=5,
+        )
+
+        self.assertEqual(
+            [[game.appid for game in call[1]] for call in verifier.calls],
+            [list(range(1, 21)), list(range(21, 41))],
+        )
+        self.assertEqual(outcome.candidate_count, 40)
+        self.assertEqual([game.appid for game in outcome.games[:5]], list(range(21, 26)))
+        self.assertTrue(all(game.appid <= 40 for game in outcome.games))
+        self.assertEqual(
+            [notice.code for notice in outcome.notices],
+            ["semantic_feature_cache_failure"],
+        )
+
+    async def test_core_verification_stops_after_first_window_when_target_is_met(
+        self,
+    ) -> None:
+        module = importlib.import_module(MODULE)
+        verifier = RecordingVerifier(module)
+
+        outcome = await module.verify_ranked_features(
+            self.ranked_games(45),
+            [self.core_feature()],
+            verifier,
+            result_limit=5,
+        )
+
+        self.assertEqual(len(verifier.calls), 1)
+        self.assertEqual(
+            [game.appid for game in verifier.calls[0][1]],
+            list(range(1, 21)),
+        )
+        self.assertEqual(outcome.candidate_count, 20)
+
+    async def test_core_unknown_attempts_sixty_and_adds_one_display_notice(self) -> None:
+        module = importlib.import_module(MODULE)
+        verifier = StatusVerifier(module, default_status="unknown")
+
+        outcome = await module.verify_ranked_features(
+            self.ranked_games(70),
+            [self.core_feature()],
+            verifier,
+            result_limit=5,
+        )
+
+        self.assertEqual(
+            [[game.appid for game in call[1]] for call in verifier.calls],
+            [
+                list(range(1, 21)),
+                list(range(21, 41)),
+                list(range(41, 61)),
+            ],
+        )
+        self.assertEqual(outcome.candidate_count, 60)
+        self.assertEqual(len(outcome.games), 60)
+        self.assertTrue(
+            all(game.core_feature_verification == "unknown" for game in outcome.games)
+        )
+        self.assertNotIn(61, [game.appid for game in outcome.games])
+        unknown_notices = [
+            notice
+            for notice in outcome.notices
+            if notice.code == "semantic_feature_core_unknown"
+        ]
+        self.assertEqual(len(unknown_notices), 1)
+        self.assertIn("Steam", unknown_notices[0].message)
+        self.assertIn("谨慎", unknown_notices[0].message)
+
+    async def test_optional_only_verifies_first_window_and_keeps_tail_baseline(
+        self,
+    ) -> None:
+        module = importlib.import_module(MODULE)
+        feature = SoftFeature(
+            constraint_id="branching",
+            source_span="最好有分支剧情",
+            normalized_text="branching story",
+            role="optional",
+            polarity="positive",
+        )
+        games = self.ranked_games(25)
+        tail_baseline = games[-1].score_breakdown
+        verifier = RecordingVerifier(module)
+
+        outcome = await module.verify_ranked_features(
+            games,
+            [feature],
+            verifier,
+            result_limit=5,
+        )
+
+        self.assertEqual(len(verifier.calls), 1)
+        self.assertEqual(
+            [game.appid for game in verifier.calls[0][1]],
+            list(range(1, 21)),
+        )
+        self.assertEqual(outcome.candidate_count, 20)
+        by_appid = {game.appid: game for game in outcome.games}
+        self.assertEqual(set(by_appid), set(range(1, 26)))
+        self.assertEqual(by_appid[25].score_breakdown, tail_baseline)
+        self.assertEqual(by_appid[25].core_feature_verification, "not_applicable")
+
+    async def test_missing_verifier_uses_only_first_technical_failure_window(
+        self,
+    ) -> None:
+        module = importlib.import_module(MODULE)
+
+        outcome = await module.verify_ranked_features(
+            self.ranked_games(45),
+            [self.core_feature()],
+            None,
+            result_limit=5,
+        )
+
+        self.assertEqual(outcome.candidate_count, 20)
+        self.assertEqual([game.appid for game in outcome.games], list(range(1, 21)))
+        self.assertTrue(
+            all(
+                game.core_feature_verification == "technical_failure"
+                for game in outcome.games
+            )
+        )
+        self.assertEqual(
+            [notice.code for notice in outcome.notices],
+            [
+                "semantic_feature_provider_failure",
+                "semantic_feature_required_unverified",
+            ],
+        )
+
     async def test_only_top_twenty_ab_candidates_are_verified(self) -> None:
         module = importlib.import_module(MODULE)
         feature = SoftFeature(
@@ -2048,7 +2272,7 @@ class SemanticFeaturePipelineTest(unittest.IsolatedAsyncioTestCase):
                 GameCandidate(appid=appid, title=f"Candidate {appid}", app_type="game"),
                 50,
                 ScoreBreakdown(
-                    relevance_tier="C" if appid == 22 else "broad",
+                    relevance_tier="C" if appid >= 21 else "broad",
                     semantic_score=0.5,
                     quality_score=0.5,
                     layer_score=0.5,

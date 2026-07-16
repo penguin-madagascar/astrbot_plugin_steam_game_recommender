@@ -587,6 +587,7 @@ class SteamGameRecommenderPlugin(Star):
                     ranked_games,
                     preference.soft_features,
                     verifier,
+                    result_limit=result_limit,
                     quality_intent=preference.quality_intent,
                 )
                 ranked_games = list(semantic_outcome.games)

@@ -53,6 +53,9 @@ DEFAULT_BATCH_SIZE = 5
 MIN_BATCH_SIZE = 1
 MAX_BATCH_SIZE = 10
 MAX_VERIFICATION_CONCURRENCY = 2
+RANKED_VERIFICATION_WINDOW_SIZE = 20
+MAX_RANKED_VERIFICATION_CANDIDATES = 60
+DEFAULT_RANKED_RESULT_LIMIT = 20
 COMPRESSED_SHORT_DESCRIPTION_CHARS = 256
 COMPRESSED_DETAILED_DESCRIPTION_CHARS = 1_000
 
@@ -885,6 +888,7 @@ async def verify_ranked_features(
     features: Iterable[SoftFeature],
     verifier: SemanticFeatureVerifier | None,
     *,
+    result_limit: int = DEFAULT_RANKED_RESULT_LIMIT,
     quality_intent: QualityIntent | str = QualityIntent.NORMAL,
 ) -> RankedFeatureVerificationOutcome:
     ranked_games = tuple(games)
@@ -896,22 +900,72 @@ async def verify_ranked_features(
         game
         for game in ranked_games
         if game.score_breakdown.relevance_tier in {"A", "B", "broad"}
-    )[:20]
-    if verifier is None:
-        verification = FeatureVerificationOutcome(
-            notices=(technical_failure_notice("provider"),),
-            failures=failures_for_pairs(
-                expected_verdict_pairs(selected_features, eligible),
-                "provider",
-            ),
+    )
+    verifies_core_features = any(
+        feature.role in {"required", "core"} for feature in selected_features
+    )
+    candidate_cap = (
+        MAX_RANKED_VERIFICATION_CANDIDATES
+        if verifies_core_features
+        else RANKED_VERIFICATION_WINDOW_SIZE
+    )
+    attemptable = eligible[:candidate_cap]
+    attempted: list[RankedGame] = []
+    verdicts: list[FeatureVerdict] = []
+    failures: list[FeatureVerificationFailure] = []
+    notices_by_code: dict[str, FeatureVerificationNotice] = {}
+    target = max(int(result_limit), 1)
+
+    for start in range(0, len(attemptable), RANKED_VERIFICATION_WINDOW_SIZE):
+        window = attemptable[start : start + RANKED_VERIFICATION_WINDOW_SIZE]
+        attempted.extend(window)
+        if verifier is None:
+            window_verification = FeatureVerificationOutcome(
+                notices=(technical_failure_notice("provider"),),
+                failures=failures_for_pairs(
+                    expected_verdict_pairs(selected_features, window),
+                    "provider",
+                ),
+            )
+        else:
+            window_verification = await verifier.verify(
+                features=selected_features,
+                candidates=window,
+            )
+        verdicts.extend(window_verification.verdicts)
+        failures.extend(window_verification.failures)
+        for notice in window_verification.notices:
+            notices_by_code.setdefault(notice.code, notice)
+
+        if verifier is None or not verifies_core_features:
+            break
+        accumulated = FeatureVerificationOutcome(
+            verdicts=tuple(verdicts),
+            failures=tuple(failures),
         )
-    else:
-        verification = await verifier.verify(
-            features=selected_features,
-            candidates=eligible,
+        applied_attempted = apply_feature_verdicts(
+            attempted,
+            selected_features,
+            accumulated,
+            quality_intent=quality_intent,
         )
+        if (
+            sum(
+                game.core_feature_verification == "verified"
+                for game in applied_attempted
+            )
+            >= target
+        ):
+            break
+
+    verification = FeatureVerificationOutcome(
+        verdicts=tuple(verdicts),
+        notices=tuple(notices_by_code.values()),
+        failures=tuple(failures),
+    )
+    policy_games = tuple(attempted) if verifies_core_features else ranked_games
     applied = apply_feature_verdicts(
-        ranked_games,
+        policy_games,
         selected_features,
         verification,
         quality_intent=quality_intent,
@@ -921,11 +975,26 @@ async def verify_ranked_features(
         selected_features,
         verification.failures,
     ):
-        notices.append(required_failure_notice)
+        if required_failure_notice.code not in notices_by_code:
+            notices.append(required_failure_notice)
+            notices_by_code[required_failure_notice.code] = required_failure_notice
+    if any(
+        game.core_feature_verification == "unknown"
+        for game in applied[:target]
+    ):
+        unknown_notice = FeatureVerificationNotice(
+            code="semantic_feature_core_unknown",
+            message=(
+                "Steam 数据未能确认部分核心特性；这些条目仅作为谨慎补位保留，"
+                "请结合逐项风险说明判断。"
+            ),
+        )
+        if unknown_notice.code not in notices_by_code:
+            notices.append(unknown_notice)
     return RankedFeatureVerificationOutcome(
         games=tuple(applied),
         notices=tuple(notices),
-        candidate_count=len(eligible),
+        candidate_count=len(attempted),
     )
 
 

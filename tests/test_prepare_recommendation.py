@@ -1010,6 +1010,42 @@ class LlmFallbackMemoryIsolationTest(unittest.IsolatedAsyncioTestCase):
 
 
 class SemanticFeatureMainPipelineTest(unittest.IsolatedAsyncioTestCase):
+    async def test_main_passes_actual_result_limit_to_semantic_verification(
+        self,
+    ) -> None:
+        preference = GamePreference(
+            platforms=["steam"],
+            soft_features=[
+                {
+                    "constraint_id": "branching",
+                    "source_span": "分支剧情",
+                    "normalized_text": "branching story",
+                    "role": "optional",
+                    "polarity": "positive",
+                }
+            ],
+        )
+        games = [semantic_ranked_game(1)]
+        context = SemanticLlmContext(
+            provider_id="provider/session-model",
+            response={"verdicts": []},
+        )
+        plugin = semantic_pipeline_plugin(context, SemanticMemoryCache(), games)
+        prepared = PreparedRecommendation("分支剧情", preference, 7)
+        semantic_result = RankedFeatureVerificationOutcome(games=tuple(games))
+        semantic_verify = AsyncMock(return_value=semantic_result)
+
+        async def identity_reasons(_context, _event, _provider_id, ranked_games):
+            return ranked_games
+
+        with (
+            patch.object(main_module, "verify_ranked_features", semantic_verify),
+            patch.object(main_module, "generate_recommendation_reasons", identity_reasons),
+        ):
+            await plugin._run_recommendation(FakeEvent(), prepared)
+
+        self.assertEqual(semantic_verify.await_args.kwargs["result_limit"], 7)
+
     async def test_main_passes_identical_query_cache_policy_to_semantic_verifier(
         self,
     ) -> None:
@@ -1089,7 +1125,7 @@ class SemanticFeatureMainPipelineTest(unittest.IsolatedAsyncioTestCase):
         prepared = PreparedRecommendation(
             raw_query="必须有分支剧情",
             preference=preference,
-            result_limit=30,
+            result_limit=20,
         )
 
         async def identity_reasons(_context, _event, _provider_id, ranked_games):
