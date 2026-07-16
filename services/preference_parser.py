@@ -11,7 +11,11 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import Context
 
-from ..storage.models import GamePreference
+from ..storage.models import (
+    MAX_REFERENCE_ALIASES_PER_ENTITY,
+    MAX_REFERENCE_ENTITIES,
+    GamePreference,
+)
 from .preference_rules import infer_preference_from_text, merge_text_preference
 from .run_notices import RunNotice
 
@@ -32,6 +36,7 @@ PREFERENCE_SCHEMA_HINT = """
   "soft_features": [],
   "company_preferences": [],
   "genres_dislike": [],
+  "reference_entities": [],
   "reference_games_like": [],
   "reference_search_terms": [],
   "reference_games_dislike": [],
@@ -78,8 +83,12 @@ PREFERENCE_SCHEMA_HINT = """
   target 只能是 required_tags、genres_like、extra_tags 或 genres_dislike，并且必须与标签所在字段一致。
 - span 必须逐字复制用户原文中的最短玩法表达。质量、预算、平台、语言、数量、参考游戏名
   以及 3A/AAA/大作本身都不能作为标签证据；不要为推测出的玩法编造 span。
-- reference_games_like 只放用户提到的相似游戏名，不要把相似游戏扩写成推荐结果。
-- reference_search_terms 放参考游戏的 Steam 搜索友好标题候选，包括英文和本地化标题。
+- reference_entities 最多 3 项，每项包含 display_title、aliases、polarity；polarity
+  只能是 positive/negative。display_title 必须是用户实际提到的参考游戏，aliases 只放
+  同一游戏的 Steam 搜索友好英文名或本地化名；包含 display_title 在内，
+  每个参考实体最多 3 个标题候选。多个参考游戏不得共用扁平别名列表，必须分别放入独立实体。
+- reference_games_like、reference_search_terms、reference_games_dislike 是兼容旧解析结果的
+  扁平字段；使用 reference_entities 时保持为空，不要把相似游戏扩写成推荐结果。
 - genres_dislike 只放用户明确排除的标签，例如恐怖、魂类、肉鸽、pvp；
   明确说不要单机、不要单人或排除 singleplayer 时，才把 singleplayer 放入此字段。
 - 同一标签出现冲突时，以用户文本中最后一次明确表达的喜欢/排除极性为准。
@@ -230,6 +239,45 @@ def parse_preference_json(text: str) -> GamePreference:
 def validate_llm_payload_contract(data: Any) -> None:
     if not isinstance(data, dict):
         raise PreferencePayloadError("preference payload must be an object")
+    reference_entities = data.get("reference_entities", [])
+    if not isinstance(reference_entities, list):
+        raise PreferencePayloadError("reference_entities must be an array")
+    if len(reference_entities) > MAX_REFERENCE_ENTITIES:
+        raise PreferencePayloadError(
+            f"reference_entities exceeds the maximum of {MAX_REFERENCE_ENTITIES}"
+        )
+    if any(not isinstance(item, dict) for item in reference_entities):
+        raise PreferencePayloadError("reference_entities items must be objects")
+    reference_fields = {"display_title", "aliases", "polarity"}
+    for item in reference_entities:
+        if set(item) != reference_fields:
+            raise PreferencePayloadError(
+                "reference_entities items must contain exactly "
+                "display_title, aliases and polarity"
+            )
+        display_title = item["display_title"]
+        aliases = item["aliases"]
+        polarity = item["polarity"]
+        if not isinstance(display_title, str) or not display_title.strip():
+            raise PreferencePayloadError(
+                "reference entity display_title must be a non-empty string"
+            )
+        if not isinstance(aliases, list) or any(
+            not isinstance(alias, str) or not alias.strip()
+            for alias in aliases
+        ):
+            raise PreferencePayloadError(
+                "reference entity aliases must be an array of non-empty strings"
+            )
+        if len(aliases) >= MAX_REFERENCE_ALIASES_PER_ENTITY:
+            raise PreferencePayloadError(
+                "reference entity title candidates exceed the maximum of "
+                f"{MAX_REFERENCE_ALIASES_PER_ENTITY}"
+            )
+        if polarity not in {"positive", "negative"}:
+            raise PreferencePayloadError(
+                "reference entity polarity must be positive or negative"
+            )
     for field_name in ("derived_intent_tags", "soft_features", "company_preferences"):
         value = data.get(field_name, [])
         if not isinstance(value, list):

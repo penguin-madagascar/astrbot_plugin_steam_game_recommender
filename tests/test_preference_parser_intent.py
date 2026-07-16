@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import types
 import unittest
@@ -31,6 +32,7 @@ sys.modules.setdefault("astrbot.api.star", star_module)
 
 from astrbot_plugin_steam_game_recommender.services.preference_parser import (
     PREFERENCE_SCHEMA_HINT,
+    PreferencePayloadError,
     PreferenceParser,
     parse_preference_json,
 )  # noqa: E402
@@ -65,6 +67,81 @@ class PreferenceParserIntentTest(unittest.TestCase):
         self.assertIn("查询中心的具体特性为 core", PREFERENCE_SCHEMA_HINT)
         self.assertIn("“最好”“如果有”等弱偏好措辞时为 optional", PREFERENCE_SCHEMA_HINT)
         self.assertIn("不得因为 3A、AAA、大作", PREFERENCE_SCHEMA_HINT)
+
+    def test_schema_requests_explicit_bounded_reference_entities(self) -> None:
+        self.assertIn('"reference_entities": []', PREFERENCE_SCHEMA_HINT)
+        self.assertIn("每个参考实体最多 3 个标题候选", PREFERENCE_SCHEMA_HINT)
+        self.assertIn("多个参考游戏不得共用扁平别名列表", PREFERENCE_SCHEMA_HINT)
+
+    def test_structured_reference_entities_must_be_an_array(self) -> None:
+        with self.assertRaises(PreferencePayloadError):
+            parse_preference_json(
+                '{"reference_entities":{"display_title":"Reference"}}'
+            )
+
+    def test_structured_reference_entities_require_exact_nested_contract(self) -> None:
+        invalid_entities = [
+            {"aliases": [], "polarity": "positive"},
+            {"display_title": 123, "aliases": [], "polarity": "positive"},
+            {"display_title": "Reference", "polarity": "positive"},
+            {
+                "display_title": "Reference",
+                "aliases": "Alias",
+                "polarity": "positive",
+            },
+            {
+                "display_title": "Reference",
+                "aliases": [123],
+                "polarity": "positive",
+            },
+            {"display_title": "Reference", "aliases": []},
+            {
+                "display_title": "Reference",
+                "aliases": [],
+                "polarity": "NEGATVE",
+            },
+            {
+                "display_title": "Reference",
+                "aliases": [],
+                "polarity": "positive",
+                "unexpected": True,
+            },
+        ]
+
+        for entity in invalid_entities:
+            with self.subTest(entity=entity):
+                with self.assertRaises(PreferencePayloadError):
+                    parse_preference_json(
+                        json.dumps(
+                            {"reference_entities": [entity]},
+                            ensure_ascii=False,
+                        )
+                    )
+
+    def test_structured_reference_entities_accept_both_valid_polarities(self) -> None:
+        parsed = parse_preference_json(
+            json.dumps(
+                {
+                    "reference_entities": [
+                        {
+                            "display_title": "Reference A",
+                            "aliases": ["Alias A"],
+                            "polarity": "positive",
+                        },
+                        {
+                            "display_title": "Reference B",
+                            "aliases": [],
+                            "polarity": "negative",
+                        },
+                    ]
+                }
+            )
+        )
+
+        self.assertEqual(
+            [entity.polarity for entity in parsed.reference_entities],
+            ["positive", "negative"],
+        )
 
     def test_llm_json_fields_are_normalized_by_game_preference(self) -> None:
         preference = parse_preference_json(
@@ -146,6 +223,51 @@ class PreferenceParserDiagnosticsTest(unittest.IsolatedAsyncioTestCase):
             "recommendation_parse event=parse_complete path=%s",
             "llm_repair",
         )
+
+    async def test_invalid_nested_reference_contract_triggers_one_repair(self) -> None:
+        responses = iter(
+            [
+                SimpleNamespace(
+                    completion_text=json.dumps(
+                        {
+                            "reference_entities": [
+                                {
+                                    "display_title": "Reference",
+                                    "aliases": [],
+                                    "polarity": "NEGATVE",
+                                }
+                            ]
+                        }
+                    )
+                ),
+                SimpleNamespace(
+                    completion_text=json.dumps(
+                        {
+                            "reference_entities": [
+                                {
+                                    "display_title": "Reference",
+                                    "aliases": [],
+                                    "polarity": "negative",
+                                }
+                            ]
+                        }
+                    )
+                ),
+            ]
+        )
+
+        async def generate(**_kwargs):
+            return next(responses)
+
+        parser = PreferenceParser(
+            SimpleNamespace(llm_generate=generate),
+            provider_id="provider/test",
+        )
+
+        outcome = await parser.parse_preference(object(), "不要类似 Reference")
+
+        self.assertEqual(outcome.path, "llm_repair")
+        self.assertEqual(outcome.preference.reference_games_dislike, ["Reference"])
 
     async def test_invalid_json_logs_the_keyword_fallback_path(self) -> None:
         async def generate(**_kwargs):

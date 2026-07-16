@@ -65,6 +65,115 @@ class PreferencePatchTest(unittest.TestCase):
         self.assertEqual(parsed.residual_text, "换不同玩法")
         self.assertEqual(preference.reference_games_dislike, ["Game A"])
 
+    def test_dislike_ordinal_flips_existing_positive_reference(self) -> None:
+        parsed = parse_preference_patch("不喜欢第1款这类", len(self.results))
+        preference, _appids, _titles = apply_preference_patch(
+            GamePreference(
+                reference_entities=[
+                    {
+                        "display_title": "Game A",
+                        "aliases": ["Localized Game A"],
+                        "polarity": "positive",
+                    }
+                ]
+            ),
+            parsed.patch,
+            self.results,
+        )
+
+        self.assertEqual(preference.reference_games_like, [])
+        self.assertEqual(preference.reference_games_dislike, ["Game A"])
+        self.assertEqual(
+            [
+                (entity.display_title, entity.aliases, entity.polarity)
+                for entity in preference.reference_entities
+            ],
+            [("Game A", ["Localized Game A"], "negative")],
+        )
+
+    def test_like_ordinal_flips_existing_negative_reference(self) -> None:
+        parsed = parse_preference_patch("喜欢第1款这类", len(self.results))
+        preference, _appids, _titles = apply_preference_patch(
+            GamePreference(
+                reference_entities=[
+                    {
+                        "display_title": "Game A",
+                        "aliases": ["Localized Game A"],
+                        "polarity": "negative",
+                    }
+                ]
+            ),
+            parsed.patch,
+            self.results,
+        )
+
+        self.assertEqual(preference.reference_games_like, ["Game A"])
+        self.assertEqual(preference.reference_games_dislike, [])
+        self.assertEqual(
+            [
+                (entity.display_title, entity.aliases, entity.polarity)
+                for entity in preference.reference_entities
+            ],
+            [("Game A", ["Localized Game A"], "positive")],
+        )
+
+    def test_ordinal_feedback_matches_an_existing_localized_alias(self) -> None:
+        parsed = parse_preference_patch("不喜欢第1款这类", 1)
+        preference, _appids, _titles = apply_preference_patch(
+            GamePreference(
+                reference_entities=[
+                    {
+                        "display_title": "本地化标题",
+                        "aliases": ["Portal"],
+                        "polarity": "positive",
+                    }
+                ]
+            ),
+            parsed.patch,
+            [RecommendationResultSummary(10, "Ｐｏｒｔａｌ™", ["Puzzle"])],
+        )
+
+        self.assertEqual(preference.reference_games_like, [])
+        self.assertEqual(preference.reference_games_dislike, ["本地化标题"])
+        self.assertEqual(
+            [
+                (entity.display_title, entity.aliases, entity.polarity)
+                for entity in preference.reference_entities
+            ],
+            [("本地化标题", ["Portal"], "negative")],
+        )
+
+    def test_ordinal_feedback_matches_an_existing_resolved_appid(self) -> None:
+        parsed = parse_preference_patch("不喜欢第1款这类", 1)
+        preference, _appids, _titles = apply_preference_patch(
+            GamePreference(
+                reference_games_like=["本地化标题"],
+                resolved_reference_games=[
+                    {
+                        "raw_text": "本地化标题",
+                        "normalized_title": "localizedtitle",
+                        "canonical_title": "Portal",
+                        "appid": 10,
+                        "confidence": 1.0,
+                        "polarity": "like",
+                    }
+                ],
+            ),
+            parsed.patch,
+            [RecommendationResultSummary(10, "Different Store Title", ["Puzzle"])],
+        )
+
+        self.assertEqual(preference.reference_games_like, [])
+        self.assertEqual(preference.reference_games_dislike, ["本地化标题"])
+        self.assertEqual(
+            [entity.polarity for entity in preference.reference_entities],
+            ["negative"],
+        )
+        self.assertEqual(
+            [reference.polarity for reference in preference.resolved_reference_games],
+            ["dislike"],
+        )
+
     def test_plain_rejection_only_excludes_that_result(self) -> None:
         parsed = parse_preference_patch("不要第2款", len(self.results))
         preference, appids, titles = apply_preference_patch(
@@ -133,6 +242,106 @@ class PreferencePatchTest(unittest.TestCase):
 
         self.assertEqual(merged.budget, 60)
         self.assertTrue(merged.budget_is_required)
+
+    def test_retry_merge_preserves_aliases_for_each_reference_entity(self) -> None:
+        merged = merge_retry_preferences(
+            GamePreference(
+                reference_entities=[
+                    {
+                        "display_title": "Reference A",
+                        "aliases": ["Alias A1", "Alias A2"],
+                        "polarity": "positive",
+                    }
+                ]
+            ),
+            GamePreference(
+                reference_entities=[
+                    {
+                        "display_title": "Reference B",
+                        "aliases": ["Alias B1", "Alias B2"],
+                        "polarity": "positive",
+                    }
+                ]
+            ),
+        )
+
+        self.assertEqual(
+            [
+                (entity.display_title, entity.aliases)
+                for entity in merged.reference_entities
+            ],
+            [
+                ("Reference A", ["Alias A1", "Alias A2"]),
+                ("Reference B", ["Alias B1", "Alias B2"]),
+            ],
+        )
+        self.assertFalse(
+            any("无法可靠归属" in warning for warning in merged.parse_warnings)
+        )
+
+    def test_retry_supplement_flips_reference_polarity_and_merges_aliases(self) -> None:
+        merged = merge_retry_preferences(
+            GamePreference(
+                reference_entities=[
+                    {
+                        "display_title": "Game A",
+                        "aliases": ["Alias A1"],
+                        "polarity": "positive",
+                    }
+                ]
+            ),
+            GamePreference(
+                reference_entities=[
+                    {
+                        "display_title": "Game A",
+                        "aliases": ["Alias A2"],
+                        "polarity": "negative",
+                    }
+                ]
+            ),
+        )
+
+        self.assertEqual(merged.reference_games_like, [])
+        self.assertEqual(merged.reference_games_dislike, ["Game A"])
+        self.assertEqual(
+            [
+                (entity.display_title, entity.aliases, entity.polarity)
+                for entity in merged.reference_entities
+            ],
+            [("Game A", ["Alias A1", "Alias A2"], "negative")],
+        )
+
+    def test_retry_supplement_can_flip_negative_reference_back_to_positive(self) -> None:
+        merged = merge_retry_preferences(
+            GamePreference(
+                reference_entities=[
+                    {
+                        "display_title": "Game A",
+                        "aliases": ["Alias A1"],
+                        "polarity": "negative",
+                    }
+                ]
+            ),
+            GamePreference(
+                reference_entities=[
+                    {
+                        "display_title": "Game A",
+                        "aliases": ["Alias A2"],
+                        "polarity": "positive",
+                    }
+                ]
+            ),
+        )
+
+        self.assertEqual(merged.reference_games_like, ["Game A"])
+        self.assertEqual(merged.reference_games_dislike, [])
+        self.assertEqual(
+            [
+                (entity.display_title, entity.aliases, entity.polarity)
+                for entity in merged.reference_entities
+            ],
+            [("Game A", ["Alias A1", "Alias A2"], "positive")],
+        )
 
 
 if __name__ == "__main__":

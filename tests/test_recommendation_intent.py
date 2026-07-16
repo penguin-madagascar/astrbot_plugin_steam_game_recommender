@@ -9,7 +9,10 @@ from astrbot_plugin_steam_game_recommender.services.preference_rules import (
 from astrbot_plugin_steam_game_recommender.services.recommendation_intent import (
     IntentTagRole,
     IntentTagSource,
+    MAX_REFERENCE_ALIASES_PER_ENTITY,
+    MAX_REFERENCE_ENTITIES,
     QualityIntent,
+    ReferenceQuery,
     ReferencePolarity,
     build_recommendation_intent,
     expand_intent_with_reference_tags,
@@ -24,6 +27,18 @@ from astrbot_plugin_steam_game_recommender.storage.models import (
 
 
 class RecommendationIntentBuilderTest(unittest.TestCase):
+    def test_invalid_structured_reference_polarity_is_not_silently_positive(self) -> None:
+        with self.assertRaises(ValueError):
+            GamePreference(
+                reference_entities=[
+                    {
+                        "display_title": "Reference",
+                        "aliases": [],
+                        "polarity": "NEGATVE",
+                    }
+                ]
+            )
+
     def test_adds_gameplay_constraints_as_derived_supporting_tags(self) -> None:
         intent = build_recommendation_intent(
             GamePreference(players=2, difficulty="easy", mood="轻松")
@@ -87,20 +102,22 @@ class RecommendationIntentBuilderTest(unittest.TestCase):
         )
         self.assertEqual(reference.polarity, ReferencePolarity.POSITIVE)
 
-    def test_pairs_equal_reference_titles_and_aliases_positionally(self) -> None:
-        intent = build_recommendation_intent(
-            GamePreference(
-                reference_games_like=["黑暗之魂", "星露谷物语"],
-                reference_search_terms=["Dark Souls", "Stardew Valley"],
-            )
+    def test_ignores_ambiguous_flat_alias_order_for_multiple_references(self) -> None:
+        preference = GamePreference(
+            reference_games_like=["Original A", "Original B"],
+            reference_search_terms=["Alias B", "Alias A"],
         )
+        intent = build_recommendation_intent(preference)
 
         self.assertEqual(
             [(reference.display_title, reference.aliases) for reference in intent.references],
             [
-                ("黑暗之魂", ("黑暗之魂", "Dark Souls")),
-                ("星露谷物语", ("星露谷物语", "Stardew Valley")),
+                ("Original A", ("Original A",)),
+                ("Original B", ("Original B",)),
             ],
+        )
+        self.assertTrue(
+            any("无法可靠归属" in warning for warning in preference.parse_warnings)
         )
 
     def test_does_not_attach_mismatched_or_positive_aliases_to_other_references(self) -> None:
@@ -122,6 +139,118 @@ class RecommendationIntentBuilderTest(unittest.TestCase):
                 ("星露谷物语", ("星露谷物语",), ReferencePolarity.POSITIVE),
                 ("杀戮尖塔", ("杀戮尖塔",), ReferencePolarity.NEGATIVE),
             ],
+        )
+
+    def test_structured_reference_entities_preserve_multi_alias_groups(self) -> None:
+        intent = build_recommendation_intent(
+            GamePreference(
+                reference_entities=[
+                    {
+                        "display_title": "本地标题 A",
+                        "aliases": ["English A", "Localized A"],
+                        "polarity": "positive",
+                    },
+                    {
+                        "display_title": "本地标题 B",
+                        "aliases": ["English B", "Localized B"],
+                        "polarity": "negative",
+                    },
+                ]
+            )
+        )
+
+        self.assertEqual(
+            [
+                (reference.display_title, reference.aliases, reference.polarity)
+                for reference in intent.references
+            ],
+            [
+                (
+                    "本地标题 A",
+                    ("本地标题 A", "English A", "Localized A"),
+                    ReferencePolarity.POSITIVE,
+                ),
+                (
+                    "本地标题 B",
+                    ("本地标题 B", "English B", "Localized B"),
+                    ReferencePolarity.NEGATIVE,
+                ),
+            ],
+        )
+
+    def test_mismatched_flat_search_term_is_ignored_with_a_warning(self) -> None:
+        preference = GamePreference(
+            reference_games_like=["Original A", "Original B"],
+            reference_search_terms=["Unassigned Alias"],
+        )
+
+        intent = build_recommendation_intent(preference)
+
+        self.assertEqual(
+            [reference.display_title for reference in intent.references],
+            ["Original A", "Original B"],
+        )
+        self.assertEqual(len(preference.parse_warnings), 1)
+        self.assertIn("无法可靠归属", preference.parse_warnings[0])
+
+    def test_reference_budget_caps_entities_and_aliases_with_one_warning(self) -> None:
+        preference = GamePreference(
+            reference_entities=[
+                {
+                    "display_title": f"Reference {index}",
+                    "aliases": [
+                        f"Reference {index} Alias {alias_index}"
+                        for alias_index in range(1, 6)
+                    ],
+                    "polarity": "positive",
+                }
+                for index in range(1, 6)
+            ]
+        )
+
+        intent = build_recommendation_intent(preference)
+
+        self.assertEqual(len(intent.references), MAX_REFERENCE_ENTITIES)
+        self.assertTrue(
+            all(
+                len(reference.aliases) <= MAX_REFERENCE_ALIASES_PER_ENTITY
+                for reference in intent.references
+            )
+        )
+        self.assertEqual(
+            len(
+                [
+                    warning
+                    for warning in preference.parse_warnings
+                    if "参考游戏或别名超过处理上限" in warning
+                ]
+            ),
+            1,
+        )
+        dumper = getattr(preference, "model_dump", None)
+        payload = dumper() if dumper else preference.dict()
+        validator = getattr(GamePreference, "model_validate", None)
+        round_tripped = (
+            validator(payload) if validator else GamePreference.parse_obj(payload)
+        )
+        self.assertEqual(
+            round_tripped.parse_warnings.count(preference.parse_warnings[0]),
+            1,
+        )
+        self.assertFalse(
+            any("无法可靠归属" in warning for warning in round_tripped.parse_warnings)
+        )
+
+    def test_reference_query_defensively_caps_aliases(self) -> None:
+        reference = ReferenceQuery(
+            "Display",
+            ("Display", "Alias 1", "Alias 2", "Alias 3"),
+            ReferencePolarity.POSITIVE,
+        )
+
+        self.assertEqual(
+            reference.aliases,
+            ("Display", "Alias 1", "Alias 2"),
         )
 
     def test_intent_values_are_immutable(self) -> None:

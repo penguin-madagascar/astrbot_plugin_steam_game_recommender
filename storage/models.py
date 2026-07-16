@@ -4,7 +4,7 @@ import math
 import re
 from typing import Any, Callable
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, root_validator, validator
 
 from ..services.recommendation_limits import (
     DEFAULT_RECOMMENDATION_COUNT,
@@ -12,6 +12,15 @@ from ..services.recommendation_limits import (
 )
 
 COMPANY_ALIAS_LIMIT = 5
+MAX_REFERENCE_ENTITIES = 3
+MAX_REFERENCE_ALIASES_PER_ENTITY = 3
+REFERENCE_INPUT_LIMIT_WARNING = (
+    "参考游戏或别名超过处理上限，已仅保留前 3 个参考实体，"
+    "且每个实体最多使用 3 个标题候选。"
+)
+REFERENCE_ALIAS_MAPPING_WARNING = (
+    "部分参考游戏别名无法可靠归属到原文提及的具体游戏，已忽略这些别名。"
+)
 
 LANGUAGE_ALIASES = {
     "chinese": "schinese",
@@ -343,6 +352,112 @@ class CompanyPreference(BaseModel):
         extra = "ignore"
 
 
+class ReferenceEntity(BaseModel):
+    display_title: str
+    aliases: list[str] = Field(default_factory=list)
+    polarity: str = "positive"
+
+    @validator("display_title", pre=True)
+    def _required_display_title(cls, value: Any) -> str:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not text:
+            raise ValueError("reference entity requires a display title")
+        return text
+
+    @validator("aliases", pre=True)
+    def _normalize_reference_aliases(cls, value: Any) -> list[str]:
+        return split_display_list(value)
+
+    @validator("polarity", pre=True)
+    def _normalize_reference_polarity(cls, value: Any) -> str:
+        if not isinstance(value, str):
+            raise ValueError("reference entity polarity must be a string")
+        polarity = value.strip().lower()
+        if polarity not in {"positive", "negative"}:
+            raise ValueError("invalid reference entity polarity")
+        return polarity
+
+    class Config:
+        extra = "ignore"
+
+
+def _parse_reference_entities(value: Any) -> list[ReferenceEntity]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    result: list[ReferenceEntity] = []
+    for raw in value:
+        validator_fn = getattr(ReferenceEntity, "model_validate", None)
+        item = validator_fn(raw) if validator_fn else ReferenceEntity.parse_obj(raw)
+        result.append(item)
+    return result
+
+
+def _dedupe_display_values(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        key = text.casefold()
+        if text and key not in seen:
+            result.append(text)
+            seen.add(key)
+    return result
+
+
+def _legacy_reference_entities(
+    positive_titles: list[str],
+    search_terms: list[str],
+    negative_titles: list[str],
+) -> tuple[list[ReferenceEntity], list[ReferenceEntity]]:
+    positive: list[ReferenceEntity] = []
+    orphans: list[ReferenceEntity] = []
+    if len(positive_titles) == 1:
+        positive.append(
+            ReferenceEntity(
+                display_title=positive_titles[0],
+                aliases=search_terms,
+                polarity="positive",
+            )
+        )
+    else:
+        positive.extend(
+            ReferenceEntity(display_title=title, polarity="positive")
+            for title in positive_titles
+        )
+        title_keys = {title.casefold() for title in positive_titles}
+        orphans.extend(
+            ReferenceEntity(display_title=term, polarity="positive")
+            for term in search_terms
+            if term.casefold() not in title_keys
+        )
+
+    negative = [
+        ReferenceEntity(display_title=title, polarity="negative")
+        for title in negative_titles
+    ]
+    # Explicit titles retain priority.  Flat aliases for multiple references
+    # have no trustworthy ownership information, so callers only warn about
+    # them instead of binding them by list position.
+    return [*positive, *negative], orphans
+
+
+def _merge_reference_entity(
+    result: list[ReferenceEntity],
+    candidate: ReferenceEntity,
+) -> None:
+    key = (candidate.polarity, candidate.display_title.casefold())
+    for position, current in enumerate(result):
+        if (current.polarity, current.display_title.casefold()) != key:
+            continue
+        result[position] = ReferenceEntity(
+            display_title=current.display_title,
+            aliases=_dedupe_display_values([*current.aliases, *candidate.aliases]),
+            polarity=current.polarity,
+        )
+        return
+    result.append(candidate)
+
+
 class GamePreference(BaseModel):
     platforms: list[str] = Field(default_factory=list)
     required_tags: list[str] = Field(default_factory=list)
@@ -356,6 +471,7 @@ class GamePreference(BaseModel):
         exclude=True,
     )
     genres_dislike: list[str] = Field(default_factory=list)
+    reference_entities: list[ReferenceEntity] = Field(default_factory=list)
     reference_games_like: list[str] = Field(default_factory=list)
     reference_search_terms: list[str] = Field(default_factory=list)
     reference_games_dislike: list[str] = Field(default_factory=list)
@@ -374,6 +490,102 @@ class GamePreference(BaseModel):
     allow_unreleased: bool = False
     result_count: int = DEFAULT_RECOMMENDATION_COUNT
     parse_warnings: list[str] = Field(default_factory=list)
+
+    @root_validator(pre=True)
+    def _group_and_bound_reference_entities(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        structured = _parse_reference_entities(data.get("reference_entities", []))
+        positive_titles = split_display_list(data.get("reference_games_like", []))
+        search_terms = split_display_list(data.get("reference_search_terms", []))
+        negative_titles = split_display_list(data.get("reference_games_dislike", []))
+        if structured and (positive_titles or negative_titles):
+            active_legacy_keys = {
+                ("positive", title.casefold()) for title in positive_titles
+            } | {("negative", title.casefold()) for title in negative_titles}
+            structured = [
+                entity
+                for entity in structured
+                if (entity.polarity, entity.display_title.casefold())
+                in active_legacy_keys
+            ]
+        explicit_legacy, orphan_terms = _legacy_reference_entities(
+            positive_titles,
+            search_terms,
+            negative_titles,
+        )
+
+        grouped: list[ReferenceEntity] = []
+        for entity in [*structured, *explicit_legacy]:
+            _merge_reference_entity(grouped, entity)
+
+        known_aliases = {
+            alias.casefold()
+            for entity in grouped
+            for alias in [entity.display_title, *entity.aliases]
+        }
+        unmapped_orphan_terms = [
+            entity
+            for entity in orphan_terms
+            if entity.display_title.casefold() not in known_aliases
+        ]
+
+        truncated = len(grouped) > MAX_REFERENCE_ENTITIES
+        bounded: list[ReferenceEntity] = []
+        for entity in grouped[:MAX_REFERENCE_ENTITIES]:
+            aliases = _dedupe_display_values(
+                [entity.display_title, *entity.aliases]
+            )
+            if len(aliases) > MAX_REFERENCE_ALIASES_PER_ENTITY:
+                truncated = True
+            aliases = aliases[:MAX_REFERENCE_ALIASES_PER_ENTITY]
+            bounded.append(
+                ReferenceEntity(
+                    display_title=entity.display_title,
+                    aliases=[
+                        alias
+                        for alias in aliases
+                        if alias.casefold() != entity.display_title.casefold()
+                    ],
+                    polarity=entity.polarity,
+                )
+            )
+
+        data["reference_entities"] = bounded
+        data["reference_games_like"] = [
+            entity.display_title
+            for entity in bounded
+            if entity.polarity == "positive"
+        ]
+        data["reference_games_dislike"] = [
+            entity.display_title
+            for entity in bounded
+            if entity.polarity == "negative"
+        ]
+        data["reference_search_terms"] = _dedupe_display_values(
+            [
+                alias
+                for entity in bounded
+                if entity.polarity == "positive"
+                for alias in entity.aliases
+            ]
+        )
+        warnings = data.get("parse_warnings", [])
+        warnings = (
+            list(warnings)
+            if isinstance(warnings, (list, tuple, set))
+            else [warnings]
+        )
+        if truncated and REFERENCE_INPUT_LIMIT_WARNING not in warnings:
+            warnings.append(REFERENCE_INPUT_LIMIT_WARNING)
+        if (
+            unmapped_orphan_terms
+            and REFERENCE_ALIAS_MAPPING_WARNING not in warnings
+        ):
+            warnings.append(REFERENCE_ALIAS_MAPPING_WARNING)
+        data["parse_warnings"] = warnings
+        return data
 
     @validator("platforms", pre=True)
     def _normalize_platforms(cls, value: Any) -> list[str]:
@@ -410,6 +622,15 @@ class GamePreference(BaseModel):
     @validator("reference_games_like", "reference_games_dislike", pre=True)
     def _normalize_reference_titles(cls, value: Any) -> list[str]:
         return split_display_list(value)
+
+    @validator("reference_entities", pre=True)
+    def _validated_reference_entities(cls, value: Any) -> list[ReferenceEntity]:
+        return _validated_model_list(
+            value,
+            ReferenceEntity,
+            limit=MAX_REFERENCE_ENTITIES,
+            identity_key=lambda item: (item.polarity, item.display_title),
+        )
 
     @validator("derived_intent_tags", pre=True)
     def _validated_derived_tags(cls, value: Any) -> list[DerivedIntentTag]:

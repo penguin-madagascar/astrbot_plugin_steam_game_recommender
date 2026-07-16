@@ -5,7 +5,12 @@ from dataclasses import dataclass
 from enum import Enum
 from itertools import islice
 
-from ..storage.models import GameCandidate, GamePreference
+from ..storage.models import (
+    MAX_REFERENCE_ALIASES_PER_ENTITY,
+    MAX_REFERENCE_ENTITIES,
+    GameCandidate,
+    GamePreference,
+)
 from .tag_normalizer import (
     ASCII_CANONICAL_TAG_PATTERN,
     canonical_tag_from_vocabulary,
@@ -47,7 +52,11 @@ class ReferenceQuery:
     polarity: ReferencePolarity
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "aliases", tuple(self.aliases))
+        object.__setattr__(
+            self,
+            "aliases",
+            _unique_aliases([self.display_title, *self.aliases]),
+        )
         object.__setattr__(self, "polarity", ReferencePolarity(self.polarity))
 
 
@@ -73,7 +82,11 @@ class RecommendationIntent:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tags", tuple(self.tags))
-        object.__setattr__(self, "references", tuple(self.references))
+        object.__setattr__(
+            self,
+            "references",
+            tuple(self.references)[:MAX_REFERENCE_ENTITIES],
+        )
         object.__setattr__(self, "quality_intent", QualityIntent(self.quality_intent))
 
 
@@ -170,17 +183,32 @@ def build_recommendation_intent(
             if current is None or _tag_priority(candidate) > _tag_priority(current):
                 tags_by_canonical[tag] = candidate
 
-    positive_references = _group_positive_references(
-        preference.reference_games_like,
-        preference.reference_search_terms,
-    )
-    negative_references = tuple(
-        ReferenceQuery(title, (title,), ReferencePolarity.NEGATIVE)
-        for title in preference.reference_games_dislike
-    )
+    if preference.reference_entities:
+        references = tuple(
+            ReferenceQuery(
+                entity.display_title,
+                tuple(entity.aliases),
+                (
+                    ReferencePolarity.NEGATIVE
+                    if entity.polarity == "negative"
+                    else ReferencePolarity.POSITIVE
+                ),
+            )
+            for entity in preference.reference_entities
+        )
+    else:
+        positive_references = _group_positive_references(
+            preference.reference_games_like,
+            preference.reference_search_terms,
+        )
+        negative_references = tuple(
+            ReferenceQuery(title, (title,), ReferencePolarity.NEGATIVE)
+            for title in preference.reference_games_dislike
+        )
+        references = (*positive_references, *negative_references)
     return RecommendationIntent(
         tags=tuple(tags_by_canonical.values()),
-        references=(*positive_references, *negative_references),
+        references=references,
         quality_intent=QualityIntent(preference.quality_intent),
         allow_unreleased=preference.allow_unreleased,
     )
@@ -277,6 +305,8 @@ def _unique_aliases(values: list[str]) -> tuple[str, ...]:
         if value and key not in seen:
             result.append(value)
             seen.add(key)
+        if len(result) >= MAX_REFERENCE_ALIASES_PER_ENTITY:
+            break
     return tuple(result)
 
 

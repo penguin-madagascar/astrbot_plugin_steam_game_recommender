@@ -4,9 +4,10 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from ..storage.models import GamePreference
+from ..storage.models import MAX_REFERENCE_ENTITIES, GamePreference
 from .company_preferences import merge_retry_company_preferences
 from .preference_rules import extract_budget
+from .reference_matching import title_key
 from .recommendation_memory import (
     PreferencePatch,
     RecommendationResultSummary,
@@ -160,29 +161,132 @@ def apply_preference_patch(
         }:
             data[field_name] = value
 
-    positive_titles = list(data.get("reference_games_like") or [])
-    negative_titles = list(data.get("reference_games_dislike") or [])
     excluded_appids: list[int] = []
     excluded_titles: list[str] = []
     for ordinal in patch.positive_reference_ordinals:
         if 1 <= ordinal <= len(results):
-            positive_titles = merge_text(positive_titles, [results[ordinal - 1].title])
+            result = results[ordinal - 1]
+            set_reference_polarity(
+                data,
+                result.title,
+                "positive",
+                appid=result.appid,
+            )
     for ordinal in patch.negative_reference_ordinals:
         if 1 <= ordinal <= len(results):
-            negative_titles = merge_text(negative_titles, [results[ordinal - 1].title])
+            result = results[ordinal - 1]
+            set_reference_polarity(
+                data,
+                result.title,
+                "negative",
+                appid=result.appid,
+            )
     for ordinal in patch.exclude_ordinals:
         if 1 <= ordinal <= len(results):
             result = results[ordinal - 1]
             if result.appid is not None:
                 excluded_appids.append(result.appid)
             excluded_titles.append(result.title.lower())
-    data["reference_games_like"] = positive_titles
-    data["reference_games_dislike"] = negative_titles
     data["parse_warnings"] = merge_text(
         data.get("parse_warnings") or [],
         warnings or [],
     )
     return validate_preference(data), excluded_appids, excluded_titles
+
+
+def set_reference_polarity(
+    data: dict[str, Any],
+    title: str,
+    polarity: str,
+    *,
+    appid: int | None = None,
+) -> None:
+    normalized_title = str(title or "").strip()
+    if not normalized_title:
+        return
+    target_field = (
+        "reference_games_like"
+        if polarity == "positive"
+        else "reference_games_dislike"
+    )
+    opposite_field = (
+        "reference_games_dislike"
+        if polarity == "positive"
+        else "reference_games_like"
+    )
+    title_key = normalize_reference_identity(normalized_title)
+    related_keys = {title_key}
+    resolved_values = [
+        dict(value) if isinstance(value, dict) else dump_model(value)
+        for value in data.get("resolved_reference_games") or []
+    ]
+    matching_resolved_positions: set[int] = set()
+    for position, payload in enumerate(resolved_values):
+        resolved_appid = payload.get("appid")
+        appid_matches = (
+            appid is not None
+            and resolved_appid is not None
+            and int(resolved_appid) == int(appid)
+        )
+        title_matches = title_key in {
+            normalize_reference_identity(payload.get("raw_text")),
+            normalize_reference_identity(payload.get("canonical_title")),
+        }
+        if appid_matches or title_matches:
+            matching_resolved_positions.add(position)
+            related_keys.update(
+                filter(
+                    None,
+                    (
+                        normalize_reference_identity(payload.get("raw_text")),
+                        normalize_reference_identity(payload.get("canonical_title")),
+                    ),
+                )
+            )
+
+    entity_values = [
+        dict(value) if isinstance(value, dict) else dump_model(value)
+        for value in data.get("reference_entities") or []
+    ]
+    matching_entities = [
+        payload
+        for payload in entity_values
+        if reference_payload_keys(payload).intersection(related_keys)
+    ]
+    active_titles = [
+        str(payload.get("display_title") or "").strip()
+        for payload in matching_entities
+        if str(payload.get("display_title") or "").strip()
+    ] or [normalized_title]
+    active_title_keys = {
+        normalize_reference_identity(value) for value in active_titles
+    }
+    for payload in matching_entities:
+        payload["polarity"] = polarity
+
+    for field_name in (target_field, opposite_field):
+        data[field_name] = [
+            value
+            for value in data.get(field_name) or []
+            if normalize_reference_identity(value) not in active_title_keys
+            and normalize_reference_identity(value) not in related_keys
+        ]
+    data[target_field] = merge_text(
+        list(data.get(target_field) or []),
+        active_titles,
+    )
+
+    data["reference_entities"] = entity_values
+    data["reference_search_terms"] = [
+        alias
+        for payload in entity_values
+        if payload.get("polarity") == "positive"
+        for alias in payload.get("aliases") or []
+    ]
+    resolved_polarity = "like" if polarity == "positive" else "dislike"
+    for position in matching_resolved_positions:
+        resolved_values[position]["polarity"] = resolved_polarity
+    data["resolved_reference_games"] = resolved_values
 
 
 def merge_retry_preferences(
@@ -195,9 +299,6 @@ def merge_retry_preferences(
         "genres_like",
         "extra_tags",
         "genres_dislike",
-        "reference_games_like",
-        "reference_search_terms",
-        "reference_games_dislike",
         "preferred_languages",
         "required_languages",
         "parse_warnings",
@@ -206,6 +307,7 @@ def merge_retry_preferences(
             data.get(field_name) or [],
             list(getattr(supplement, field_name)),
         )
+    merge_retry_reference_preferences(data, base, supplement)
     for field_name, identity_key in (
         (
             "derived_intent_tags",
@@ -242,6 +344,107 @@ def merge_retry_preferences(
     if supplement.library_filter_mode:
         data["library_filter_mode"] = supplement.library_filter_mode
     return validate_preference(data)
+
+
+def merge_retry_reference_preferences(
+    data: dict[str, Any],
+    base: GamePreference,
+    supplement: GamePreference,
+) -> None:
+    entries: list[tuple[dict[str, Any], bool]] = []
+
+    def merge_entity(value: Any, *, supplement_owned: bool) -> None:
+        incoming = dict(value) if isinstance(value, dict) else dump_model(value)
+        incoming_keys = reference_payload_keys(incoming)
+        if not incoming_keys:
+            return
+        matching_positions = [
+            position
+            for position, (payload, _owned) in enumerate(entries)
+            if reference_payload_keys(payload).intersection(incoming_keys)
+        ]
+        if not matching_positions:
+            entries.append((incoming, supplement_owned))
+            return
+
+        first_position = matching_positions[0]
+        matched = [entries[position] for position in matching_positions]
+        primary = dict(matched[0][0])
+        aliases = list(primary.get("aliases") or [])
+        primary_title = str(primary.get("display_title") or "").strip()
+        for payload, _owned in matched[1:]:
+            aliases = merge_text(
+                aliases,
+                [
+                    str(payload.get("display_title") or ""),
+                    *(payload.get("aliases") or []),
+                ],
+            )
+        incoming_title = str(incoming.get("display_title") or "").strip()
+        aliases = merge_text(
+            aliases,
+            [incoming_title, *(incoming.get("aliases") or [])],
+        )
+        primary["aliases"] = [
+            alias
+            for alias in aliases
+            if str(alias or "").strip().casefold() != primary_title.casefold()
+        ]
+        primary["polarity"] = incoming.get("polarity", "positive")
+        merged_owned = supplement_owned or any(owned for _payload, owned in matched)
+        for position in reversed(matching_positions):
+            entries.pop(position)
+        entries.insert(first_position, (primary, merged_owned))
+
+    for entity in base.reference_entities:
+        merge_entity(entity, supplement_owned=False)
+    for entity in supplement.reference_entities:
+        merge_entity(entity, supplement_owned=True)
+
+    while len(entries) > MAX_REFERENCE_ENTITIES:
+        removable = next(
+            (
+                position
+                for position, (_payload, supplement_owned) in enumerate(entries)
+                if not supplement_owned
+            ),
+            0,
+        )
+        entries.pop(removable)
+
+    merged = [payload for payload, _supplement_owned in entries]
+    data["reference_entities"] = merged
+    data["reference_games_like"] = [
+        str(payload.get("display_title") or "")
+        for payload in merged
+        if payload.get("polarity") == "positive"
+    ]
+    data["reference_games_dislike"] = [
+        str(payload.get("display_title") or "")
+        for payload in merged
+        if payload.get("polarity") == "negative"
+    ]
+    data["reference_search_terms"] = [
+        alias
+        for payload in merged
+        if payload.get("polarity") == "positive"
+        for alias in payload.get("aliases") or []
+    ]
+
+
+def reference_payload_keys(payload: dict[str, Any]) -> set[str]:
+    return {
+        normalized
+        for value in [
+            payload.get("display_title"),
+            *(payload.get("aliases") or []),
+        ]
+        if (normalized := normalize_reference_identity(value))
+    }
+
+
+def normalize_reference_identity(value: Any) -> str:
+    return title_key(str(value or ""))
 
 
 def explicit_tag_values(text: str, prefix: str) -> list[str]:
