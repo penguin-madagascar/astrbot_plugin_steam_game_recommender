@@ -736,7 +736,7 @@ def apply_feature_verdicts(
                 break
         if reject_candidate:
             continue
-        has_technical_failure = any(
+        has_technical_failure = bool(verification_features) and any(
             technical_failures[(feature.constraint_id, feature.polarity)] is not None
             for feature in selected_features
         )

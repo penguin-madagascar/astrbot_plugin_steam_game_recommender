@@ -2150,6 +2150,50 @@ class SemanticFeaturePipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(by_appid[25].score_breakdown, tail_baseline)
         self.assertEqual(by_appid[25].core_feature_verification, "not_applicable")
 
+    async def test_optional_only_provider_failure_preserves_baseline_order(
+        self,
+    ) -> None:
+        module = importlib.import_module(MODULE)
+        feature = SoftFeature(
+            constraint_id="branching",
+            source_span="最好有分支剧情",
+            normalized_text="branching story",
+            role="optional",
+            polarity="positive",
+        )
+
+        outcome = await module.verify_ranked_features(
+            self.ranked_games(25),
+            [feature],
+            None,
+            result_limit=5,
+        )
+
+        self.assertEqual(outcome.candidate_count, 20)
+        self.assertEqual([game.appid for game in outcome.games], list(range(1, 26)))
+        self.assertEqual([game.appid for game in outcome.games[:5]], list(range(1, 6)))
+        self.assertTrue(
+            all(
+                game.core_feature_verification == "not_applicable"
+                for game in outcome.games
+            )
+        )
+        self.assertEqual(
+            [notice.code for notice in outcome.notices],
+            ["semantic_feature_provider_failure"],
+        )
+        for game in outcome.games[:20]:
+            failure = next(
+                item
+                for item in game.recommendation_evidence
+                if item.evidence_id == "semantic_feature:branching:technical_failure"
+            )
+            self.assertEqual(failure.sentiment, "uncertain")
+            self.assertTrue(failure.important)
+        self.assertTrue(
+            all(not game.recommendation_evidence for game in outcome.games[20:])
+        )
+
     async def test_missing_verifier_uses_only_first_technical_failure_window(
         self,
     ) -> None:
