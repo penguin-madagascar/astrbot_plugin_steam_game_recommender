@@ -873,6 +873,71 @@ class LlmFallbackMainPipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context.calls, 0)
         self.assertFalse(run.used_unverified_fallback)
 
+    async def test_core_unknown_result_never_calls_empty_result_fallback(self) -> None:
+        preference = GamePreference(
+            platforms=["steam"],
+            soft_features=[
+                {
+                    "constraint_id": "branching",
+                    "source_span": "分支剧情",
+                    "normalized_text": "branching story",
+                    "role": "core",
+                    "polarity": "positive",
+                }
+            ],
+        )
+        context = SemanticLlmContext(
+            provider_id="provider/semantic-verifier",
+            response={
+                "verdicts": [
+                    {
+                        "appid": 1,
+                        "constraint_id": "branching",
+                        "polarity": "positive",
+                        "status": "unknown",
+                        "evidence_quote": "",
+                    }
+                ]
+            },
+        )
+        plugin = semantic_pipeline_plugin(
+            context,
+            SemanticMemoryCache(),
+            [semantic_ranked_game(1)],
+        )
+        plugin.fallback_provider_id = "provider/explicit-fallback"
+        fallback_generator = AsyncMock()
+
+        async def identity_reasons(_context, _event, _provider_id, ranked_games):
+            return ranked_games
+
+        with (
+            patch.object(main_module, "generate_recommendation_reasons", identity_reasons),
+            patch.object(
+                main_module,
+                "generate_unverified_game_suggestions",
+                fallback_generator,
+            ),
+        ):
+            run = await plugin._run_recommendation(
+                FakeEvent(),
+                PreparedRecommendation("分支剧情", preference, 2),
+            )
+
+        fallback_generator.assert_not_awaited()
+        self.assertEqual([game.appid for game in run.ranked_games], [1])
+        self.assertEqual(
+            [notice.code for notice in run.run_notices],
+            ["semantic_feature_core_unknown"],
+        )
+        self.assertEqual(run.unverified_suggestions, ())
+        self.assertFalse(run.used_unverified_fallback)
+        rendered = "\n".join(run.messages)
+        self.assertIn("不推荐理由", rendered)
+        self.assertIn("分支剧情", rendered)
+        self.assertNotIn("暂时没有找到满足当前条件的游戏", rendered)
+        self.assertNotIn("LLM 兜底建议", rendered)
+
     async def test_typed_steam_and_unknown_pipeline_errors_do_not_trigger_fallback(
         self,
     ) -> None:

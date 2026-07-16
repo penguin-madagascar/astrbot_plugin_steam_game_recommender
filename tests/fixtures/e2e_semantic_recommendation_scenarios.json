@@ -4,7 +4,7 @@
     {"tagid": 502, "name": "Management"}
   ],
   "storefront_tag_results": {
-    "501": {"total_count": 3, "appids": [9001, 9002, 9003]},
+    "501": {"total_count": 4, "appids": [9001, 9002, 9003, 9004]},
     "502": {"total_count": 2, "appids": [9001, 9002]}
   },
   "storefront_intersection_results": {
@@ -46,6 +46,15 @@
       "review_positive_ratio": 0.91,
       "short_description": "A quiet workshop district follows an undocumented calendar.",
       "detailed_description": "Seasonal weather affects production, but town customs are not described."
+    },
+    {
+      "appid": 9004,
+      "title": "Distant Archive",
+      "ordered_tags": [],
+      "review_total": 6000,
+      "review_positive_ratio": 0.88,
+      "short_description": "An unrelated archive appears in a noisy discovery source.",
+      "detailed_description": "The storefront description provides no simulation anchor evidence."
     }
   ],
   "scenarios": [
@@ -77,8 +86,11 @@
         "9003|seasonal-fireworks|positive": {"status": "unknown", "evidence_quote": ""}
       },
       "expected": {
-        "output_appids": [9001],
-        "excluded_appids": [9002, 9003],
+        "output_appids": [9001, 9003],
+        "excluded_appids": [9002, 9004],
+        "unknown_output_appids": [9003],
+        "core_unknown_notice_count": 1,
+        "caution_source_span": "过年时放烟花",
         "relevance_tiers": ["A", "B"],
         "minimum_tag_sources": 2,
         "minimum_intersection_sources": 1,
@@ -113,8 +125,11 @@
         "9003|communal-new-year|positive": {"status": "unknown", "evidence_quote": ""}
       },
       "expected": {
-        "output_appids": [9001],
-        "excluded_appids": [9002, 9003],
+        "output_appids": [9001, 9003],
+        "excluded_appids": [9002, 9004],
+        "unknown_output_appids": [9003],
+        "core_unknown_notice_count": 1,
+        "caution_source_span": "居民一起庆祝新年",
         "relevance_tiers": ["A", "B"],
         "minimum_tag_sources": 2,
         "minimum_intersection_sources": 1,
@@ -161,10 +176,54 @@
       },
       "expected": {
         "output_appids": [9001],
-        "excluded_appids": [9002, 9003],
+        "excluded_appids": [9002, 9003, 9004],
+        "unknown_output_appids": [],
+        "core_unknown_notice_count": 0,
+        "caution_source_span": "",
         "relevance_tiers": ["A", "B"],
         "minimum_tag_sources": 2,
         "minimum_intersection_sources": 1,
+        "semantic_batches": 1
+      }
+    },
+    {
+      "id": "generic-festival-core-unknown",
+      "raw_query": "模拟类的游戏，有节日能过节过年的游戏",
+      "parser_payload": {
+        "platforms": ["steam"],
+        "genres_like": ["simulation"],
+        "explicit_tag_evidence": [
+          {"target": "genres_like", "tag": "simulation", "span": "模拟"}
+        ],
+        "soft_features": [
+          {
+            "constraint_id": "festival-new-year",
+            "source_span": "有节日能过节过年",
+            "normalized_text": "the game includes festivals and new-year celebrations",
+            "role": "core",
+            "polarity": "positive",
+            "proxy_tags": []
+          }
+        ],
+        "result_count": 3
+      },
+      "semantic_verdicts": {
+        "9001|festival-new-year|positive": {"status": "unknown", "evidence_quote": ""},
+        "9002|festival-new-year|positive": {"status": "violated", "evidence_quote": "no festivals"},
+        "9003|festival-new-year|positive": {"status": "unknown", "evidence_quote": ""}
+      },
+      "expected": {
+        "output_appids": [9001, 9003],
+        "excluded_appids": [9002, 9004],
+        "unknown_output_appids": [9001, 9003],
+        "core_unknown_notice_count": 1,
+        "caution_source_span": "有节日能过节过年",
+        "only_unknown_outputs": true,
+        "generic_parser_contract": true,
+        "c_tier_appids": [9004],
+        "relevance_tiers": ["A"],
+        "minimum_tag_sources": 1,
+        "minimum_intersection_sources": 0,
         "semantic_batches": 1
       }
     }

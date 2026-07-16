@@ -175,6 +175,45 @@ class SemanticRecommendationEndToEndTest(unittest.IsolatedAsyncioTestCase):
                         for feature in prepared.preference.soft_features
                     )
                 )
+                if expected.get("generic_parser_contract"):
+                    parser_payload = scenario["parser_payload"]
+                    self.assertEqual(
+                        set(parser_payload),
+                        {
+                            "platforms",
+                            "genres_like",
+                            "explicit_tag_evidence",
+                            "soft_features",
+                            "result_count",
+                        },
+                    )
+                    self.assertEqual(parser_payload["genres_like"], ["simulation"])
+                    self.assertEqual(
+                        parser_payload["explicit_tag_evidence"],
+                        [
+                            {
+                                "target": "genres_like",
+                                "tag": "simulation",
+                                "span": "模拟",
+                            }
+                        ],
+                    )
+                    self.assertEqual(len(parser_payload["soft_features"]), 1)
+                    feature_payload = parser_payload["soft_features"][0]
+                    self.assertEqual(feature_payload["role"], "core")
+                    self.assertEqual(feature_payload["polarity"], "positive")
+                    self.assertEqual(feature_payload["proxy_tags"], [])
+                    self.assertEqual(
+                        feature_payload["source_span"],
+                        expected["caution_source_span"],
+                    )
+                    verdict_statuses = {
+                        verdict["status"]
+                        for verdict in scenario["semantic_verdicts"].values()
+                    }
+                    self.assertIn("unknown", verdict_statuses)
+                    self.assertIn("violated", verdict_statuses)
+                    self.assertNotIn("satisfied", verdict_statuses)
                 self.assertGreaterEqual(
                     len(set(plugin.steam_client.storefront_tag_calls)),
                     expected["minimum_tag_sources"],
@@ -211,6 +250,31 @@ class SemanticRecommendationEndToEndTest(unittest.IsolatedAsyncioTestCase):
                     [game.appid for game in run.ranked_games],
                     expected["output_appids"],
                 )
+                unknown_output_appids = [
+                    game.appid
+                    for game in run.ranked_games
+                    if game.core_feature_verification == "unknown"
+                ]
+                self.assertEqual(
+                    unknown_output_appids,
+                    expected["unknown_output_appids"],
+                )
+                if expected.get("only_unknown_outputs"):
+                    self.assertTrue(run.ranked_games)
+                    self.assertTrue(
+                        all(
+                            game.core_feature_verification == "unknown"
+                            and game.score_breakdown.relevance_tier in {"A", "B"}
+                            for game in run.ranked_games
+                        )
+                    )
+                notice_codes = [notice.code for notice in run.run_notices]
+                self.assertEqual(
+                    notice_codes.count("semantic_feature_core_unknown"),
+                    expected["core_unknown_notice_count"],
+                )
+                self.assertNotIn("semantic_feature_provider_failure", notice_codes)
+                self.assertNotIn("semantic_feature_contract_failure", notice_codes)
                 rendered = "\n".join(run.messages)
                 games_by_appid = {
                     int(game["appid"]): game for game in fixture["games"]
@@ -219,9 +283,33 @@ class SemanticRecommendationEndToEndTest(unittest.IsolatedAsyncioTestCase):
                     self.assertIn(games_by_appid[appid]["title"], rendered)
                 for appid in expected["excluded_appids"]:
                     self.assertNotIn(games_by_appid[appid]["title"], rendered)
+                for appid in expected["unknown_output_appids"]:
+                    game_message = next(
+                        message
+                        for message in run.messages
+                        if games_by_appid[appid]["title"] in message
+                    )
+                    self.assertIn("不推荐理由：", game_message)
+                    self.assertIn(expected["caution_source_span"], game_message)
+                for appid in expected.get("c_tier_appids", []):
+                    self.assertIn(appid, plugin.steam_client.detail_calls)
+                    self.assertEqual(games_by_appid[appid]["ordered_tags"], [])
+                    self.assertNotIn(
+                        appid,
+                        [game.appid for game in plugin.steam_index.ranked_results],
+                    )
+                    self.assertFalse(
+                        any(
+                            int(request["appid"]) == appid
+                            for payload in context.semantic_payloads
+                            for request in payload["requests"]
+                        )
+                    )
                 self.assertNotIn("暂时没有找到满足当前条件的游戏", rendered)
                 self.assertNotIn(STEAM_INDEX_FALLBACK_WARNING, rendered)
                 self.assertNotIn(STEAM_TAG_RECALL_DEGRADED_WARNING, rendered)
+                self.assertNotIn("LLM 兜底建议", rendered)
+                self.assertEqual(run.unverified_suggestions, ())
 
 
 if __name__ == "__main__":
