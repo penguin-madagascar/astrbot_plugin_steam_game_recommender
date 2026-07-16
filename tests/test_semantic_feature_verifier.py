@@ -1556,7 +1556,9 @@ class SemanticFeaturePolicyTest(unittest.TestCase):
             [],
         )
 
-    def test_core_filters_explicit_unknown_violated_and_unverified_tail(self) -> None:
+    def test_core_retains_satisfied_and_unknown_but_rejects_violated_and_tail(
+        self,
+    ) -> None:
         module = importlib.import_module(MODULE)
         feature = SoftFeature(
             constraint_id="branching",
@@ -1584,8 +1586,191 @@ class SemanticFeaturePolicyTest(unittest.TestCase):
         )
 
         filtered = module.apply_feature_verdicts(games, [feature], outcome)
+        by_appid = {game.appid: game for game in filtered}
 
-        self.assertEqual([game.appid for game in filtered], [1, *range(4, 21)])
+        self.assertEqual([game.appid for game in filtered], [1, *range(4, 21), 2])
+        unknown = by_appid[2]
+        self.assertEqual(unknown.core_feature_verification, "unknown")
+        self.assertEqual(unknown.score, games[1].score)
+        self.assertEqual(unknown.score_breakdown, games[1].score_breakdown)
+        uncertainty = next(
+            item
+            for item in unknown.recommendation_evidence
+            if item.evidence_id == "semantic_feature:branching:unknown"
+        )
+        self.assertEqual(uncertainty.sentiment, "uncertain")
+        self.assertTrue(uncertainty.important)
+        self.assertIn(feature.source_span, uncertainty.text)
+        rendered = "\n".join(format_game_block(1, unknown))
+        self.assertIn("不推荐理由", rendered)
+        self.assertIn(feature.source_span, rendered)
+
+    def test_required_normal_verdicts_retain_only_satisfied_candidate(self) -> None:
+        module = importlib.import_module(MODULE)
+        feature = SoftFeature(
+            constraint_id="branching",
+            source_span="必须有分支剧情",
+            normalized_text="branching story",
+            role="required",
+            polarity="positive",
+        )
+        games = [self.ranked(appid) for appid in range(1, 5)]
+        outcome = module.FeatureVerificationOutcome(
+            verdicts=(
+                module.FeatureVerdict(1, "branching", "positive", "satisfied", "branch"),
+                module.FeatureVerdict(2, "branching", "positive", "unknown", ""),
+                module.FeatureVerdict(3, "branching", "positive", "violated", "linear"),
+            )
+        )
+
+        filtered = module.apply_feature_verdicts(games, [feature], outcome)
+
+        self.assertEqual([game.appid for game in filtered], [1])
+        self.assertEqual(filtered[0].core_feature_verification, "verified")
+
+    def test_multi_feature_retained_states_follow_aggregation_precedence(self) -> None:
+        module = importlib.import_module(MODULE)
+        features = [
+            SoftFeature(
+                constraint_id="branching",
+                source_span="必须有分支剧情",
+                normalized_text="branching story",
+                role="required",
+                polarity="positive",
+            ),
+            SoftFeature(
+                constraint_id="world-reactivity",
+                source_span="世界会响应玩家行为",
+                normalized_text="world reacts to player actions",
+                role="core",
+                polarity="positive",
+            ),
+            SoftFeature(
+                constraint_id="companions",
+                source_span="最好有同伴系统",
+                normalized_text="companion system",
+                role="optional",
+                polarity="positive",
+            ),
+        ]
+        games = [self.ranked(appid) for appid in range(1, 5)]
+        outcome = module.FeatureVerificationOutcome(
+            verdicts=(
+                module.FeatureVerdict(1, "branching", "positive", "satisfied", "branch"),
+                module.FeatureVerdict(
+                    1, "world-reactivity", "positive", "satisfied", "reactive"
+                ),
+                module.FeatureVerdict(1, "companions", "positive", "satisfied", "party"),
+                module.FeatureVerdict(2, "branching", "positive", "satisfied", "branch"),
+                module.FeatureVerdict(2, "world-reactivity", "positive", "unknown", ""),
+                module.FeatureVerdict(3, "branching", "positive", "satisfied", "branch"),
+                module.FeatureVerdict(3, "world-reactivity", "positive", "unknown", ""),
+                module.FeatureVerdict(3, "companions", "positive", "satisfied", "party"),
+                module.FeatureVerdict(
+                    4, "world-reactivity", "positive", "satisfied", "reactive"
+                ),
+                module.FeatureVerdict(4, "companions", "positive", "satisfied", "party"),
+            ),
+            failures=(
+                module.FeatureVerificationFailure(
+                    2,
+                    "companions",
+                    "positive",
+                    "contract",
+                ),
+                module.FeatureVerificationFailure(
+                    4,
+                    "branching",
+                    "positive",
+                    "provider",
+                ),
+            ),
+        )
+
+        applied = module.apply_feature_verdicts(games, features, outcome)
+        by_appid = {game.appid: game for game in applied}
+
+        self.assertEqual(set(by_appid), {1, 2, 3, 4})
+        self.assertEqual(by_appid[1].core_feature_verification, "verified")
+        self.assertEqual(by_appid[2].core_feature_verification, "technical_failure")
+        self.assertEqual(by_appid[3].core_feature_verification, "unknown")
+        self.assertEqual(by_appid[4].core_feature_verification, "technical_failure")
+        self.assertEqual(by_appid[3].score, games[2].score)
+        self.assertEqual(by_appid[3].score_breakdown, games[2].score_breakdown)
+
+    def test_multi_feature_rejects_hard_verdicts_and_missing_normal_results(
+        self,
+    ) -> None:
+        module = importlib.import_module(MODULE)
+        features = [
+            SoftFeature(
+                constraint_id="branching",
+                source_span="必须有分支剧情",
+                normalized_text="branching story",
+                role="required",
+                polarity="positive",
+            ),
+            SoftFeature(
+                constraint_id="world-reactivity",
+                source_span="世界会响应玩家行为",
+                normalized_text="world reacts to player actions",
+                role="core",
+                polarity="positive",
+            ),
+        ]
+        games = [self.ranked(appid) for appid in range(1, 7)]
+        outcome = module.FeatureVerificationOutcome(
+            verdicts=(
+                module.FeatureVerdict(1, "branching", "positive", "unknown", ""),
+                module.FeatureVerdict(
+                    1, "world-reactivity", "positive", "satisfied", "reactive"
+                ),
+                module.FeatureVerdict(2, "branching", "positive", "violated", "linear"),
+                module.FeatureVerdict(
+                    2, "world-reactivity", "positive", "satisfied", "reactive"
+                ),
+                module.FeatureVerdict(
+                    3, "world-reactivity", "positive", "satisfied", "reactive"
+                ),
+                module.FeatureVerdict(4, "branching", "positive", "satisfied", "branch"),
+                module.FeatureVerdict(
+                    4, "world-reactivity", "positive", "violated", "static"
+                ),
+                module.FeatureVerdict(5, "branching", "positive", "satisfied", "branch"),
+                module.FeatureVerdict(6, "branching", "positive", "unknown", ""),
+                module.FeatureVerdict(
+                    6, "world-reactivity", "positive", "satisfied", "reactive"
+                ),
+            ),
+            failures=(
+                module.FeatureVerificationFailure(
+                    6,
+                    "branching",
+                    "positive",
+                    "provider",
+                ),
+            ),
+        )
+
+        applied = module.apply_feature_verdicts(games, features, outcome)
+
+        self.assertEqual(applied, [])
+
+    def test_ranked_game_accepts_unknown_and_old_payload_without_state(self) -> None:
+        ranked = self.ranked(1)
+        dumper = getattr(ranked, "model_dump", None)
+        payload = dumper() if dumper else ranked.dict()
+        validator = getattr(RankedGame, "model_validate", None)
+
+        for status in ("not_applicable", "verified", "unknown", "technical_failure"):
+            with self.subTest(status=status):
+                payload["core_feature_verification"] = status
+                game = validator(payload) if validator else RankedGame.parse_obj(payload)
+                self.assertEqual(game.core_feature_verification, status)
+
+        payload.pop("core_feature_verification")
+        cached = validator(payload) if validator else RankedGame.parse_obj(payload)
+        self.assertEqual(cached.core_feature_verification, "not_applicable")
 
     def test_technical_core_failure_is_retained_with_caution_after_verified_peer(self) -> None:
         module = importlib.import_module(MODULE)
@@ -1632,10 +1817,11 @@ class SemanticFeaturePolicyTest(unittest.TestCase):
 
         applied = module.apply_feature_verdicts(games, [feature], outcome)
 
-        self.assertEqual([game.appid for game in applied], [1, 2])
+        self.assertEqual([game.appid for game in applied], [1, 3, 2])
+        technical_failure = next(game for game in applied if game.appid == 2)
         caution = next(
             item
-            for item in applied[1].recommendation_evidence
+            for item in technical_failure.recommendation_evidence
             if item.evidence_id == "semantic_feature:world-reactivity:technical_failure"
         )
         self.assertEqual(caution.sentiment, "uncertain")
@@ -1677,6 +1863,7 @@ class SemanticFeaturePolicyTest(unittest.TestCase):
         self.assertEqual(effective_score(by_appid[2].score_breakdown), baseline[2])
         self.assertEqual(effective_score(by_appid[3].score_breakdown), baseline[3])
         self.assertEqual(effective_score(by_appid[4].score_breakdown), baseline[4])
+        self.assertEqual(by_appid[2].core_feature_verification, "not_applicable")
         self.assertTrue(
             any(
                 item.evidence_id == "semantic_feature:branching:unknown"

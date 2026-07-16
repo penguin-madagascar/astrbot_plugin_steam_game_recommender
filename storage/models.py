@@ -1134,7 +1134,12 @@ class RankedGame(GameCandidate):
     @validator("core_feature_verification", pre=True, always=True)
     def _normalize_core_feature_verification(cls, value: Any) -> str:
         status = str(value or "not_applicable").strip().lower()
-        if status not in {"not_applicable", "verified", "technical_failure"}:
+        if status not in {
+            "not_applicable",
+            "verified",
+            "unknown",
+            "technical_failure",
+        }:
             raise ValueError("invalid core feature verification status")
         return status
 

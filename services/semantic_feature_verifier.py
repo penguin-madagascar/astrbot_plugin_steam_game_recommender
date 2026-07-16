@@ -703,35 +703,49 @@ def apply_feature_verdicts(
             )
             for feature in selected_features
         }
-        required = [
+        verification_features = [
             feature
             for feature in selected_features
             if feature.role in {"required", "core"}
         ]
-        reject_required = False
-        has_unverified_required = False
-        for feature in required:
+        reject_candidate = False
+        has_core_unknown = False
+        for feature in verification_features:
             feature_key = (feature.constraint_id, feature.polarity)
             verdict = verdicts[feature_key]
             failure = technical_failures[feature_key]
-            if verdict is not None:
-                if verdict.status != "satisfied":
-                    reject_required = True
+            if feature.role == "required":
+                if verdict is not None and verdict.status != "satisfied":
+                    reject_candidate = True
                     break
-            elif failure is not None:
-                has_unverified_required = True
-            else:
-                reject_required = True
+                if verdict is None and failure is None:
+                    reject_candidate = True
+                    break
+                continue
+            if verdict is not None:
+                if verdict.status == "violated":
+                    reject_candidate = True
+                    break
+                if verdict.status == "unknown":
+                    has_core_unknown = True
+            elif failure is None:
+                reject_candidate = True
                 break
-        if reject_required:
+        if reject_candidate:
             continue
-
-        optional_satisfied = sum(
-            verdicts[(feature.constraint_id, feature.polarity)] is not None
-            and verdicts[(feature.constraint_id, feature.polarity)].status == "satisfied"
+        has_technical_failure = any(
+            technical_failures[(feature.constraint_id, feature.polarity)] is not None
             for feature in selected_features
-            if feature.role == "optional"
         )
+
+        optional_satisfied = 0
+        if not has_core_unknown:
+            optional_satisfied = sum(
+                verdicts[(feature.constraint_id, feature.polarity)] is not None
+                and verdicts[(feature.constraint_id, feature.polarity)].status == "satisfied"
+                for feature in selected_features
+                if feature.role == "optional"
+            )
         breakdown = game.score_breakdown
         updated_breakdown = breakdown
         if optional_satisfied:
@@ -802,6 +816,20 @@ def apply_feature_verdicts(
                         ),
                     )
                 )
+            elif feature.role == "core" and verdict.status == "unknown":
+                evidence.append(
+                    RecommendationEvidence(
+                        evidence_id=(
+                            f"semantic_feature:{feature.constraint_id}:unknown"
+                        ),
+                        category="constraint",
+                        sentiment="uncertain",
+                        text=(
+                            f"用户原文特性“{feature.source_span}”缺少可核验证据"
+                        ),
+                        important=True,
+                    )
+                )
             elif feature.role == "optional":
                 evidence.append(
                     RecommendationEvidence(
@@ -824,15 +852,20 @@ def apply_feature_verdicts(
                     )
                 )
 
+        if has_technical_failure:
+            verification_status = "technical_failure"
+        elif has_core_unknown:
+            verification_status = "unknown"
+        elif verification_features:
+            verification_status = "verified"
+        else:
+            verification_status = "not_applicable"
+
         copier = getattr(game, "model_copy", None)
         update = {
             "score_breakdown": updated_breakdown,
             "score": round(effective_score(updated_breakdown, fallback_score=game.score)),
-            "core_feature_verification": (
-                "technical_failure"
-                if has_unverified_required
-                else "verified" if required else "not_applicable"
-            ),
+            "core_feature_verification": verification_status,
             "recommendation_evidence": evidence,
         }
         updated_game = copier(update=update) if copier else game.copy(update=update)

@@ -12,7 +12,8 @@ _MISSING_RETRIEVAL_RANK = 1_000_000_000
 _CORE_VERIFICATION_ORDER = {
     "not_applicable": 0,
     "verified": 0,
-    "technical_failure": 1,
+    "unknown": 1,
+    "technical_failure": 2,
 }
 
 

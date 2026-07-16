@@ -576,14 +576,20 @@ class PriceBridgeTest(unittest.IsolatedAsyncioTestCase):
 
 
 class BudgetScoringTest(unittest.TestCase):
-    def test_budget_resort_keeps_verified_core_before_technical_failure(self) -> None:
+    def test_budget_resort_orders_verified_unknown_then_technical_failure(self) -> None:
         verified = RankedGame(
             title="Verified",
             score=30,
             core_feature_verification="verified",
             score_breakdown=ScoreBreakdown(relevance_tier="A", layer_score=0.30),
         )
-        unverified = RankedGame(
+        unknown = RankedGame(
+            title="Unknown",
+            score=60,
+            core_feature_verification="unknown",
+            score_breakdown=ScoreBreakdown(relevance_tier="A", layer_score=0.60),
+        )
+        technical_failure = RankedGame(
             title="Technical Failure",
             score=90,
             core_feature_verification="technical_failure",
@@ -595,8 +601,13 @@ class BudgetScoringTest(unittest.TestCase):
             price_summary(current_cny=120, lowest_cny=110),
             GamePreference(budget=100),
         )
-        adjusted_unverified = attach_price_summary(
-            unverified,
+        adjusted_unknown = attach_price_summary(
+            unknown,
+            price_summary(current_cny=60, lowest_cny=50),
+            GamePreference(budget=100),
+        )
+        adjusted_technical_failure = attach_price_summary(
+            technical_failure,
             price_summary(current_cny=60, lowest_cny=50),
             GamePreference(budget=100),
         )
@@ -605,11 +616,40 @@ class BudgetScoringTest(unittest.TestCase):
             [
                 game.title
                 for game in sorted(
-                    [adjusted_unverified, adjusted_verified],
+                    [
+                        adjusted_technical_failure,
+                        adjusted_unknown,
+                        adjusted_verified,
+                    ],
                     key=ranked_game_sort_key,
                 )
             ],
-            ["Verified", "Technical Failure"],
+            ["Verified", "Unknown", "Technical Failure"],
+        )
+
+    def test_verification_state_cannot_cross_anchor_tiers(self) -> None:
+        tier_a_failure = RankedGame(
+            title="Tier A Technical Failure",
+            score=30,
+            core_feature_verification="technical_failure",
+            score_breakdown=ScoreBreakdown(relevance_tier="A", layer_score=0.30),
+        )
+        tier_b_verified = RankedGame(
+            title="Tier B Verified",
+            score=90,
+            core_feature_verification="verified",
+            score_breakdown=ScoreBreakdown(relevance_tier="B", layer_score=0.90),
+        )
+
+        self.assertEqual(
+            [
+                game.title
+                for game in sorted(
+                    [tier_b_verified, tier_a_failure],
+                    key=ranked_game_sort_key,
+                )
+            ],
+            ["Tier A Technical Failure", "Tier B Verified"],
         )
 
     def test_budget_adjustment_cannot_move_b_tier_ahead_of_a_tier(self) -> None:
