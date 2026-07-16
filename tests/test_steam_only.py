@@ -60,7 +60,10 @@ class SteamOnlyMetadataTest(unittest.TestCase):
         self.assertIn("推荐理由：", readme)
         self.assertIn("不推荐理由：", readme)
         self.assertIn("DLC、试玩版、原声、工具和套餐", readme)
-        self.assertIn("不会让 LLM 自由编造游戏清单", readme)
+        self.assertIn("默认关闭相同查询结果复用", readme)
+        self.assertIn("基础商店资料仍会按各自有效期缓存", readme)
+        self.assertIn("LLM 零结果兜底默认关闭", readme)
+        self.assertIn("不会附带购买链接、价格、评测或推荐分", readme)
 
     def test_readme_is_a_user_facing_overview_with_combined_examples(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -105,7 +108,10 @@ class SteamOnlyMetadataTest(unittest.TestCase):
             "astrbot_plugin_steam_price_heybox",
             "偏好解析模型暂时不可用",
             "语义特征核验服务暂不可用",
+            "核验批次失败不会再把整批候选误判为不满足",
             "暂时没有找到满足当前条件的游戏",
+            "只有推荐流程正常完成但没有合格候选时",
+            "不会在 Steam 查询失败",
         ):
             self.assertIn(user_visible_behavior, readme)
 

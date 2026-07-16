@@ -14,7 +14,7 @@
       "llm_fallback_provider_id": {
         "type": "string",
         "description": "用于正常零结果兜底的 LLM 提供商",
-        "hint": "留空即关闭；仅在推荐流程正常完成但得到零结果时使用。建议未经过 Steam 数据验证，绝不自动使用当前会话模型。",
+        "hint": "留空即关闭；仅在推荐流程正常完成且出现零结果（没有合格候选）时使用，Steam 查询失败和程序错误不会触发。模型候选名称必须先由 Steam 目录精确确认，需求匹配仍未经过 Steam 数据验证；不展示模型自由理由，也不附带 Steam 链接、价格、评测或推荐分，不写入换一批使用的正式推荐记录；绝不自动使用当前会话模型。",
         "_special": "select_provider",
         "default": ""
       },
@@ -91,8 +91,8 @@
     "items": {
       "cache_ttl_hours": {
         "type": "int",
-        "description": "游戏数据查询缓存有效期（小时）",
-        "hint": "Steam 查询结果的缓存时间；调大可减少请求，调小可获得更新数据。",
+        "description": "基础游戏数据缓存有效期（小时）",
+        "hint": "Steam 基础游戏数据的缓存时间；调大可减少详情请求，调小可更快刷新资料。候选发现和整次推荐结果是否复用由下方开关单独控制。",
         "default": 24
       },
       "timeout_seconds": {
@@ -103,8 +103,8 @@
       },
       "reuse_identical_query_cache": {
         "type": "bool",
-        "description": "复用顺序相同的推荐查询缓存",
-        "hint": "关闭后，顺序相同的推荐会重新尝试 Steam 发现召回与语义核验；AppDetails、评测、商店标签、标签词表、发行状态、价格、账号、本地实体索引和 /gamerec_retry 记忆仍会缓存；实时召回失败时可使用最多 7 天的旧发现快照。",
+        "description": "复用完全相同的推荐查询缓存",
+        "hint": "关闭后，完全相同的推荐查询会重新尝试 Steam 发现召回与语义核验；AppDetails、评测、商店标签、标签词表、发行状态、价格、账号、本地实体索引和 /gamerec_retry 记忆仍会缓存；实时召回失败时可使用最多 7 天的旧发现快照。",
         "default": false
       }
     }

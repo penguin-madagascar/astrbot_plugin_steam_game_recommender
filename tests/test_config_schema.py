@@ -77,7 +77,10 @@ class ConfigSchemaTest(unittest.TestCase):
         self.assertIn("关闭", fallback["hint"])
         self.assertIn("正常", fallback["hint"])
         self.assertIn("零结果", fallback["hint"])
+        self.assertIn("Steam 查询失败", fallback["hint"])
         self.assertIn("未经过 Steam", fallback["hint"])
+        self.assertIn("不附带 Steam 链接、价格、评测或推荐分", fallback["hint"])
+        self.assertIn("不写入换一批", fallback["hint"])
         self.assertIn("绝不自动使用当前会话模型", fallback["hint"])
         batch_size = items.get("semantic_verification_batch_size")
         self.assertIsNotNone(batch_size)
@@ -129,19 +132,21 @@ class ConfigSchemaTest(unittest.TestCase):
         self.assertNotIn("/unplayedrec", review_hint + ratio_setting["hint"])
 
     def test_identical_query_cache_reuse_is_opt_in_and_preserves_other_caches(self) -> None:
-        setting = group_items(load_schema(), "cache_and_network").get(
-            "reuse_identical_query_cache"
-        )
+        items = group_items(load_schema(), "cache_and_network")
+        setting = items.get("reuse_identical_query_cache")
 
         self.assertIsNotNone(setting)
         self.assertEqual(setting["type"], "bool")
         self.assertIs(setting["default"], False)
+        self.assertIn("完全相同", setting["description"])
         hint = setting["hint"]
         self.assertIn("Steam 发现召回", hint)
         self.assertIn("语义核验", hint)
         self.assertIn("AppDetails", hint)
         self.assertIn("/gamerec_retry", hint)
         self.assertIn("7 天", hint)
+        self.assertIn("基础游戏数据", items["cache_ttl_hours"]["hint"])
+        self.assertNotIn("Steam 查询结果", items["cache_ttl_hours"]["hint"])
 
 
 if __name__ == "__main__":
