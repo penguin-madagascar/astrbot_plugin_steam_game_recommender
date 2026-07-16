@@ -10,6 +10,25 @@ from astrbot_plugin_steam_game_recommender.storage.models import (
 
 
 class UnplayedPickerTest(unittest.IsolatedAsyncioTestCase):
+    def test_numeric_helpers_reject_booleans_fractions_and_non_finite_values(self) -> None:
+        from astrbot_plugin_steam_game_recommender.services.unplayed_picker import (
+            optional_float,
+            optional_int,
+            review_passes,
+        )
+
+        for value in (True, False, 1.5, float("nan"), float("inf"), "1.0"):
+            with self.subTest(helper="int", value=value):
+                self.assertIsNone(optional_int(value))
+        for value in (True, False, float("nan"), float("inf"), float("-inf")):
+            with self.subTest(helper="float", value=value):
+                self.assertIsNone(optional_float(value))
+
+        self.assertFalse(review_passes(FakeReview(True, 0.9), 0, 0.65))
+        self.assertFalse(review_passes(FakeReview(100, True), 0, 0.65))
+        self.assertFalse(review_passes(FakeReview(100, float("inf")), 0, 0.65))
+        self.assertFalse(review_passes(FakeReview(100, 1.01), 0, 0.65))
+
     async def test_randomly_picks_unplayed_game_that_meets_review_floor(self) -> None:
         from astrbot_plugin_steam_game_recommender.services.unplayed_picker import (
             format_unplayed_recommendation,

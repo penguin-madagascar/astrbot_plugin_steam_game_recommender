@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from astrbot_plugin_steam_game_recommender.clients.steam import (
+    SteamApiError,
     SteamMoreLikeResult,
     SteamReviewSummary,
     SteamStorefrontPage,
@@ -261,7 +262,7 @@ class FrozenSteamClient:
         item = self.games[resolved]
         total = item.get("review_total")
         if total is None:
-            raise LookupError("fixture intentionally has no review summary")
+            raise SteamApiError("fixture intentionally has no review summary")
         ratio = item.get("review_positive_ratio")
         return SteamReviewSummary(
             total_reviews=int(total),

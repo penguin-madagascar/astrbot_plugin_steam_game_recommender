@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import math
 import random
+import re
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -93,11 +95,15 @@ def deduplicate_owned_game_editions(
 
 
 def review_passes(summary: Any, min_review_count: int, min_positive_ratio: float) -> bool:
-    total_reviews = optional_int(getattr(summary, "total_reviews", None)) or 0
+    total_reviews = optional_int(getattr(summary, "total_reviews", None))
     positive_ratio = optional_float(getattr(summary, "positive_ratio", None))
-    if total_reviews < min_review_count:
+    if total_reviews is None or total_reviews < 0 or total_reviews < min_review_count:
         return False
-    return positive_ratio is not None and positive_ratio >= min_positive_ratio
+    return (
+        positive_ratio is not None
+        and 0.0 <= positive_ratio <= 1.0
+        and positive_ratio >= min_positive_ratio
+    )
 
 
 def attach_review_summary(
@@ -128,17 +134,26 @@ def format_unplayed_recommendation(
 
 
 def optional_int(value: Any) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
+    if isinstance(value, bool):
         return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if math.isfinite(value) and value.is_integer() else None
+    if isinstance(value, str):
+        text = value.strip()
+        return int(text) if re.fullmatch(r"[+-]?\d+", text) else None
+    return None
 
 
 def optional_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
         return None
+    return number if math.isfinite(number) else None
 
 
 def dump_model(model: Any) -> dict[str, Any]:

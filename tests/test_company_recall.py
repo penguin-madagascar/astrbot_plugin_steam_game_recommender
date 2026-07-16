@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import unittest
 
-from astrbot_plugin_steam_game_recommender.clients.steam import SteamStorefrontPage
+from astrbot_plugin_steam_game_recommender.clients.steam import (
+    SteamStorefrontPage,
+    SteamTransientError,
+)
 from astrbot_plugin_steam_game_recommender.services.steam_index import (
     RecallSourceFetch,
     STEAM_INDEX_SCHEMA_VERSION,
@@ -105,7 +108,7 @@ class PartiallyFailingCompanySteamClient(CompanySteamClient):
     ) -> SteamStorefrontPage:
         if (alias, role) == ("Acme Interactive", "publisher"):
             self.company_calls.append((alias, role, page_size))
-            raise RuntimeError("one company alias failed")
+            raise SteamTransientError("one company alias failed")
         return await super().search_storefront_company(alias, role, page_size)
 
 

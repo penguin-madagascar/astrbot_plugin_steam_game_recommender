@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -251,6 +253,47 @@ class SteamReadRetryRegressionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(http_client.calls), 2)
         self.assertEqual(sleeps, [2.0])
 
+    async def test_retry_after_is_clamped_for_large_seconds_and_future_dates(self) -> None:
+        future = format_datetime(datetime.now(timezone.utc) + timedelta(days=365))
+        for header in ("999999999", future):
+            with self.subTest(header=header):
+                sleeps: list[float] = []
+
+                async def sleeper(delay: float) -> None:
+                    sleeps.append(delay)
+
+                http_client = QueueHttpClient(
+                    [
+                        json_response({}, status_code=429, headers={"Retry-After": header}),
+                        json_response({"items": []}),
+                    ]
+                )
+                client = SteamClient(http_client, MemoryCache(), sleeper=sleeper)
+
+                await client.search_game_refs(search="Portal")
+
+                self.assertEqual(sleeps, [5.0])
+
+    async def test_non_finite_retry_after_never_reaches_the_sleeper(self) -> None:
+        for header in ("nan", "inf", "-inf"):
+            with self.subTest(header=header):
+                sleeps: list[float] = []
+
+                async def sleeper(delay: float) -> None:
+                    sleeps.append(delay)
+
+                http_client = QueueHttpClient(
+                    [
+                        json_response({}, status_code=429, headers={"Retry-After": header}),
+                        json_response({"items": []}),
+                    ]
+                )
+                client = SteamClient(http_client, MemoryCache(), sleeper=sleeper)
+
+                await client.search_game_refs(search="Portal")
+
+                self.assertEqual(sleeps, [])
+
     async def test_non_retryable_404_and_contract_failure_each_attempt_once(self) -> None:
         not_found_http = QueueHttpClient([json_response({}, status_code=404)])
         with self.assertRaises(SteamApiError):
@@ -321,6 +364,38 @@ class ReferenceOutcomeRegressionTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(any("status=transient_failure" in line for line in logs.output))
         self.assertTrue(any("status=no_hit" in line for line in logs.output))
+
+    async def test_reference_only_transport_failure_is_unavailable_but_no_hit_is_empty(
+        self,
+    ) -> None:
+        with self.assertRaises(RecallUnavailableError):
+            await SteamGameIndexService(
+                TransportFailingReferenceClient(),
+                MemoryCache(),
+            ).recommend(
+                GamePreference(reference_games_like=["Portal"]),
+                limit=3,
+            )
+
+        result = await SteamGameIndexService(
+            EmptyReferenceClient(),
+            MemoryCache(),
+        ).recommend(
+            GamePreference(reference_games_like=["Portal"]),
+            limit=3,
+        )
+
+        self.assertEqual(result, [])
+
+    async def test_reference_programming_error_is_not_reported_as_no_hit(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "reference parser bug"):
+            await SteamGameIndexService(
+                ProgrammingFailingReferenceClient(),
+                MemoryCache(),
+            ).recommend(
+                GamePreference(reference_games_like=["Portal"]),
+                limit=3,
+            )
 
     async def test_reference_prefers_storefront_and_maps_tag_ids_in_order(self) -> None:
         client = StorefrontReferenceClient()
@@ -803,6 +878,13 @@ class EmptyReferenceClient:
 
     async def search_game_refs(self, **_kwargs: Any) -> list[SteamSearchHit]:
         return []
+
+
+class ProgrammingFailingReferenceClient:
+    language = "schinese"
+
+    async def search_game_refs(self, **_kwargs: Any) -> list[SteamSearchHit]:
+        raise RuntimeError("reference parser bug")
 
 
 class VocabularyClient:

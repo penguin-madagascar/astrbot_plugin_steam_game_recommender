@@ -161,11 +161,16 @@ class RecallHealth:
             self.validation_transient_failures
             + self.validation_contract_failures
         )
-        validation_failure = (
+        large_sample_failure = (
             self.validation_attempts >= 3
             and validation_failures * 2 > self.validation_attempts
         )
-        return source_failure or validation_failure
+        small_sample_failure = (
+            0 < self.validation_attempts < 3
+            and validation_failures == self.validation_attempts
+            and self.verified == 0
+        )
+        return source_failure or large_sample_failure or small_sample_failure
 
     def unavailable(self, *, limit: int) -> bool:
         verified_floor = min(max(int(limit), 0), 3)

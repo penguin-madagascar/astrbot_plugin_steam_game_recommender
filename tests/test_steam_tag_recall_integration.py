@@ -6,7 +6,10 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
-from astrbot_plugin_steam_game_recommender.clients.steam import SteamStorefrontPage
+from astrbot_plugin_steam_game_recommender.clients.steam import (
+    SteamStorefrontPage,
+    SteamTransientError,
+)
 from astrbot_plugin_steam_game_recommender.services import tag_normalizer
 from astrbot_plugin_steam_game_recommender.services.steam_recall import (
     RecallUnavailableError,
@@ -93,7 +96,7 @@ class SteamTagRecallIntegrationTest(unittest.IsolatedAsyncioTestCase):
         client = RecallSteamClient(
             tag_ids={"Action": 11, "RPG": 12, "Puzzle": 13, "Strategy": 14, "Simulation": 15},
             tag_results={
-                11: RuntimeError("count endpoint unavailable"),
+                11: SteamTransientError("count endpoint unavailable"),
                 12: [SteamSearchHit(appid=12_001, title="RPG Match")],
                 13: [SteamSearchHit(appid=13_001, title="Puzzle Match")],
                 14: [SteamSearchHit(appid=14_001, title="Strategy Match")],
@@ -282,7 +285,7 @@ class SteamTagRecallIntegrationTest(unittest.IsolatedAsyncioTestCase):
         client = RecallSteamClient(
             tag_ids={"Action": 1, "Puzzle": 2},
             tag_results={
-                1: RuntimeError("storefront unavailable"),
+                1: SteamTransientError("storefront unavailable"),
                 2: [SteamSearchHit(appid=402, title="Successful Source")],
             },
             text_results={
@@ -711,7 +714,7 @@ class RetryableAliasClient:
     async def get_popular_tags(self) -> list[dict[str, Any]]:
         self.popular_tag_calls += 1
         if self.popular_tag_calls == 1:
-            raise RuntimeError("temporary")
+            raise SteamTransientError("temporary")
         return [{"tagid": 1, "name": "Action"}]
 
 
@@ -740,7 +743,7 @@ class ExpiringVocabularyClient(RecallSteamClient):
 
     async def get_popular_tags_snapshot(self) -> SimpleNamespace:
         if self.fail_vocabulary_refresh:
-            raise RuntimeError("vocabulary refresh unavailable")
+            raise SteamTransientError("vocabulary refresh unavailable")
         return SimpleNamespace(
             tags=({"tagid": 99_999, "name": "Expiry Probe"},),
             fetched_at=self.initial_fetch_time,

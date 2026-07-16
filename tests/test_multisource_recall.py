@@ -709,6 +709,53 @@ class RecallPipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(health.verified, 2)
         self.assertEqual(health.eligible, 2)
 
+    async def test_small_validation_samples_that_all_fail_are_unavailable(self) -> None:
+        for candidate_count, failure in (
+            (1, SteamTransientError("offline")),
+            (2, SteamTransientError("offline")),
+            (1, SteamApiError("invalid response")),
+            (2, SteamApiError("invalid response")),
+        ):
+            with self.subTest(
+                candidate_count=candidate_count,
+                failure_type=type(failure).__name__,
+            ):
+                appids = list(range(1, candidate_count + 1))
+                client = PipelineClient(
+                    tag_ids={"Puzzle": 1},
+                    tag_results={
+                        1: [
+                            SteamSearchHit(appid=appid, title=f"Game {appid}")
+                            for appid in appids
+                        ]
+                    },
+                    details={appid: failure for appid in appids},
+                )
+
+                with self.assertRaises(steam_recall.RecallUnavailableError):
+                    await SteamGameIndexService(
+                        client,
+                        ServiceMemoryCache(),
+                    ).recommend(
+                        GamePreference(genres_like=["puzzle"]),
+                        limit=3,
+                    )
+
+    async def test_programming_error_during_candidate_validation_is_not_degraded(self) -> None:
+        client = PipelineClient(
+            tag_ids={"Puzzle": 1},
+            tag_results={
+                1: [SteamSearchHit(appid=1, title="Game 1")],
+            },
+            details={1: RuntimeError("candidate decoder bug")},
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "candidate decoder bug"):
+            await SteamGameIndexService(client, ServiceMemoryCache()).recommend(
+                GamePreference(genres_like=["puzzle"]),
+                limit=3,
+            )
+
 
 class RecallHealthTest(unittest.TestCase):
     def test_empty_applicable_set_is_not_systemic_and_valid_empty_is_healthy(self) -> None:
@@ -763,6 +810,17 @@ class RecallHealthTest(unittest.TestCase):
         )
         self.assertTrue(validation.systemic_failure)
         self.assertTrue(validation.unavailable(limit=5))
+
+        for attempts in (1, 2):
+            with self.subTest(attempts=attempts):
+                small_sample = health_type(
+                    validation_attempts=attempts,
+                    validation_transient_failures=attempts,
+                    verified=0,
+                    eligible=0,
+                )
+                self.assertTrue(small_sample.systemic_failure)
+                self.assertTrue(small_sample.unavailable(limit=3))
 
     def test_stale_source_and_non_strict_validation_half_prevent_systemic_failure(
         self,

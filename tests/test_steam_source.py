@@ -13,6 +13,8 @@ import httpx
 from astrbot_plugin_steam_game_recommender.clients.steam import (
     SteamApiError,
     SteamClient,
+    optional_int,
+    parse_storefront_tag_ids,
     parse_steam_game,
 )
 from astrbot_plugin_steam_game_recommender.storage import repository as repository_module
@@ -24,6 +26,65 @@ from astrbot_plugin_steam_game_recommender.storage.repository import SQLiteCache
 
 
 class SteamClientTest(unittest.IsolatedAsyncioTestCase):
+    def test_optional_int_only_accepts_exact_finite_integers(self) -> None:
+        for value in (True, False, 1.5, -2.5, float("nan"), float("inf"), "1.0"):
+            with self.subTest(value=value):
+                self.assertIsNone(optional_int(value))
+
+        for value, expected in ((12, 12), (12.0, 12), ("+12", 12), ("-12", -12)):
+            with self.subTest(value=value):
+                self.assertEqual(optional_int(value), expected)
+
+    def test_tag_and_genre_ids_only_keep_positive_exact_integers(self) -> None:
+        self.assertEqual(
+            parse_storefront_tag_ids('[true, 1.5, -2, 0, 3, 4.0, "+5", "6.0"]'),
+            [3, 4, 5],
+        )
+        payload = steam_detail_payload()
+        payload["genres"] = [
+            {"id": True, "description": "Boolean"},
+            {"id": 1.5, "description": "Fractional"},
+            {"id": -2, "description": "Negative"},
+            {"id": 3, "description": "Valid"},
+            {"id": "4", "description": "String Valid"},
+        ]
+
+        candidate = parse_steam_game(1, payload)
+
+        self.assertEqual(candidate.genre_ids, [3, 4])
+
+    def test_metacritic_only_accepts_scores_between_zero_and_one_hundred(self) -> None:
+        for value, expected in (
+            (0, 0),
+            (100, 100),
+            (88.0, 88),
+            (True, None),
+            (88.5, None),
+            (-1, None),
+            (101, None),
+            (float("nan"), None),
+            (float("inf"), None),
+        ):
+            with self.subTest(value=value):
+                payload = steam_detail_payload()
+                payload["metacritic"] = {"score": value}
+                self.assertEqual(parse_steam_game(1, payload).metacritic, expected)
+
+    async def test_public_appid_and_tag_queries_reject_non_positive_exact_ids(self) -> None:
+        client = SteamClient(FakeHttpClient({}), MemoryCache(), cache_ttl_hours=24)
+        for invalid in (True, 1.5, float("nan"), float("inf"), 0, -1, "1.0"):
+            for operation in (
+                lambda value=invalid: client.get_game_detail(value),
+                lambda value=invalid: client.get_review_summary(value),
+                lambda value=invalid: client.get_more_like(value),
+                lambda value=invalid: client.get_store_page_tags(value),
+                lambda value=invalid: client.search_storefront_tag(value),
+                lambda value=invalid: client.search_storefront_tags((19, value)),
+            ):
+                with self.subTest(invalid=invalid, operation=operation):
+                    with self.assertRaises(ValueError):
+                        await operation()
+
     def test_game_candidate_defaults_to_released(self) -> None:
         candidate = GameCandidate(title="Released Game")
 
@@ -405,6 +466,33 @@ class SteamClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary.recent_positive_ratio, 0.78)
         self.assertTrue(any(key.startswith("steam:") for key in cache.keys))
 
+    async def test_review_summary_rejects_invalid_counts_and_impossible_ratio(self) -> None:
+        invalid_summaries = (
+            {"total_reviews": True, "total_positive": 1},
+            {"total_reviews": 10.5, "total_positive": 8},
+            {"total_reviews": float("nan"), "total_positive": 0},
+            {"total_reviews": -1, "total_positive": 0},
+            {"total_reviews": 10, "total_positive": -1},
+            {"total_reviews": 10, "total_positive": 11},
+            {"total_reviews": 10},
+        )
+        for summary in invalid_summaries:
+            with self.subTest(summary=summary):
+                client = SteamClient(
+                    FakeHttpClient(
+                        {
+                            "https://store.steampowered.com/appreviews/123": {
+                                "success": 1,
+                                "query_summary": summary,
+                            }
+                        }
+                    ),
+                    MemoryCache(),
+                    cache_ttl_hours=24,
+                )
+                with self.assertRaises(SteamApiError):
+                    await client.get_review_summary(123)
+
     async def test_owned_games_use_web_api_key_and_cache_playtime(self) -> None:
         cache = MemoryCache()
         http_client = FakeHttpClient(
@@ -440,6 +528,46 @@ class SteamClientTest(unittest.IsolatedAsyncioTestCase):
         await client.get_owned_games("76561198000000000")
 
         self.assertEqual(http_client.call_count, 1)
+
+    async def test_owned_games_skip_invalid_appids_and_playtime(self) -> None:
+        invalid_values = [True, 1.5, float("nan"), float("inf"), -1, "1.0"]
+        raw_games = [
+            {"appid": value, "name": "Invalid App", "playtime_forever": 0}
+            for value in invalid_values
+        ]
+        raw_games.extend(
+            {
+                "appid": 100 + index,
+                "name": "Invalid Playtime",
+                "playtime_forever": value,
+            }
+            for index, value in enumerate(invalid_values)
+        )
+        raw_games.extend(
+            [
+                {"appid": 200, "name": "Valid Zero", "playtime_forever": 0},
+                {"appid": "201", "name": "Valid Played", "playtime_forever": "90"},
+            ]
+        )
+        client = SteamClient(
+            FakeHttpClient(
+                {
+                    "https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/": {
+                        "response": {"games": raw_games}
+                    }
+                }
+            ),
+            MemoryCache(),
+            cache_ttl_hours=24,
+            steam_api_key="STEAM_KEY",
+        )
+
+        games = await client.get_owned_games("76561198000000000")
+
+        self.assertEqual(
+            [(game.appid, game.playtime_forever) for game in games],
+            [(200, 0), (201, 90)],
+        )
 
     async def test_popular_tags_fetches_english_tag_vocabulary_and_uses_cache(self) -> None:
         cache = MemoryCache()

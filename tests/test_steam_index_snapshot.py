@@ -5,6 +5,7 @@ import unittest
 from types import SimpleNamespace
 from typing import Any
 
+from astrbot_plugin_steam_game_recommender.clients.steam import SteamApiError
 from astrbot_plugin_steam_game_recommender.services.similarity_ranker import (
     build_profile_from_preference,
 )
@@ -436,7 +437,7 @@ class MixedTypeSteamClient(QueryAwareSteamClient):
             return game(1, "Base Game", ["Co-op"])
         if appid == 2:
             return game(2, "Expansion", ["Co-op"], app_type="dlc")
-        raise RuntimeError("detail unavailable")
+        raise SteamApiError("detail unavailable")
 
 
 class TypeAwareReferenceSteamClient(QueryAwareSteamClient):

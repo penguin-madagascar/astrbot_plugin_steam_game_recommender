@@ -11,7 +11,7 @@ from typing import Any, Callable, Protocol
 
 import httpx
 
-from ..clients.steam import SteamApiError
+from ..clients.steam import SteamApiError, is_retryable_steam_read_error
 from ..storage.models import (
     COMPANY_ALIAS_LIMIT,
     CompanyPreference,
@@ -83,6 +83,7 @@ STEAM_INDEX_SEARCH_RESULTS_PER_TERM = 10
 STEAM_INDEX_MAX_NEW_APPIDS_PER_ROUND = 60
 STEAM_HTTP_CONCURRENCY = 6
 REFERENCE_TAG_COUNT_PREFETCH_PER_GAME = 5
+MAX_REFERENCE_DETAIL_ATTEMPTS_PER_ENTITY = 3
 STEAM_TAG_ALIASES_FRESH_SECONDS = 24 * 60 * 60
 STEAM_TAG_ALIASES_STALE_SECONDS = 7 * STEAM_TAG_ALIASES_FRESH_SECONDS
 RELEASE_STATUS_FRESH_SECONDS = 60 * 60
@@ -141,6 +142,12 @@ class ReferenceSearchOutcome:
     succeeded: int = 0
     failures: tuple[ReferenceSearchFailure, ...] = ()
     validation_failures: tuple[ReferenceSearchFailure, ...] = ()
+
+
+@dataclass(frozen=True)
+class ReferenceResolutionBatch:
+    enriched_count: int = 0
+    statuses: tuple[tuple[ReferenceQuery, ReferenceResolutionStatus], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -299,7 +306,7 @@ class SteamGameIndexService:
             for record in snapshot.entries
             if entry_is_recall_usable(record)
         }
-        await self._resolve_reference_groups(
+        reference_resolution = await self._resolve_reference_groups(
             preference,
             records,
             now,
@@ -331,6 +338,36 @@ class SteamGameIndexService:
             and not positive_references
             and not has_non_reference_positive_signal
         ):
+            failed_references = [
+                (reference, status)
+                for reference, status in reference_resolution.statuses
+                if reference.polarity is ReferencePolarity.POSITIVE
+                and status
+                in {
+                    ReferenceResolutionStatus.TRANSIENT_FAILURE,
+                    ReferenceResolutionStatus.CONTRACT_FAILURE,
+                }
+            ]
+            if failed_references:
+                health = RecallHealth(
+                    sources=tuple(
+                        RecallSourceHealth(
+                            source_id=f"reference:{index}",
+                            critical=True,
+                            status=(
+                                RecallSourceStatus.TRANSIENT_FAILURE
+                                if status
+                                is ReferenceResolutionStatus.TRANSIENT_FAILURE
+                                else RecallSourceStatus.CONTRACT_FAILURE
+                            ),
+                        )
+                        for index, (_reference, status) in enumerate(
+                            failed_references,
+                            start=1,
+                        )
+                    ),
+                )
+                raise RecallUnavailableError(health)
             return CandidateRecallResult(hits=()), [], initial_intent
 
         prefetched_tag_sources, reference_tag_counts, count_prefetch_degraded = (
@@ -611,7 +648,7 @@ class SteamGameIndexService:
                     "tag",
                     tag,
                     1.0,
-                    RuntimeError("Steam storefront tag search is unavailable."),
+                    SteamApiError("Steam storefront tag search is unavailable."),
                 )
             try:
                 page = await self._shared_storefront_tag_page(
@@ -815,7 +852,7 @@ class SteamGameIndexService:
                 "company",
                 None,
                 1.0,
-                RuntimeError("Steam storefront company search is unavailable."),
+                SteamApiError("Steam storefront company search is unavailable."),
             )
         aliases = dedupe_texts(
             [preference.display_name, *preference.aliases]
@@ -842,8 +879,16 @@ class SteamGameIndexService:
         )
         pages = [item for item in results if not isinstance(item, BaseException)]
         failures = [item for item in results if isinstance(item, BaseException)]
+        for failure in failures:
+            if not isinstance(failure, Exception):
+                raise failure
+            failure_status(failure)
         if not pages:
-            error = failures[0] if failures else RuntimeError("company search returned no result")
+            error = (
+                failures[0]
+                if failures
+                else SteamApiError("company search returned no result")
+            )
             return failed_source_fetch(source_id, "company", None, 1.0, error)
 
         by_appid: dict[int, tuple[GameCandidate, int, tuple[int, int]]] = {}
@@ -900,7 +945,7 @@ class SteamGameIndexService:
                 "top_seller",
                 None,
                 0.5,
-                RuntimeError("Steam top-seller browsing is unavailable."),
+                SteamApiError("Steam top-seller browsing is unavailable."),
             )
         try:
             async with self._steam_semaphore:
@@ -964,7 +1009,7 @@ class SteamGameIndexService:
                 "intersection",
                 None,
                 1.3,
-                RuntimeError("Steam tag intersection search is unavailable."),
+                SteamApiError("Steam tag intersection search is unavailable."),
                 component_tags=component_tags,
             )
         try:
@@ -1050,7 +1095,7 @@ class SteamGameIndexService:
                 "more_like",
                 None,
                 1.2,
-                RuntimeError("Steam More Like This is unavailable."),
+                SteamApiError("Steam More Like This is unavailable."),
             )
         try:
             page = await self._shared_more_like_page(
@@ -1346,7 +1391,8 @@ class SteamGameIndexService:
             return self._steam_tag_aliases_are_usable_stale()
         try:
             payloads = await self._request_tag_vocabularies(getter, languages)
-        except Exception:
+        except Exception as exc:
+            failure_status(exc)
             self._expire_tag_vocabulary()
             usable = self._steam_tag_aliases_are_usable_stale()
             return usable
@@ -1575,13 +1621,14 @@ class SteamGameIndexService:
             STEAM_INDEX_MAX_NEW_APPIDS_PER_ROUND,
             max(int(target_pool), 0),
         )
-        enriched_count = await self._resolve_reference_groups(
+        reference_resolution = await self._resolve_reference_groups(
             preference,
             records,
             now,
             new_appid_budget=enrichment_limit,
             prefetched=prefetched,
         )
+        enriched_count = reference_resolution.enriched_count
         searched_queries: list[str] = []
 
         candidates = [record.candidate for record in records.values()]
@@ -1696,7 +1743,7 @@ class SteamGameIndexService:
         now: float,
         new_appid_budget: int,
         prefetched: dict[int, GameCandidate],
-    ) -> int:
+    ) -> ReferenceResolutionBatch:
         references = self._build_request_intent(preference).references
         available_appids = {
             int(record.candidate.appid)
@@ -1709,6 +1756,7 @@ class SteamGameIndexService:
             available_appids,
         )
         enriched_count = 0
+        statuses: list[tuple[ReferenceQuery, ReferenceResolutionStatus]] = []
         for reference in references:
             search_outcome = ReferenceSearchOutcome()
             records_by_appid = {
@@ -1780,6 +1828,12 @@ class SteamGameIndexService:
                 elif enriched_count >= new_appid_budget:
                     log_deferred_reference_group(reference, observed_match)
                     if match is None or candidate is None:
+                        status = classify_reference_resolution(
+                            search_outcome,
+                            None,
+                            None,
+                        )
+                        statuses.append((reference, status))
                         continue
                 else:
                     selected_match, selected_candidate, validation_failures = (
@@ -1836,18 +1890,23 @@ class SteamGameIndexService:
                     polarity,
                 )
                 records[entry_key(candidate)] = SteamIndexEntry(candidate, refreshed_at)
+            status = classify_reference_resolution(
+                search_outcome,
+                match,
+                candidate,
+            )
             record_reference_group_resolution(
                 preference,
                 reference,
                 match,
                 candidate,
-                classify_reference_resolution(
-                    search_outcome,
-                    match,
-                    candidate,
-                ),
+                status,
             )
-        return enriched_count
+            statuses.append((reference, status))
+        return ReferenceResolutionBatch(
+            enriched_count=enriched_count,
+            statuses=tuple(statuses),
+        )
 
     async def _search_reference_group(
         self,
@@ -1947,9 +2006,13 @@ class SteamGameIndexService:
     ]:
         remaining = list(hits)
         failures: list[ReferenceSearchFailure] = []
+        detail_attempts = 0
         while match := match_reference_query(reference, remaining):
             candidate = (known_candidates or {}).get(match.hit.appid)
             if candidate is None:
+                if detail_attempts >= MAX_REFERENCE_DETAIL_ATTEMPTS_PER_ENTITY:
+                    break
+                detail_attempts += 1
                 try:
                     candidate = await self._load_reference_candidate(
                         match.hit.appid,
@@ -2029,7 +2092,8 @@ class SteamGameIndexService:
                     query,
                     prefetched=prefetched,
                 ), True
-            except Exception:
+            except Exception as exc:
+                failure_status(exc)
                 return query, [], False
 
         return list(await asyncio.gather(*(search_one(query) for query in queries)))
@@ -2112,7 +2176,8 @@ class SteamGameIndexService:
                 prefetched,
                 bypass_cache=bypass_cache,
             )
-        except Exception:
+        except Exception as exc:
+            failure_status(exc)
             return None
 
     async def _fetch_candidate(
@@ -2211,7 +2276,8 @@ class SteamGameIndexService:
             try:
                 async with self._steam_semaphore:
                     store_tags = await self.steam_client.get_store_page_tags(int(appid))
-            except Exception:
+            except Exception as exc:
+                failure_status(exc)
                 store_tags = []
             if store_tags:
                 data["ordered_tags"] = dedupe_texts(store_tags)
@@ -2239,7 +2305,8 @@ class SteamGameIndexService:
             try:
                 async with self._steam_semaphore:
                     summary = await self.steam_client.get_review_summary(int(appid))
-            except Exception:
+            except Exception as exc:
+                failure_status(exc)
                 summary = None
             if summary is not None:
                 data["review_total"] = getattr(summary, "total_reviews", None)
@@ -2592,15 +2659,16 @@ def reference_search_failure(
     source: str,
     exc: Exception,
 ) -> ReferenceSearchFailure:
-    transient = bool(getattr(exc, "transient", False)) or isinstance(
-        exc,
-        (httpx.TimeoutException, httpx.NetworkError),
-    )
+    status = failure_status(exc)
     return ReferenceSearchFailure(
         alias=alias,
         language=language,
         source=source,
-        kind="transient" if transient else "contract",
+        kind=(
+            "transient"
+            if status is RecallSourceStatus.TRANSIENT_FAILURE
+            else "contract"
+        ),
         error=str(exc),
     )
 
@@ -2972,9 +3040,11 @@ def failed_source_fetch(
 
 
 def failure_status(exc: Exception) -> RecallSourceStatus:
-    transient = bool(getattr(exc, "transient", False)) or isinstance(
-        exc,
-        (httpx.TimeoutException, httpx.NetworkError),
+    if not isinstance(exc, (SteamApiError, httpx.HTTPError)):
+        raise exc
+    transient = bool(getattr(exc, "transient", False)) or (
+        isinstance(exc, httpx.HTTPError)
+        and is_retryable_steam_read_error(exc)
     )
     return (
         RecallSourceStatus.TRANSIENT_FAILURE

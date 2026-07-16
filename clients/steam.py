@@ -33,6 +33,7 @@ APPDETAILS_RELEASE_FRESH_TTL_HOURS = 1
 APPDETAILS_RELEASE_STALE_TTL_HOURS = 6
 APPDETAILS_CACHE_VERSION = 1
 STORE_PAGE_TAG_CACHE_VERSION = 1
+MAX_RETRY_AFTER_SECONDS = 5.0
 STEAM_AGE_COOKIES = {
     "birthtime": "0",
     "lastagecheckage": "1-January-1970",
@@ -208,9 +209,11 @@ class SteamClient:
                 continue
             if str(item.get("type") or "").strip().lower() != "app":
                 continue
-            appid = optional_int(item.get("id") or item.get("appid"))
+            appid = optional_int(item.get("id"))
+            if appid is None:
+                appid = optional_int(item.get("appid"))
             title = str(item.get("name") or "").strip()
-            if not appid or not title:
+            if appid is None or appid <= 0 or not title:
                 continue
             hits.append(
                 SteamSearchHit(
@@ -230,8 +233,8 @@ class SteamClient:
         start: int = 0,
         reuse_cache: bool = True,
     ) -> SteamStorefrontPage:
-        resolved_tag_id = int(tag_id)
-        if resolved_tag_id <= 0:
+        resolved_tag_id = optional_int(tag_id)
+        if resolved_tag_id is None or resolved_tag_id <= 0:
             raise ValueError("Steam tag ID must be positive.")
         page = await self._get_storefront_page(
             {
@@ -255,9 +258,9 @@ class SteamClient:
         start: int = 0,
         reuse_cache: bool = True,
     ) -> SteamStorefrontPage:
-        resolved = tuple(int(tag_id) for tag_id in tag_ids)
-        if len(resolved) != 2 or len(set(resolved)) != 2 or any(
-            tag_id <= 0 for tag_id in resolved
+        resolved = tuple(optional_int(tag_id) for tag_id in tag_ids)
+        if len(resolved) != 2 or None in resolved or len(set(resolved)) != 2 or any(
+            tag_id is None or tag_id <= 0 for tag_id in resolved
         ):
             raise ValueError("Steam tag intersection requires two distinct IDs.")
         return await self._get_storefront_page(
@@ -352,26 +355,28 @@ class SteamClient:
         appid: int,
         bypass_cache: bool = False,
     ) -> GameCandidate:
+        resolved_appid = positive_int(appid, "Steam AppID")
         params = {
-            "appids": appid,
+            "appids": resolved_appid,
             "cc": self.default_country,
             "l": self.language,
         }
         payload, fetched_at = await self._get_game_detail_payload(
-            appid,
+            resolved_appid,
             params,
             bypass_cache=bypass_cache,
         )
-        data = validate_appdetails_payload(appid, payload)
+        data = validate_appdetails_payload(resolved_appid, payload)
         return parse_steam_game(
-            appid,
+            resolved_appid,
             data,
             release_status_checked_at=fetched_at,
         )
 
     async def get_review_summary(self, appid: int) -> SteamReviewSummary:
+        resolved_appid = positive_int(appid, "Steam AppID")
         data = await self._get_json(
-            STEAM_APP_REVIEWS_URL.format(appid=appid),
+            STEAM_APP_REVIEWS_URL.format(appid=resolved_appid),
             {
                 "json": 1,
                 "language": "all",
@@ -381,9 +386,21 @@ class SteamClient:
         )
         summary = data.get("query_summary") if isinstance(data, dict) else None
         if not isinstance(summary, dict):
-            raise SteamApiError(f"Steam 评测摘要返回了无效数据：appid={appid}")
-        total = optional_int(summary.get("total_reviews")) or 0
+            raise SteamApiError(
+                f"Steam 评测摘要返回了无效数据：appid={resolved_appid}"
+            )
+        total = optional_int(summary.get("total_reviews"))
         positive = optional_int(summary.get("total_positive"))
+        if (
+            total is None
+            or positive is None
+            or total < 0
+            or positive < 0
+            or positive > total
+        ):
+            raise SteamApiError(
+                f"Steam 评测摘要包含无效计数：appid={resolved_appid}"
+            )
         positive_ratio = positive / total if total > 0 and positive is not None else None
         return SteamReviewSummary(
             total_reviews=total,
@@ -454,8 +471,8 @@ class SteamClient:
         allow_unreleased: bool = False,
         reuse_cache: bool = True,
     ) -> SteamMoreLikeResult:
-        resolved_appid = int(appid)
-        if resolved_appid <= 0:
+        resolved_appid = optional_int(appid)
+        if resolved_appid is None or resolved_appid <= 0:
             raise ValueError("Steam AppID must be positive.")
         url = STEAM_MORE_LIKE_URL.format(appid=resolved_appid)
         cache_key = f"{self._cache_key(url, {'l': 'english'})}:v1"
@@ -522,7 +539,9 @@ class SteamClient:
         return max(float(self.clock()) - fetched_at, 0.0)
 
     async def get_store_page_tags(self, appid: int) -> list[str]:
-        resolved_appid = int(appid)
+        resolved_appid = optional_int(appid)
+        if resolved_appid is None or resolved_appid <= 0:
+            raise ValueError("Steam AppID must be positive.")
         cache_key = (
             f"steam:store-page-tags:v{STORE_PAGE_TAG_CACHE_VERSION}:"
             f"{resolved_appid}:english"
@@ -568,13 +587,14 @@ class SteamClient:
             if not isinstance(item, dict):
                 continue
             appid = optional_int(item.get("appid"))
-            if not appid:
+            playtime = optional_int(item.get("playtime_forever"))
+            if appid is None or appid <= 0 or playtime is None or playtime < 0:
                 continue
             owned_games.append(
                 SteamOwnedGame(
                     appid=appid,
                     name=optional_text(item.get("name")),
-                    playtime_forever=optional_int(item.get("playtime_forever")) or 0,
+                    playtime_forever=playtime,
                 )
             )
         return owned_games
@@ -816,7 +836,7 @@ def retry_after_seconds(exc: httpx.HTTPError) -> float | None:
     if not value:
         return None
     try:
-        return max(float(value), 0.0)
+        delay = float(value)
     except ValueError:
         try:
             retry_at = parsedate_to_datetime(value)
@@ -824,7 +844,10 @@ def retry_after_seconds(exc: httpx.HTTPError) -> float | None:
             return None
         if retry_at.tzinfo is None:
             retry_at = retry_at.replace(tzinfo=timezone.utc)
-        return max((retry_at - datetime.now(timezone.utc)).total_seconds(), 0.0)
+        delay = (retry_at - datetime.now(timezone.utc)).total_seconds()
+    if not math.isfinite(delay):
+        return None
+    return min(max(delay, 0.0), MAX_RETRY_AFTER_SECONDS)
 
 
 def parse_storefront_page(payload: Any) -> SteamStorefrontPage:
@@ -1197,6 +1220,9 @@ def parse_steam_game(
     metacritic = data.get("metacritic") if isinstance(data.get("metacritic"), dict) else {}
     release = data.get("release_date") if isinstance(data.get("release_date"), dict) else {}
     release_date = optional_text(release.get("date"))
+    metacritic_score = optional_int(metacritic.get("score"))
+    if metacritic_score is not None and not 0 <= metacritic_score <= 100:
+        metacritic_score = None
     return GameCandidate(
         appid=appid,
         title=str(data.get("name") or f"appid={appid}").strip(),
@@ -1207,7 +1233,7 @@ def parse_steam_game(
         categories=categories,
         category_ids=category_ids,
         tags=categories,
-        metacritic=optional_int(metacritic.get("score")),
+        metacritic=metacritic_score,
         released=release_date,
         release_date=release_date,
         coming_soon=release.get("coming_soon") is True,
@@ -1356,10 +1382,23 @@ def unique_texts(values: list[str]) -> list[str]:
 
 
 def optional_int(value: Any) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
+    if isinstance(value, bool):
         return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if math.isfinite(value) and value.is_integer() else None
+    if isinstance(value, str):
+        text = value.strip()
+        return int(text) if re.fullmatch(r"[+-]?\d+", text) else None
+    return None
+
+
+def positive_int(value: Any, field_name: str) -> int:
+    number = optional_int(value)
+    if number is None or number <= 0:
+        raise ValueError(f"{field_name} must be positive.")
+    return number
 
 
 def optional_text(value: Any) -> str | None:

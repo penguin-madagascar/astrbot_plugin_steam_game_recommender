@@ -3,14 +3,20 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
+from astrbot_plugin_steam_game_recommender.clients.steam import SteamApiError
 from astrbot_plugin_steam_game_recommender.services.recommendation_intent import (
     build_recommendation_intent,
+)
+from astrbot_plugin_steam_game_recommender.services.reference_matching import (
+    ReferenceMatch,
 )
 from astrbot_plugin_steam_game_recommender.services.similarity_ranker import (
     build_profile_from_preference,
 )
 from astrbot_plugin_steam_game_recommender.services.steam_index import (
+    MAX_REFERENCE_DETAIL_ATTEMPTS_PER_ENTITY,
     SteamGameIndexService,
     negative_reference_candidates,
     reference_candidates,
@@ -25,6 +31,69 @@ from astrbot_plugin_steam_game_recommender.storage.models import (
 
 
 class ReferenceGroupResolutionTest(unittest.IsolatedAsyncioTestCase):
+    async def test_reference_detail_attempts_have_a_per_entity_hard_limit(self) -> None:
+        reference = build_recommendation_intent(
+            GamePreference(reference_games_like=["Reference"])
+        ).references[0]
+        hits = [
+            SteamSearchHit(appid=index, title=f"Reference Candidate {index}")
+            for index in range(1, 11)
+        ]
+        client = FrozenReferenceSteamClient(search_results={}, details={})
+        service = SteamGameIndexService(client, MemoryCache({}), clock=lambda: 1_000.0)
+
+        def select_first(_reference, remaining):
+            if not remaining:
+                return None
+            return ReferenceMatch(
+                hit=remaining[0],
+                confidence=1.0,
+                matched_alias="Reference",
+                match_kind="exact",
+            )
+
+        with patch(
+            "astrbot_plugin_steam_game_recommender.services.steam_index.match_reference_query",
+            side_effect=select_first,
+        ):
+            match, candidate, failures = await service._select_reference_candidate(
+                reference,
+                hits,
+                {},
+            )
+
+        self.assertIsNone(match)
+        self.assertIsNone(candidate)
+        self.assertEqual(
+            client.detail_appids,
+            list(range(1, MAX_REFERENCE_DETAIL_ATTEMPTS_PER_ENTITY + 1)),
+        )
+        self.assertEqual(len(failures), MAX_REFERENCE_DETAIL_ATTEMPTS_PER_ENTITY)
+
+    async def test_reference_entity_budget_bounds_actual_search_calls(self) -> None:
+        preference = GamePreference(
+            reference_entities=[
+                {
+                    "display_title": f"Reference {index}",
+                    "aliases": [
+                        f"Reference {index} Alias {alias_index}"
+                        for alias_index in range(1, 6)
+                    ],
+                    "polarity": "positive",
+                }
+                for index in range(1, 6)
+            ]
+        )
+        client = FrozenReferenceSteamClient(search_results={}, details={})
+        service = SteamGameIndexService(client, MemoryCache({}), clock=lambda: 1_000.0)
+
+        await service.refresh_entries(preference, [], target_pool=0)
+
+        # Three entities x three aliases x two locales.  The frozen client only
+        # exposes the store-search source, so this is the exact upper bound here.
+        self.assertGreater(len(client.search_calls), 0)
+        self.assertLessEqual(len(client.search_calls), 18)
+
     async def test_resolves_localized_aliases_as_one_enriched_group(self) -> None:
         preference = GamePreference(
             reference_games_like=["黑暗之魂"],
@@ -641,7 +710,10 @@ class FrozenReferenceSteamClient:
 
     async def get_game_detail(self, appid: int) -> GameCandidate:
         self.detail_appids.append(appid)
-        return self.details[appid]
+        try:
+            return self.details[appid]
+        except KeyError as exc:
+            raise SteamApiError("detail unavailable") from exc
 
     async def get_store_page_tags(self, appid: int) -> list[str]:
         return list(self.store_tags.get(appid, []))
