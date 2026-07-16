@@ -28,8 +28,10 @@ from .services.game_identity import is_confirmed_base_game
 from .services.llm_fallback import (
     LlmFallbackContractError,
     LlmFallbackProviderError,
+    LlmFallbackVerificationError,
     UnverifiedGameSuggestion,
     generate_unverified_game_suggestions,
+    verify_fallback_suggestion_titles,
 )
 from .services.message_delivery import build_forward_message_chain
 from .services.played_filter import (
@@ -643,16 +645,38 @@ class SteamGameRecommenderPlugin(Star):
         ).strip()
         if not ranked_games and fallback_provider_id:
             try:
-                unverified_suggestions = (
-                    await generate_unverified_game_suggestions(
-                        self.context,
-                        fallback_provider_id,
-                        raw_query=prepared.raw_query,
-                        preference=preference,
-                        result_limit=result_limit,
-                    )
+                generated_suggestions = await generate_unverified_game_suggestions(
+                    self.context,
+                    fallback_provider_id,
+                    raw_query=prepared.raw_query,
+                    preference=preference,
+                    result_limit=result_limit,
                 )
-            except (LlmFallbackContractError, LlmFallbackProviderError) as exc:
+                unverified_suggestions = await verify_fallback_suggestion_titles(
+                    self.steam_client,
+                    generated_suggestions,
+                    result_limit=result_limit,
+                    reuse_cache=bool(
+                        getattr(self, "reuse_identical_query_cache", False)
+                    ),
+                )
+                if not unverified_suggestions:
+                    run_notices = dedupe_run_notices(
+                        [
+                            *run_notices,
+                            RunNotice(
+                                "llm_fallback_titles_unresolved",
+                                "warning",
+                                "LLM 兜底未找到可由 Steam 目录确认的候选名称，"
+                                "本次未展示模型文本。",
+                            ),
+                        ]
+                    )
+            except (
+                LlmFallbackContractError,
+                LlmFallbackProviderError,
+                LlmFallbackVerificationError,
+            ) as exc:
                 logger.warning("LLM empty-result fallback unavailable: %s", exc)
                 run_notices = dedupe_run_notices(
                     [

@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import unicodedata
 from dataclasses import dataclass
 from typing import Any
+
+import httpx
+
+from ..clients.steam import SteamApiError
+from .game_identity import is_confirmed_base_game
+from .reference_matching import title_key
 
 ROOT_FIELDS = frozenset({"suggestions"})
 SUGGESTION_FIELDS = frozenset({"title", "reason"})
@@ -35,16 +42,67 @@ NUMBER_TOKEN = (
 REVIEW_COUNT_TOKEN = rf"{NUMBER_TOKEN}(?:\s*[kKmM万千])?"
 
 URL_PATTERN = re.compile(r"(?:https?|ftp|steam)://|www\.", re.IGNORECASE)
+OBFUSCATED_DOMAIN_PATTERN = re.compile(
+    r"(?<![\w-])(?:[a-z0-9-]+\s+(?:dot|点)\s+)+"
+    r"(?:[a-z]{2,63}|xn--[a-z0-9-]{2,59})(?![\w-])",
+    re.IGNORECASE,
+)
 DIRECT_IDNA_DOT_TRANSLATION = str.maketrans({"\uff0e": ".", "\uff61": "."})
 IDEOGRAPHIC_URL_CANDIDATE_PATTERN = re.compile(
     r"(?:[\w-]+[.\u3002])+[\w-]+(?=[/:?#])"
+)
+ASCII_IDEOGRAPHIC_DOMAIN_PATTERN = re.compile(
+    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?[.\u3002])+"
+    r"(?:[a-z]{2,63}|xn--[a-z0-9-]{2,59})(?![a-z0-9-])",
+    re.IGNORECASE,
 )
 DOMAIN_CANDIDATE_PATTERN = re.compile(r"(?:[\w-]+\.)+[\w-]+")
 ASCII_DOMAIN_LABEL_PATTERN = re.compile(
     r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
     re.IGNORECASE,
 )
-APP_ID_PATTERN = re.compile(r"(?<![a-z])app[-_\s]*id(?![a-z])", re.IGNORECASE)
+APP_ID_PATTERN = re.compile(
+    r"(?<![a-z])(?:app[-_\s]*id|steam\s*(?:应用|游戏|application)?\s*(?:app\s*)?id)(?![a-z])",
+    re.IGNORECASE,
+)
+HOST_LITERAL_PATTERN = re.compile(
+    r"(?<![\w.-])(?:localhost|(?:\d{1,3}\.){3}\d{1,3})"
+    r"(?::\d{1,5})?(?=$|[/?#\s，。；：,.;:])",
+    re.IGNORECASE,
+)
+CURRENCY_NAME_PATTERN = re.compile(
+    r"(?:美元|美金|人民币|日元|欧元|英镑|韩元|港元|港币|新台币|"
+    r"加元|澳元|卢布|卢比|泰铢|越南盾|比索|法郎|克朗|里拉|"
+    r"dollars?|euros?|pounds?|yen|yuan|won)",
+    re.IGNORECASE,
+)
+STAR_RATING_PATTERN = re.compile(
+    rf"(?:{NUMBER_TOKEN}|[零一二三四五六七八九十百千万两]+)\s*(?:颗?星|stars?)",
+    re.IGNORECASE,
+)
+CHINESE_PRICE_PATTERN = re.compile(
+    r"[零一二三四五六七八九十百千万两\d]+\s*(?:元|块(?:钱)?|美?刀)",
+    re.IGNORECASE,
+)
+APPROXIMATE_REVIEW_COUNT_PATTERN = re.compile(
+    r"(?:约|近|超|超过|上|数)?[零一二三四五六七八九十百千万亿两]+"
+    r"\s*(?:余|多)?\s*(?:条|篇|个|人)?\s*(?:steam\s*)?"
+    r"(?:用户|玩家|顾客|客户)?\s*(?:反馈|评测|评价|评论|点评)",
+    re.IGNORECASE,
+)
+TITLE_CLAIM_PATTERN = re.compile(
+    r"(?:商店|平台|蒸汽|编号|条目|应用|价格|售价|现价|原价|优惠|折扣|"
+    r"免费|仅需|只要|购买|上架|口碑|评分|得分|满分|星级|神作|好评|"
+    r"差评|评测|评价|评论|点评|反馈|用户|玩家|核实|确认|核验|验证|"
+    r"认证|官方|链接|网址|网站|访问|查看|详情)|"
+    r"(?<![a-z])(?:steam|store|price|cost|score|rating|reviews?|"
+    r"verified|official|website|link|url|app\s*id|stars?)(?![a-z])|"
+    r"(?:[零一二三四五六七八九十百千万两\d]+)\s*(?:元|块(?:钱)?|刀)",
+    re.IGNORECASE,
+)
+TITLE_ALLOWED_PUNCTUATION = frozenset(
+    " -_:：'’&+.,，()（）·!！?？™®©"
+)
 CURRENCY_AMOUNT_PATTERN = re.compile(
     rf"(?:"
     rf"(?<![a-z])(?:{CURRENCY_CODE_ALTERNATION})(?![a-z])\s*{NUMBER_TOKEN}|"
@@ -96,6 +154,11 @@ PROHIBITED_PATTERNS = (
     re.compile(r"\d+(?:\.\d+)?\s*(?:元|块(?:钱)?)", re.IGNORECASE),
     re.compile(r"好评率|positive\s+review\s+rate", re.IGNORECASE),
     re.compile(
+        r"口碑|(?:玩家|用户|顾客|客户).{0,8}(?:反馈|评价|评论|关注)|"
+        r"(?:无数|大量|众多|数以[十百千万亿]计).{0,6}(?:玩家|用户)",
+        re.IGNORECASE,
+    ),
+    re.compile(
         r"(?:评测|评价|评论)\s*(?:数量|数|总数)|"
         r"(?:review|rating)\s*count",
         re.IGNORECASE,
@@ -116,10 +179,15 @@ class LlmFallbackProviderError(RuntimeError):
     pass
 
 
+class LlmFallbackVerificationError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class UnverifiedGameSuggestion:
     title: str
     reason: str
+    title_verified: bool = False
 
 
 async def generate_unverified_game_suggestions(
@@ -155,6 +223,86 @@ async def generate_unverified_game_suggestions(
             if attempt:
                 raise
     raise AssertionError("unreachable")
+
+
+async def verify_fallback_suggestion_titles(
+    steam_client: Any,
+    suggestions: tuple[UnverifiedGameSuggestion, ...],
+    *,
+    result_limit: int,
+    reuse_cache: bool = False,
+) -> tuple[UnverifiedGameSuggestion, ...]:
+    if type(result_limit) is not int or result_limit <= 0:
+        raise LlmFallbackVerificationError(
+            "fallback verification limit must be a positive integer"
+        )
+    search = getattr(steam_client, "search_game_refs", None)
+    get_detail = getattr(steam_client, "get_game_detail", None)
+    if not callable(search) or not callable(get_detail):
+        raise LlmFallbackVerificationError(
+            "Steam title verification capability is unavailable"
+        )
+
+    semaphore = asyncio.Semaphore(3)
+
+    async def verify_one(
+        suggestion: UnverifiedGameSuggestion,
+    ) -> UnverifiedGameSuggestion | None:
+        expected_title = title_key(suggestion.title)
+        if not expected_title:
+            return None
+        try:
+            async with semaphore:
+                hits = await search(
+                    search=suggestion.title,
+                    page_size=10,
+                    ordering="-relevance",
+                    language=str(getattr(steam_client, "language", "") or "schinese"),
+                    reuse_cache=bool(reuse_cache),
+                )
+            exact_hits = []
+            seen_appids: set[int] = set()
+            for hit in hits:
+                appid = int(hit.appid)
+                if appid in seen_appids or title_key(hit.title) != expected_title:
+                    continue
+                exact_hits.append(hit)
+                seen_appids.add(appid)
+                if len(exact_hits) >= 3:
+                    break
+            for hit in exact_hits:
+                async with semaphore:
+                    candidate = await get_detail(int(hit.appid))
+                if (
+                    candidate is not None
+                    and is_confirmed_base_game(candidate)
+                    and title_key(candidate.title) == expected_title
+                ):
+                    return UnverifiedGameSuggestion(
+                        title=candidate.title,
+                        reason=suggestion.reason,
+                        title_verified=True,
+                    )
+        except (SteamApiError, httpx.HTTPError) as exc:
+            raise LlmFallbackVerificationError(
+                "Steam fallback title verification failed"
+            ) from exc
+        return None
+
+    verified = await asyncio.gather(*(verify_one(item) for item in suggestions))
+    result: list[UnverifiedGameSuggestion] = []
+    seen_titles: set[str] = set()
+    for item in verified:
+        if item is None:
+            continue
+        normalized = normalize_title(item.title)
+        if normalized in seen_titles:
+            continue
+        result.append(item)
+        seen_titles.add(normalized)
+        if len(result) >= result_limit:
+            break
+    return tuple(result)
 
 
 async def request_suggestions(
@@ -221,7 +369,7 @@ def parse_unverified_suggestions(
             raise LlmFallbackContractError("fallback suggestion text fields are blank")
         if len(title) > MAX_TITLE_CHARS or len(reason) > MAX_REASON_CHARS:
             raise LlmFallbackContractError("fallback suggestion text fields are too long")
-        reject_prohibited_text(title)
+        validate_unverified_title(title)
         reject_prohibited_text(reason)
 
         normalized_title = normalize_title(title)
@@ -267,8 +415,14 @@ def reject_prohibited_text(value: str) -> None:
     normalized = unicodedata.normalize("NFKC", normalized_text)
     contains_forbidden_content = (
         contains_url_or_domain(normalize_domain_detection_text(normalized_text))
+        or OBFUSCATED_DOMAIN_PATTERN.search(normalized)
+        or HOST_LITERAL_PATTERN.search(normalized)
         or APP_ID_PATTERN.search(normalized)
         or CURRENCY_AMOUNT_PATTERN.search(normalized)
+        or CURRENCY_NAME_PATTERN.search(normalized)
+        or CHINESE_PRICE_PATTERN.search(normalized)
+        or STAR_RATING_PATTERN.search(normalized)
+        or APPROXIMATE_REVIEW_COUNT_PATTERN.search(normalized)
         or any(unicodedata.category(character) == "Sc" for character in normalized)
         or any(pattern.search(normalized) for pattern in REVIEW_COUNT_PATTERNS)
         or any(pattern.search(normalized) for pattern in PROHIBITED_PATTERNS)
@@ -277,10 +431,41 @@ def reject_prohibited_text(value: str) -> None:
         raise LlmFallbackContractError("fallback response contains prohibited claims")
 
 
+def validate_unverified_title(value: str) -> None:
+    reject_prohibited_text(value)
+    normalized = unicodedata.normalize("NFKC", normalize_text(value))
+    if TITLE_CLAIM_PATTERN.search(normalized):
+        raise LlmFallbackContractError("fallback title contains claim-shaped text")
+    for character in normalized:
+        category = unicodedata.category(character)
+        if (
+            character.isspace()
+            or category[:1] in {"L", "M", "N"}
+            or character in TITLE_ALLOWED_PUNCTUATION
+        ):
+            continue
+        raise LlmFallbackContractError("fallback title contains unsafe punctuation")
+
+
+def safe_unverified_title(value: str, *, title_verified: bool = False) -> str:
+    if not title_verified:
+        return "未验证候选名称已省略"
+    title = normalize_text(value)
+    try:
+        reject_prohibited_text(title)
+    except LlmFallbackContractError:
+        return "未验证候选名称已省略"
+    return title
+
+
 def normalize_domain_detection_text(value: str) -> str:
     normalized = unicodedata.normalize(
         "NFKC",
         value.translate(DIRECT_IDNA_DOT_TRANSLATION),
+    )
+    normalized = ASCII_IDEOGRAPHIC_DOMAIN_PATTERN.sub(
+        lambda match: match.group(0).replace("\u3002", "."),
+        normalized,
     )
     return IDEOGRAPHIC_URL_CANDIDATE_PATTERN.sub(
         lambda match: match.group(0).replace("\u3002", "."),

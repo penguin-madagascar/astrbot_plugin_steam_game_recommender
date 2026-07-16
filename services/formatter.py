@@ -12,11 +12,17 @@ from .explanation_builder import (
     fallback_reason,
     user_facing_evidence_text,
 )
-from .llm_fallback import UnverifiedGameSuggestion
+from .llm_fallback import UnverifiedGameSuggestion, safe_unverified_title
 from .recommendation_limits import DEFAULT_RECOMMENDATION_COUNT
 from .run_notices import RunNotice
 
-UNVERIFIED_FALLBACK_DISCLAIMER = "⚠️ LLM 兜底建议（未经过 Steam 数据验证）"
+UNVERIFIED_FALLBACK_DISCLAIMER = (
+    "⚠️ LLM 兜底建议（名称经 Steam 目录确认，需求匹配未验证）"
+)
+UNVERIFIED_FALLBACK_REASON = (
+    "Steam 仅确认了该名称对应游戏；模型认为它可能符合需求，"
+    "需求匹配未经过 Steam 数据验证。"
+)
 
 
 def format_recommendations(
@@ -81,7 +87,21 @@ def format_unverified_suggestion(
     index: int,
     suggestion: UnverifiedGameSuggestion,
 ) -> str:
-    return f"{index}. 《{suggestion.title}》\n模型判断理由：{suggestion.reason}"
+    # LLM prose is untrusted.  The model may select a title, but user-visible
+    # claims are rendered from a fixed, explicitly unverified statement.
+    if not suggestion.title_verified:
+        return (
+            f"{index}. 模型候选名称未通过 Steam 目录确认，已省略\n"
+            f"系统说明：{UNVERIFIED_FALLBACK_REASON}"
+        )
+    title = safe_unverified_title(
+        suggestion.title,
+        title_verified=suggestion.title_verified,
+    )
+    return (
+        f"{index}. 模型候选（名称经 Steam 目录确认）：“{title}”\n"
+        f"系统说明：{UNVERIFIED_FALLBACK_REASON}"
+    )
 
 
 async def format_recommendations_with_llm(

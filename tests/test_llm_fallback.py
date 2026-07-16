@@ -5,11 +5,16 @@ import json
 import unittest
 from types import SimpleNamespace
 
+from astrbot_plugin_steam_game_recommender.clients.steam import SteamApiError
 from astrbot_plugin_steam_game_recommender.services.formatter import (
     format_recommendation_messages,
 )
 from astrbot_plugin_steam_game_recommender.services.run_notices import RunNotice
 from astrbot_plugin_steam_game_recommender.storage.models import GamePreference, RankedGame
+from astrbot_plugin_steam_game_recommender.storage.models import (
+    GameCandidate,
+    SteamSearchHit,
+)
 
 
 def fallback_module():
@@ -172,6 +177,16 @@ class UnverifiedSuggestionContractTest(unittest.TestCase):
             "对应 App\ufe0f-ID 123。",
             "对应 App\u034f-ID 123。",
             "使用 steam\ufe0f://run/123 启动。",
+            "详情见 example。com。",
+            "Steam 应用 ID 为 123。",
+            "大约二十美元。",
+            "详情见 192.168.1.1/app/123。",
+            "详情见 localhost:8000/app/123。",
+            "口碑为 4.8 星。",
+            "共有上千条用户反馈。",
+            "只要二十刀。",
+            "口碑五星。",
+            "已有无数玩家关注。",
         ]
 
         for text in prohibited:
@@ -179,6 +194,34 @@ class UnverifiedSuggestionContractTest(unittest.TestCase):
                 with self.assertRaises(service.LlmFallbackContractError):
                     service.parse_unverified_suggestions(
                         response_payload(suggestion(reason=text)),
+                        result_limit=1,
+                    )
+
+    def test_rejects_claim_shaped_model_titles(self) -> None:
+        service = fallback_module()
+        prohibited_titles = (
+            "商店编号 123",
+            "详情见 例子。公司",
+            "仅需二十刀",
+            "口碑五星",
+            "数以千计的反馈",
+            "Steam 官方已核验",
+            "[::1]/app/123",
+            "由蒸汽平台确认上架的 Portal",
+            "经核实已上架的 Portal",
+            "可在蒸汽平台购买的 Portal",
+            "满分神作 Portal",
+            "两千人点评的 Portal",
+            "二十美刀 Portal",
+            "example dot com",
+            "蒸汽条目号一二三",
+        )
+
+        for title in prohibited_titles:
+            with self.subTest(title=title):
+                with self.assertRaises(service.LlmFallbackContractError):
+                    service.parse_unverified_suggestions(
+                        response_payload(suggestion(title=title)),
                         result_limit=1,
                     )
 
@@ -442,12 +485,104 @@ class LlmFallbackGenerationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"serialization":"json"', context.calls[0]["prompt"])
 
 
+class FallbackTitleVerificationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_replaces_model_text_with_an_exact_steam_directory_title(self) -> None:
+        service = fallback_module()
+        client = FallbackDirectoryClient(
+            hits=[SteamSearchHit(appid=10, title="Game A™")],
+            details={
+                10: GameCandidate(appid=10, title="Game A™", app_type="game")
+            },
+        )
+
+        verified = await service.verify_fallback_suggestion_titles(
+            client,
+            (service.UnverifiedGameSuggestion("Game A", "模型理由。"),),
+            result_limit=1,
+        )
+
+        self.assertEqual(
+            verified,
+            (
+                service.UnverifiedGameSuggestion(
+                    "Game A™",
+                    "模型理由。",
+                    title_verified=True,
+                ),
+            ),
+        )
+        self.assertEqual(client.detail_appids, [10])
+        self.assertFalse(client.search_kwargs[0]["reuse_cache"])
+
+    async def test_drops_claim_text_that_does_not_exactly_match_store_title(self) -> None:
+        service = fallback_module()
+        client = FallbackDirectoryClient(
+            hits=[SteamSearchHit(appid=10, title="Portal")],
+            details={10: GameCandidate(appid=10, title="Portal", app_type="game")},
+        )
+
+        verified = await service.verify_fallback_suggestion_titles(
+            client,
+            (
+                service.UnverifiedGameSuggestion(
+                    "九点五分佳作 Portal",
+                    "模型理由。",
+                ),
+            ),
+            result_limit=1,
+        )
+
+        self.assertEqual(verified, ())
+        self.assertEqual(client.detail_appids, [])
+
+    async def test_rejects_non_game_store_entries(self) -> None:
+        service = fallback_module()
+        client = FallbackDirectoryClient(
+            hits=[SteamSearchHit(appid=10, title="Game A")],
+            details={10: GameCandidate(appid=10, title="Game A", app_type="dlc")},
+        )
+
+        verified = await service.verify_fallback_suggestion_titles(
+            client,
+            (service.UnverifiedGameSuggestion("Game A", "模型理由。"),),
+            result_limit=1,
+        )
+
+        self.assertEqual(verified, ())
+
+    async def test_typed_steam_failure_becomes_verification_unavailable(self) -> None:
+        service = fallback_module()
+        client = RaisingFallbackDirectoryClient(SteamApiError("Steam unavailable"))
+
+        with self.assertRaises(service.LlmFallbackVerificationError):
+            await service.verify_fallback_suggestion_titles(
+                client,
+                (service.UnverifiedGameSuggestion("Game A", "模型理由。"),),
+                result_limit=1,
+            )
+
+    async def test_programming_error_is_not_disguised_as_steam_unavailable(self) -> None:
+        service = fallback_module()
+        client = RaisingFallbackDirectoryClient(RuntimeError("programming defect"))
+
+        with self.assertRaisesRegex(RuntimeError, "programming defect"):
+            await service.verify_fallback_suggestion_titles(
+                client,
+                (service.UnverifiedGameSuggestion("Game A", "模型理由。"),),
+                result_limit=1,
+            )
+
+
 class UnverifiedSuggestionFormattingTest(unittest.TestCase):
     def test_preserves_notice_and_rule_nodes_before_disclaimer_and_suggestions(self) -> None:
         service = fallback_module()
         suggestions = (
-            service.UnverifiedGameSuggestion("Game A", "适合轻松合作。"),
-            service.UnverifiedGameSuggestion("Game B", "符合解谜偏好。"),
+            service.UnverifiedGameSuggestion(
+                "Game A", "适合轻松合作。", title_verified=True
+            ),
+            service.UnverifiedGameSuggestion(
+                "Game B", "符合解谜偏好。", title_verified=True
+            ),
         )
 
         messages = format_recommendation_messages(
@@ -467,10 +602,42 @@ class UnverifiedSuggestionFormattingTest(unittest.TestCase):
         self.assertIn("参考游戏未能可靠解析", messages[2])
         self.assertEqual(
             messages[3],
-            "⚠️ LLM 兜底建议（未经过 Steam 数据验证）",
+            "⚠️ LLM 兜底建议（名称经 Steam 目录确认，需求匹配未验证）",
         )
-        self.assertEqual(messages[4], "1. 《Game A》\n模型判断理由：适合轻松合作。")
-        self.assertEqual(messages[5], "2. 《Game B》\n模型判断理由：符合解谜偏好。")
+        safe_reason = (
+            "Steam 仅确认了该名称对应游戏；模型认为它可能符合需求，"
+            "需求匹配未经过 Steam 数据验证。"
+        )
+        self.assertEqual(
+            messages[4],
+            f"1. 模型候选（名称经 Steam 目录确认）：“Game A”\n"
+            f"系统说明：{safe_reason}",
+        )
+        self.assertEqual(
+            messages[5],
+            f"2. 模型候选（名称经 Steam 目录确认）：“Game B”\n"
+            f"系统说明：{safe_reason}",
+        )
+
+    def test_formatter_redacts_any_title_without_directory_verification(self) -> None:
+        service = fallback_module()
+
+        messages = format_recommendation_messages(
+            GamePreference(),
+            [],
+            unverified_suggestions=(
+                service.UnverifiedGameSuggestion(
+                    "未经解析器检查的普通模型文本",
+                    "模型理由。",
+                ),
+            ),
+        )
+
+        rendered = messages[-1]
+        self.assertIn("模型候选名称未通过 Steam 目录确认，已省略", rendered)
+        self.assertNotIn("未经解析器检查的普通模型文本", rendered)
+        self.assertNotIn("《未经解析器检查的普通模型文本》", rendered)
+        self.assertIn("系统说明：", rendered)
 
     def test_suggestion_nodes_never_use_verified_game_fields(self) -> None:
         service = fallback_module()
@@ -487,6 +654,25 @@ class UnverifiedSuggestionFormattingTest(unittest.TestCase):
         for prohibited in ("/100", "价格", "评测", "AppID", "steam://", "http"):
             with self.subTest(prohibited=prohibited):
                 self.assertNotIn(prohibited, suggestion_message)
+
+    def test_formatter_redacts_unsafe_title_even_if_parser_is_bypassed(self) -> None:
+        service = fallback_module()
+
+        messages = format_recommendation_messages(
+            GamePreference(),
+            [],
+            unverified_suggestions=(
+                service.UnverifiedGameSuggestion(
+                    "Steam 官方已核验，商店编号 123",
+                    "模型理由。",
+                ),
+            ),
+        )
+
+        rendered = messages[-1]
+        self.assertIn("候选名称未通过 Steam 目录确认，已省略", rendered)
+        self.assertNotIn("商店编号", rendered)
+        self.assertNotIn("官方已核验", rendered)
 
     def test_verified_results_ignore_unverified_suggestions(self) -> None:
         service = fallback_module()
@@ -529,6 +715,42 @@ class JsonModePreference:
         if mode != "json":
             raise AssertionError("preference payload must use JSON serialization mode")
         return {"serialization": mode}
+
+
+class FallbackDirectoryClient:
+    language = "schinese"
+
+    def __init__(
+        self,
+        *,
+        hits: list[SteamSearchHit],
+        details: dict[int, GameCandidate],
+    ) -> None:
+        self.hits = hits
+        self.details = details
+        self.detail_appids: list[int] = []
+        self.search_kwargs: list[dict] = []
+
+    async def search_game_refs(self, **kwargs):
+        self.search_kwargs.append(kwargs)
+        return list(self.hits)
+
+    async def get_game_detail(self, appid: int):
+        self.detail_appids.append(appid)
+        return self.details[appid]
+
+
+class RaisingFallbackDirectoryClient:
+    language = "schinese"
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    async def search_game_refs(self, **_kwargs):
+        raise self.error
+
+    async def get_game_detail(self, _appid: int):
+        raise AssertionError("detail should not run after search failure")
 
 
 def idna_separator_domains() -> list[str]:

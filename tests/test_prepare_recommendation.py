@@ -93,6 +93,7 @@ try:
         ScoreBreakdown,
         SteamAccountBinding,
         SteamOwnedGame,
+        SteamSearchHit,
     )
 except ModuleNotFoundError as exc:
     if exc.name in {"astrbot", "pydantic"}:
@@ -643,7 +644,13 @@ class LlmFallbackMainPipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run.ranked_games, [])
         self.assertEqual(
             run.unverified_suggestions,
-            (UnverifiedGameSuggestion("Game A", "符合多人合作偏好。"),),
+            (
+                UnverifiedGameSuggestion(
+                    "Game A",
+                    "符合多人合作偏好。",
+                    title_verified=True,
+                ),
+            ),
         )
         self.assertTrue(run.used_unverified_fallback)
         self.assertEqual(run.messages[0], "解析通知")
@@ -651,11 +658,13 @@ class LlmFallbackMainPipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(STEAM_ONLY_SCOPE_WARNING, run.messages[1])
         self.assertEqual(
             run.messages[2],
-            "⚠️ LLM 兜底建议（未经过 Steam 数据验证）",
+            "⚠️ LLM 兜底建议（名称经 Steam 目录确认，需求匹配未验证）",
         )
         self.assertEqual(
             run.messages[3],
-            "1. 《Game A》\n模型判断理由：符合多人合作偏好。",
+            "1. 模型候选（名称经 Steam 目录确认）：“Game A”\n系统说明："
+            "Steam 仅确认了该名称对应游戏；模型认为它可能符合需求，"
+            "需求匹配未经过 Steam 数据验证。",
         )
 
     async def test_healthy_language_constrained_steam_empty_result_uses_fallback(
@@ -1374,7 +1383,7 @@ def empty_pipeline_plugin(
     plugin.semantic_verification_batch_size = 5
     plugin.context = context
     plugin.cache = object()
-    plugin.steam_client = SimpleNamespace(language="schinese")
+    plugin.steam_client = FallbackDirectorySteamClient()
     plugin.steam_index = StaticSemanticSteamIndex(games or [])
     plugin.price_bridge = IdentityPriceBridge()
 
@@ -1388,6 +1397,27 @@ def empty_pipeline_plugin(
     plugin._owned_games_for_recommendation = no_owned_games
     plugin._user_profile_tag_weights = no_profile
     return plugin
+
+
+class FallbackDirectorySteamClient:
+    language = "schinese"
+
+    def __init__(self) -> None:
+        self._next_appid = 1
+        self._titles: dict[int, str] = {}
+
+    async def search_game_refs(self, *, search: str, **_kwargs):
+        appid = self._next_appid
+        self._next_appid += 1
+        self._titles[appid] = search
+        return [SteamSearchHit(appid=appid, title=search)]
+
+    async def get_game_detail(self, appid: int):
+        return GameCandidate(
+            appid=appid,
+            title=self._titles[appid],
+            app_type="game",
+        )
 
 
 class RaisingSteamIndex:
