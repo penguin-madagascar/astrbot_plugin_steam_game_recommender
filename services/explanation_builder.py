@@ -112,7 +112,11 @@ async def generate_unplayed_reason(
     except Exception as exc:
         logger.warning("Steam unplayed reason generation failed for %s: %s", game.appid, exc)
         result = None
-    return result.reason if result else fallback_unplayed_reason(evidence)
+    if result is None:
+        return fallback_unplayed_reason(evidence)
+    selected_ids = set(result.evidence_ids)
+    selected = [item for item in evidence if item.evidence_id in selected_ids]
+    return fallback_unplayed_reason(selected)
 
 
 async def generate_reason_text(
@@ -229,8 +233,10 @@ def validate_recommendation_reason_response(
         legacy = validate_reason_response(raw_text, appid, positive)
         if legacy is None:
             return None
+        selected_ids = set(legacy.evidence_ids)
+        selected = [item for item in positive if item.evidence_id in selected_ids]
         return ValidatedRecommendationReasons(
-            recommendation_reason=legacy.reason,
+            recommendation_reason=fallback_reason(selected),
             caution_reason=None,
             recommendation_evidence_ids=legacy.evidence_ids,
             caution_evidence_ids=[],
@@ -279,8 +285,8 @@ def validate_recommendation_reason_response(
     ):
         return None
     return ValidatedRecommendationReasons(
-        recommendation_reason=reason,
-        caution_reason=caution_text or None,
+        recommendation_reason=fallback_reason(selected_positive),
+        caution_reason=fallback_caution_reason(cautions),
         recommendation_evidence_ids=positive_ids,
         caution_evidence_ids=caution_ids,
     )
@@ -326,7 +332,16 @@ def validate_reason_response(
         return None
     if len(evidence_ids) > max(4, len(important_ids) + 2):
         return None
-    return ValidatedReason(reason=reason, evidence_ids=evidence_ids)
+    selected_ids = set(evidence_ids)
+    selected = [item for item in evidence if item.evidence_id in selected_ids]
+    deterministic_reason = fallback_reason(selected)
+    deterministic_caution = fallback_caution_reason(selected)
+    if deterministic_caution:
+        deterministic_reason = deterministic_reason + deterministic_caution
+    return ValidatedReason(
+        reason=deterministic_reason[:MAX_REASON_LENGTH],
+        evidence_ids=evidence_ids,
+    )
 
 
 def select_reason_evidence(

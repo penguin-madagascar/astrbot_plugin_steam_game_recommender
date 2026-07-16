@@ -249,7 +249,11 @@ class ConcurrentReasonGenerationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(context.calls), 8)
         self.assertEqual(context.max_active, 5)
         self.assertTrue(
-            all(game.recommendation_reason.startswith("这款游戏") for game in generated)
+            all(
+                "匹配合作与解谜偏好" in game.recommendation_reason
+                and "Steam 口碑稳定" in game.recommendation_reason
+                for game in generated
+            )
         )
 
     async def test_invalid_single_game_response_only_falls_back_for_that_game(self) -> None:
@@ -263,11 +267,44 @@ class ConcurrentReasonGenerationTest(unittest.IsolatedAsyncioTestCase):
             games,
         )
 
-        self.assertEqual(
-            generated[0].recommendation_reason, "这款游戏玩法契合偏好。Steam 口碑稳定。"
-        )
+        self.assertIn("匹配合作与解谜偏好", generated[0].recommendation_reason)
+        self.assertIn("Steam 口碑稳定", generated[0].recommendation_reason)
         self.assertNotEqual(generated[1].recommendation_reason, "格式错误")
         self.assertIn("匹配合作与解谜偏好", generated[1].recommendation_reason)
+
+    async def test_untrusted_reason_text_cannot_add_claims_without_evidence(self) -> None:
+        game = RankedGame(
+            title="Grounded Game",
+            appid=1,
+            score=80,
+            recommendation_evidence=[
+                evidence("tag_match", "preference", "positive", "命中解谜核心玩法")
+            ],
+        )
+        context = StaticReasonContext(
+            {
+                "appid": 1,
+                "recommendation_reason": (
+                    "当前仅需 9.99 美元。已确认支持完整中文配音。"
+                ),
+                "recommendation_evidence_ids": ["tag_match"],
+                "caution_reason": None,
+                "caution_evidence_ids": [],
+            }
+        )
+
+        generated = await generate_recommendation_reasons(
+            context,
+            FakeEvent(),
+            "provider-1",
+            [game],
+        )
+
+        reason = generated[0].recommendation_reason
+        self.assertIn("命中解谜核心玩法", reason)
+        self.assertNotIn("9.99", reason)
+        self.assertNotIn("美元", reason)
+        self.assertNotIn("中文配音", reason)
 
 
 class UnplayedReasonTest(unittest.IsolatedAsyncioTestCase):
@@ -297,11 +334,42 @@ class UnplayedReasonTest(unittest.IsolatedAsyncioTestCase):
             game,
         )
 
-        self.assertEqual(reason, context.payload["reason"])
+        self.assertIn("类型", reason)
+        self.assertIn("好评率", reason)
+        self.assertNotEqual(reason, context.payload["reason"])
         self.assertEqual(
             [item.evidence_id for item in build_unplayed_evidence(game)],
             ["gameplay", "reviews", "popularity"],
         )
+
+    async def test_unplayed_reason_cannot_add_untrusted_price_or_language_claims(
+        self,
+    ) -> None:
+        game = GameCandidate(
+            title="Backlog Game",
+            appid=77,
+            genres=["Adventure"],
+            tags=["Puzzle"],
+        )
+        context = StaticReasonContext(
+            {
+                "appid": 77,
+                "reason": "当前仅需 9.99 美元。已确认支持完整中文配音。",
+                "evidence_ids": ["gameplay"],
+            }
+        )
+
+        reason = await generate_unplayed_reason(
+            context,
+            FakeEvent(),
+            "provider-1",
+            game,
+        )
+
+        self.assertIn("类型", reason)
+        self.assertNotIn("9.99", reason)
+        self.assertNotIn("美元", reason)
+        self.assertNotIn("中文配音", reason)
 
     async def test_unplayed_failure_fallback_keeps_gameplay_reviews_and_popularity(self) -> None:
         game = GameCandidate(

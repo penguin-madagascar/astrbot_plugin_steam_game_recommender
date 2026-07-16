@@ -320,10 +320,7 @@ class RecommendationOutputTest(unittest.IsolatedAsyncioTestCase):
             [game],
         )
 
-        self.assertEqual(
-            generated[0].recommendation_reason,
-            "核心玩法方向匹配。现有标签证据较明确。",
-        )
+        self.assertIn("命中核心玩法特征：类魂", generated[0].recommendation_reason)
         self.assertEqual(generated[0].caution_reason, "部分核心特征证据不足。")
         block = format_recommendation_messages(GamePreference(), generated)[1]
         self.assertNotIn("性能", block)
