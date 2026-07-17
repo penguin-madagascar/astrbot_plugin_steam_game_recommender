@@ -1,33 +1,33 @@
 {
   "model_and_access": {
     "type": "object",
-    "description": "模型与鉴权",
-    "hint": "配置偏好解析、推荐理由和 Steam 游戏库访问",
+    "description": "模型与 Steam 访问",
+    "hint": "设置自然语言理解、无结果灵感和个人 Steam 游戏库功能。",
     "items": {
       "llm_provider_id": {
         "type": "string",
-        "description": "用于偏好解析和推荐理由的 LLM 提供商",
-        "hint": "‼️留空时尝试使用当前会话模型；偏好解析失败会降级为关键词规则，单款理由失败会降级为可信证据规则理由。",
+        "description": "自然语言理解与推荐理由模型",
+        "hint": "留空时使用当前会话模型；模型暂不可用时仍会继续推荐，但复杂要求和理由可能更简略。",
         "_special": "select_provider",
         "default": ""
       },
       "llm_fallback_provider_id": {
         "type": "string",
-        "description": "用于正常零结果兜底的 LLM 提供商",
-        "hint": "留空即关闭；仅在推荐流程正常完成且出现零结果（没有合格候选）时使用，Steam 查询失败和程序错误不会触发。模型候选名称必须先由 Steam 目录精确确认，需求匹配仍未经过 Steam 数据验证；不展示模型自由理由，也不附带 Steam 链接、价格、评测或推荐分，不写入换一批使用的正式推荐记录；绝不自动使用当前会话模型。",
+        "description": "无结果时的灵感推荐模型",
+        "hint": "留空即关闭；仅在 Steam 查询正常但没有合适结果时提供单独标注、未经需求验证的灵感。此类结果不显示价格、推荐分或购买链接，也不能用于“换一批”。",
         "_special": "select_provider",
         "default": ""
       },
       "semantic_verification_batch_size": {
         "type": "int",
-        "description": "语义特征核验的单批候选数",
-        "hint": "每批提交给模型核验的候选游戏数量；运行时限制为 1–10。",
+        "description": "具体玩法核对数量",
+        "hint": "决定每次检查具体玩法要求的游戏数量，范围 1–10。通常保持默认值 5 即可。",
         "default": 5
       },
       "steam_api_key": {
         "type": "string",
         "description": "Steam Web API Key",
-        "hint": "用于 /gamerec 的游戏库过滤和 /randomrec 调用 Steam GetOwnedGames；留空时账号绑定仍可用，但无法读取游戏库。可前往 [Steam Web API Key 申请页](https://steamcommunity.com/dev/apikey) 获取。",
+        "hint": "⚠️请妥善保管此 Key；普通推荐无需填写，只有读取个人游戏库、排除已有游戏或使用 /randomrec 时才需要。可前往 [Steam Web API Key 申请页](https://steamcommunity.com/dev/apikey) 获取。",
         "default": ""
       }
     }
@@ -35,76 +35,76 @@
   "price_and_region": {
     "type": "object",
     "description": "价格与地区",
-    "hint": "配置 Steam 价格增强说明和默认查询地区",
+    "hint": "设置默认价格地区，并查看可选价格插件说明。",
     "items": {
       "steam_price_heybox_notice": {
         "type": "text",
         "description": "Steam 价格增强说明",
-        "hint": "这是提示信息，无需配置；安装 astrbot_plugin_steam_price_heybox 后会自动启用。",
-        "default": "无需配置。安装 astrbot_plugin_steam_price_heybox 后，本插件会自动启用指定区域价格查询，返回 Steam 当前价、历史最低和最近促销；未安装时仍可正常推荐游戏。",
+        "hint": "无需配置；请在插件市场搜索“Steam 价格查询（小黑盒）”（astrbot_plugin_steam_price_heybox）。",
+        "default": "安装后，推荐结果会自动显示当前价、历史最低和最近促销；未安装时仍可正常推荐。",
         "_readonly": true,
         "obvious_hint": true
       },
       "default_region": {
         "type": "string",
-        "description": "默认地区代码",
-        "hint": "未在命令中指定地区时使用；支持 CN、US、JP 等两字母代码，查询可用 -US、国区、美区、日区等覆盖。",
+        "description": "默认价格地区",
+        "hint": "未在命令中指定地区时使用；可填写 CN、US、JP 等两字母代码，命令中的 -US、美区、日区等会临时覆盖。",
         "default": "CN"
       }
     }
   },
   "recommendation_and_scoring": {
     "type": "object",
-    "description": "推荐与评分",
-    "hint": "配置推荐数量和索引缓存；/gamerec 使用固定的锚点分层、Wilson 口碑与评测规模评分，随机推荐门槛仅供 /randomrec 使用。",
+    "description": "推荐结果与随机推荐",
+    "hint": "设置默认返回数量、资料刷新频率，以及 /randomrec 的口碑门槛。",
     "items": {
       "max_results": {
         "type": "int",
-        "description": "默认推荐数量上限",
-        "hint": "每次默认返回的推荐条数，范围 1-10；用户明确要求数量时会优先采用用户数量但不超过该上限。",
+        "description": "每次最多推荐几款",
+        "hint": "用户未指定数量时按此上限返回，范围 1–10；明确要求的数量仍不会超过此上限。",
         "default": 10
       },
       "steam_index_ttl_hours": {
         "type": "int",
-        "description": "Steam 推荐索引缓存有效期（小时）",
-        "hint": "Steam 推荐会优先使用本地索引；超过该时间后会尝试用 Steam 公开数据刷新索引。",
+        "description": "推荐候选资料刷新间隔（小时）",
+        "hint": "决定插件多久更新一次用于寻找游戏的资料。数值越大，更新频率越低。",
         "default": 168
       },
       "steam_min_review_count": {
         "type": "int",
-        "description": "随机推荐最低评测数量",
-        "hint": "仅用于 /randomrec 的最低 Steam 评测数量门槛。",
+        "description": "随机推荐最低评测数",
+        "hint": "只有达到此评测数量的库内未玩游戏才会被 /randomrec 选中。",
         "default": 50
       },
       "steam_min_positive_ratio": {
         "type": "float",
         "description": "随机推荐最低好评率",
-        "hint": "仅用于 /randomrec 的最低 Steam 好评率门槛。",
+        "hint": "只有达到此好评率的库内未玩游戏才会被 /randomrec 选中；0.65 表示 65%。",
         "default": 0.65
       }
     }
   },
   "cache_and_network": {
     "type": "object",
-    "description": "缓存与网络",
-    "hint": "配置 Steam 数据缓存和网络请求超时",
+    "description": "资料刷新与网络",
+    "hint": "设置游戏资料刷新速度、请求等待时间和重复查询方式。",
     "items": {
       "cache_ttl_hours": {
         "type": "int",
-        "description": "基础游戏数据缓存有效期（小时）",
-        "hint": "Steam 基础游戏数据的缓存时间；调大可减少详情请求，调小可更快刷新资料。候选发现和整次推荐结果是否复用由下方开关单独控制。",
+        "description": "单款游戏资料刷新间隔（小时）",
+        "hint": "数值越大，请求更少但资料更新更慢；数值越小，资料更新更及时。",
         "default": 24
       },
       "timeout_seconds": {
         "type": "int",
-        "description": "HTTP 请求超时时间",
-        "hint": "Steam 和价格查询的单次 HTTP 请求超时时间，单位秒。",
+        "description": "网络请求最长等待时间（秒）",
+        "hint": "超过该时间仍未收到 Steam 或价格数据时，本次请求会失败或使用可用的旧资料。",
         "default": 15
       },
       "reuse_identical_query_cache": {
         "type": "bool",
-        "description": "复用完全相同的推荐查询缓存",
-        "hint": "关闭后，完全相同的推荐查询会重新尝试 Steam 发现召回与语义核验；AppDetails、评测、商店标签、标签词表、发行状态、价格、账号、本地实体索引和 /gamerec_retry 记忆仍会缓存；实时召回失败时可使用最多 7 天的旧发现快照。",
+        "description": "复用完全相同的推荐结果",
+        "hint": "开启后，相同需求会优先使用已有结果，响应更快、请求更少。关闭后会重新寻找和核对候选，但部分基础资料仍会保留。",
         "default": false
       }
     }

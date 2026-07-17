@@ -61,8 +61,8 @@ class SteamOnlyMetadataTest(unittest.TestCase):
         self.assertIn("不推荐理由：", readme)
         self.assertIn("DLC、试玩版、原声、工具和套餐", readme)
         self.assertIn("默认关闭相同查询结果复用", readme)
-        self.assertIn("基础商店资料仍会按各自有效期缓存", readme)
-        self.assertIn("LLM 零结果兜底默认关闭", readme)
+        self.assertIn("开启后，相同需求通常会更快返回", readme)
+        self.assertIn("无结果灵感推荐默认关闭", readme)
         self.assertIn("不会附带购买链接、价格、评测或推荐分", readme)
 
     def test_readme_is_a_user_facing_overview_with_combined_examples(self) -> None:
@@ -95,23 +95,22 @@ class SteamOnlyMetadataTest(unittest.TestCase):
             "新安装默认最多返回 10 款",
             "用户原文中明确写出的数量优先",
             "升级前已经设置为 5 款",
-            "而不是只凭一个宽泛类型标签",
             "参考游戏本身不会作为结果返回",
             "续作和同系列作品仍可参与推荐",
             "Steam 标签、类型和商店描述",
             "即使写了“仅限”或“只要”",
             "不会用完全没有核心玩法直接证据的候选凑数",
             "部分核心特征证据不足的候选仍可能返回",
-            "使用 60/100 未发售质量先验，仅用于排序，不代表玩家实评或实际知名度",
+            "不会把默认排序值显示成玩家评价",
             "普通推荐不需要 Steam Web API Key",
-            "https://steamcommunity.com/dev/apikey",
+            "[Steam Web API Key 申请页](https://steamcommunity.com/dev/apikey)",
+            "Steam 价格查询（小黑盒）",
             "astrbot_plugin_steam_price_heybox",
             "偏好解析模型暂时不可用",
-            "语义特征核验服务暂不可用",
-            "核验批次失败不会再把整批候选误判为不满足",
+            "具体玩法暂时无法确认",
             "暂时没有找到满足当前条件的游戏",
-            "只有推荐流程正常完成但没有合格候选时",
-            "不会在 Steam 查询失败",
+            "只会在 Steam 查询正常但没有合适结果时出现",
+            "显示样式取决于当前聊天平台",
         ):
             self.assertIn(user_visible_behavior, readme)
 
@@ -129,6 +128,14 @@ class SteamOnlyMetadataTest(unittest.TestCase):
             "llm_fallback_provider_id",
             "steam_index_ttl_hours",
             "cache_ttl_hours",
+            "AppDetails",
+            "More Like This",
+            "发现召回",
+            "语义核验",
+            "响应契约",
+            "每 20 款",
+            "最多核验 60 款",
+            "60/100 未发售质量先验",
         ):
             self.assertNotIn(implementation_detail, readme)
 

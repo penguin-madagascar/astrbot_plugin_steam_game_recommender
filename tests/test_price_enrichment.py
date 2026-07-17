@@ -127,8 +127,10 @@ class CommandRegistrationTest(unittest.TestCase):
         self.assertEqual(notice["type"], "text")
         self.assertIs(notice["_readonly"], True)
         self.assertIs(notice["obvious_hint"], True)
-        self.assertIn("无需配置", notice["default"])
-        self.assertIn("自动启用", notice["default"])
+        self.assertIn("无需配置", notice["hint"])
+        self.assertIn("Steam 价格查询（小黑盒）", notice["hint"])
+        self.assertIn("astrbot_plugin_steam_price_heybox", notice["hint"])
+        self.assertIn("自动显示", notice["default"])
         self.assertIn("未安装", notice["default"])
 
     def test_repository_no_longer_mentions_itad(self) -> None:
