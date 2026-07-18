@@ -7,11 +7,11 @@ from typing import Any, Callable
 from ..storage.models import MAX_REFERENCE_ENTITIES, GamePreference
 from .company_preferences import merge_retry_company_preferences
 from .preference_rules import extract_budget
-from .reference_matching import title_key
 from .recommendation_memory import (
     PreferencePatch,
     RecommendationResultSummary,
 )
+from .reference_matching import title_key
 
 RETRY_PREFIXES = (
     "重新推荐",
@@ -20,6 +20,31 @@ RETRY_PREFIXES = (
     "gamerec_retry",
     "retry",
 )
+CLAUSE_PATTERN = re.compile(r"[^，,。.!！？?；;\n]+")
+ORDINAL_PATTERN = re.compile(r"第\s*(\d+)\s*款")
+INTENT_PATTERN = re.compile(r"不喜欢|不想要|喜欢|想要|不要|排除|去掉")
+CLEAR_CONDITION_PATTERNS = {
+    "budget": re.compile(
+        r"(?:(?:取消|清除|移除)\s*(?:预算|价格)\s*(?:限制|要求|偏好)?|"
+        r"不要\s*(?:预算|价格)\s*(?:限制|要求|偏好))"
+    ),
+    "players": re.compile(
+        r"(?:(?:取消|清除|移除)\s*(?:人数|联机人数)\s*(?:限制|要求|偏好)?|"
+        r"不要\s*(?:人数|联机人数)\s*(?:限制|要求|偏好))"
+    ),
+    "language": re.compile(
+        r"(?:(?:取消|清除|移除)\s*(?:中文|语言)\s*(?:限制|要求|偏好)?|"
+        r"不要\s*(?:中文|语言)\s*(?:限制|要求|偏好))"
+    ),
+    "difficulty": re.compile(
+        r"(?:(?:取消|清除|移除)\s*难度\s*(?:限制|要求|偏好)?|"
+        r"不要\s*难度\s*(?:限制|要求|偏好))"
+    ),
+    "mood": re.compile(
+        r"(?:(?:取消|清除|移除)\s*(?:氛围|心情)\s*(?:限制|要求|偏好)?|"
+        r"不要\s*(?:氛围|心情)\s*(?:限制|要求|偏好))"
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -61,44 +86,50 @@ def parse_preference_patch(
     excluded: list[int] = []
     warnings: list[str] = []
     spans: list[tuple[int, int]] = []
-    ordinal_pattern = re.compile(r"第\s*(\d+)\s*款")
-    for match in ordinal_pattern.finditer(source):
-        ordinal = int(match.group(1))
-        start = max(source.rfind("，", 0, match.start()), source.rfind(",", 0, match.start())) + 1
-        punctuation = [
-            position
-            for mark in ("，", ",", "。", ";", "；")
-            if (position := source.find(mark, match.end())) >= 0
-        ]
-        end = min(punctuation) if punctuation else len(source)
-        clause = source[start:end]
-        spans.append((start, end))
-        if ordinal < 1 or ordinal > result_count:
-            warnings.append(f"反馈序号第 {ordinal} 款超出上一批结果范围，已忽略。")
-            continue
-        if re.search(r"不喜欢|不想要.*这类", clause):
-            negative.append(ordinal)
-        elif re.search(r"喜欢|想要.*这类", clause) and "这类" in clause:
-            positive.append(ordinal)
-        elif re.search(r"不要|排除|去掉", clause):
-            excluded.append(ordinal)
-
-    residual = source
-    for start, end in sorted(spans, reverse=True):
-        residual = f"{residual[:start]} {residual[end:]}"
-    residual = re.sub(r"^[\s,，、;；:：]+|[\s,，、;；:：]+$", "", residual)
-    residual = re.sub(r"^(?:再)?换一批$", "", residual).strip()
-
     clear_conditions: list[str] = []
-    for name, pattern in {
-        "budget": r"(?:取消|清除|不要)(?:预算|价格)(?:限制|要求)?",
-        "players": r"(?:取消|清除|不要)(?:人数|联机人数)(?:限制|要求)?",
-        "language": r"(?:取消|清除|不要)(?:中文|语言)(?:限制|要求)?",
-        "difficulty": r"(?:取消|清除|不要)(?:难度)(?:限制|要求)?",
-        "mood": r"(?:取消|清除|不要)(?:氛围|心情)(?:限制|要求)?",
-    }.items():
-        if re.search(pattern, source):
-            clear_conditions.append(name)
+    for clause_match in CLAUSE_PATTERN.finditer(source):
+        clause = clause_match.group().strip()
+        clause_offset = clause_match.start() + len(clause_match.group()) - len(
+            clause_match.group().lstrip()
+        )
+        ordinals = list(ORDINAL_PATTERN.finditer(clause))
+        intents = list(INTENT_PATTERN.finditer(clause))
+        for ordinal_match in ordinals:
+            if not intents:
+                continue
+            intent_match = min(
+                intents,
+                key=lambda item: span_distance(item.span(), ordinal_match.span()),
+            )
+            ordinal = int(ordinal_match.group(1))
+            span_start = clause_offset + min(intent_match.start(), ordinal_match.start())
+            span_end = clause_offset + max(intent_match.end(), ordinal_match.end())
+            suffix = re.match(r"\s*这类", source[span_end : clause_match.end()])
+            if suffix:
+                span_end += suffix.end()
+            spans.append((span_start, span_end))
+            if ordinal < 1 or ordinal > result_count:
+                warnings.append(
+                    f"反馈序号第 {ordinal} 款超出上一批结果范围，已忽略。"
+                )
+                continue
+            intent = intent_match.group()
+            if intent in {"不喜欢", "不想要"}:
+                negative.append(ordinal)
+            elif intent in {"喜欢", "想要"}:
+                positive.append(ordinal)
+            else:
+                excluded.append(ordinal)
+
+        for name, pattern in CLEAR_CONDITION_PATTERNS.items():
+            if pattern.fullmatch(clause):
+                clear_conditions.append(name)
+                spans.append(clause_match.span())
+
+    residual = remove_spans(source, spans)
+    residual = re.sub(r"[，,。.!！？?；;\n]+", " ", residual)
+    residual = re.sub(r"\s+", " ", residual).strip(" ，,、;；:：")
+    residual = re.sub(r"^(?:再)?换一批$", "", residual).strip()
 
     overrides: dict[str, Any] = {}
     budget, budget_currency, budget_is_required = extract_budget(source.lower())
@@ -125,6 +156,27 @@ def parse_preference_patch(
         residual_text=residual,
         warnings=warnings,
     )
+
+
+def span_distance(left: tuple[int, int], right: tuple[int, int]) -> int:
+    if left[1] <= right[0]:
+        return right[0] - left[1]
+    if right[1] <= left[0]:
+        return left[0] - right[1]
+    return 0
+
+
+def remove_spans(text: str, spans: list[tuple[int, int]]) -> str:
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    result = text
+    for start, end in reversed(merged):
+        result = f"{result[:start]} {result[end:]}"
+    return result
 
 
 def apply_preference_patch(

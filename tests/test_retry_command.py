@@ -234,6 +234,58 @@ class PreferencePatchTest(unittest.TestCase):
         self.assertEqual(required.patch.condition_overrides["budget"], 60)
         self.assertTrue(required.patch.condition_overrides["budget_is_required"])
 
+    def test_ordinal_feedback_uses_unified_boundaries_and_nearest_intent(self) -> None:
+        parsed = parse_preference_patch(
+            "喜欢第1款这类；第2款不喜欢！另外要中文\n不要第3款",
+            3,
+        )
+
+        self.assertEqual(parsed.patch.positive_reference_ordinals, [1])
+        self.assertEqual(parsed.patch.negative_reference_ordinals, [2])
+        self.assertEqual(parsed.patch.exclude_ordinals, [3])
+        self.assertEqual(parsed.residual_text, "另外要中文")
+
+    def test_feedback_removal_preserves_requirements_in_the_same_clause(self) -> None:
+        parsed = parse_preference_patch(
+            "不喜欢第1款这类但希望支持中文",
+            len(self.results),
+        )
+
+        self.assertEqual(parsed.patch.negative_reference_ordinals, [1])
+        self.assertEqual(parsed.residual_text, "但希望支持中文")
+
+    def test_negative_budget_requirement_is_not_mistaken_for_clear(self) -> None:
+        parsed = parse_preference_patch(
+            "不要预算超过 100 元",
+            len(self.results),
+        )
+
+        self.assertNotIn("budget", parsed.patch.clear_conditions)
+        self.assertEqual(parsed.patch.condition_overrides["budget"], 100)
+
+    def test_clear_condition_requires_a_complete_clause(self) -> None:
+        clear = parse_preference_patch(
+            "取消预算限制，画面要精致",
+            len(self.results),
+        )
+        ordinary = parse_preference_patch(
+            "这次不要预算限制以外的游戏",
+            len(self.results),
+        )
+
+        self.assertEqual(clear.patch.clear_conditions, ["budget"])
+        self.assertEqual(clear.residual_text, "画面要精致")
+        self.assertNotIn("budget", ordinary.patch.clear_conditions)
+        self.assertEqual(ordinary.residual_text, "这次不要预算限制以外的游戏")
+
+    def test_bare_do_not_condition_is_not_a_clear_command(self) -> None:
+        bare = parse_preference_patch("不要预算", len(self.results))
+        explicit = parse_preference_patch("不要预算限制", len(self.results))
+
+        self.assertNotIn("budget", bare.patch.clear_conditions)
+        self.assertEqual(bare.residual_text, "不要预算")
+        self.assertEqual(explicit.patch.clear_conditions, ["budget"])
+
     def test_retry_merge_carries_required_budget_with_new_amount(self) -> None:
         merged = merge_retry_preferences(
             GamePreference(budget=100, budget_is_required=False),

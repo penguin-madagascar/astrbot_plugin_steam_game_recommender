@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 import math
 import random
 import re
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+import httpx
+
+from ..clients.steam import SteamApiError
 from ..storage.models import GameCandidate, SteamOwnedGame
 from .game_identity import game_family_key, is_confirmed_base_game, is_edition_title
+
+MAX_RANDOM_SAMPLE_SIZE = 50
+MAX_RANDOM_CONCURRENCY = 5
+RANDOM_RECOMMENDATION_TIMEOUT_SECONDS = 20.0
 
 
 class UnplayedRecommendationError(ValueError):
@@ -33,6 +41,10 @@ async def pick_random_unplayed_game(
     min_review_count: int = 50,
     min_positive_ratio: float = 0.65,
     rng: random.Random | None = None,
+    *,
+    sample_limit: int = MAX_RANDOM_SAMPLE_SIZE,
+    concurrency: int = MAX_RANDOM_CONCURRENCY,
+    timeout_seconds: float = RANDOM_RECOMMENDATION_TIMEOUT_SECONDS,
 ) -> UnplayedRecommendation:
     candidates = [
         game
@@ -47,27 +59,89 @@ async def pick_random_unplayed_game(
         random.shuffle(shuffled)
     else:
         rng.shuffle(shuffled)
+    resolved_sample_limit = optional_int(sample_limit)
+    if resolved_sample_limit is None:
+        resolved_sample_limit = MAX_RANDOM_SAMPLE_SIZE
+    resolved_sample_limit = min(
+        max(resolved_sample_limit, 1),
+        MAX_RANDOM_SAMPLE_SIZE,
+    )
+    shuffled = shuffled[:resolved_sample_limit]
 
-    min_count = max(int(min_review_count), 0)
-    min_ratio = min(max(float(min_positive_ratio), 0.0), 1.0)
-    checked_count = 0
-    for owned_game in shuffled:
-        summary = await steam_client.get_review_summary(owned_game.appid)
-        checked_count += 1
+    parsed_min_count = optional_int(min_review_count)
+    min_count = max(parsed_min_count if parsed_min_count is not None else 50, 0)
+    parsed_min_ratio = optional_float(min_positive_ratio)
+    min_ratio = min(
+        max(parsed_min_ratio if parsed_min_ratio is not None else 0.65, 0.0),
+        1.0,
+    )
+    review_success_count = 0
+
+    async def check_candidate(
+        owned_game: SteamOwnedGame,
+        checked_count: int,
+    ) -> tuple[bool, UnplayedRecommendation | None]:
+        try:
+            summary = await steam_client.get_review_summary(owned_game.appid)
+        except (SteamApiError, httpx.HTTPError):
+            return False, None
         if not review_passes(summary, min_count, min_ratio):
-            continue
+            return True, None
         try:
             game = await steam_client.get_game_detail(owned_game.appid)
-        except Exception:
-            continue
+        except (SteamApiError, httpx.HTTPError):
+            return True, None
         if not is_confirmed_base_game(game):
-            continue
-        return UnplayedRecommendation(
+            return True, None
+        return True, UnplayedRecommendation(
             game=attach_review_summary(game, owned_game, summary),
             owned_game=owned_game,
             checked_count=checked_count,
         )
 
+    async def scan_candidates() -> UnplayedRecommendation | None:
+        nonlocal review_success_count
+        parsed_concurrency = optional_int(concurrency)
+        batch_size = min(
+            max(parsed_concurrency if parsed_concurrency is not None else 5, 1),
+            MAX_RANDOM_CONCURRENCY,
+        )
+        for start in range(0, len(shuffled), batch_size):
+            batch = shuffled[start : start + batch_size]
+            outcomes = await asyncio.gather(
+                *(
+                    check_candidate(owned_game, start + position + 1)
+                    for position, owned_game in enumerate(batch)
+                )
+            )
+            review_success_count += sum(succeeded for succeeded, _result in outcomes)
+            for _succeeded, result in outcomes:
+                if result is not None:
+                    return result
+        return None
+
+    parsed_timeout = optional_float(timeout_seconds)
+    resolved_timeout = min(
+        max(
+            parsed_timeout
+            if parsed_timeout is not None
+            else RANDOM_RECOMMENDATION_TIMEOUT_SECONDS,
+            0.01,
+        ),
+        RANDOM_RECOMMENDATION_TIMEOUT_SECONDS,
+    )
+    try:
+        recommendation = await asyncio.wait_for(
+            scan_candidates(),
+            timeout=resolved_timeout,
+        )
+    except TimeoutError as exc:
+        raise UnplayedRecommendationError("随机推荐检查超时，请稍后再试。") from exc
+    if recommendation is not None:
+        return recommendation
+
+    if review_success_count == 0:
+        raise UnplayedRecommendationError("Steam 评测服务暂不可用，请稍后再试。")
     raise UnplayedRecommendationError(
         "没有找到未游玩且评价过线的游戏"
         f"（门槛：至少 {min_count} 条评测、好评率不低于 {min_ratio:.0%}）。"
