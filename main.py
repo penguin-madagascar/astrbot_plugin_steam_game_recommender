@@ -94,6 +94,9 @@ from .storage.repository import SQLiteCacheRepository
 PLUGIN_NAME = "astrbot_plugin_steam_game_recommender"
 PLUGIN_VERSION = "0.7.0"
 PLUGIN_DESCRIPTION = "基于 Steam 公开数据、连续评分和可信证据生成精简游戏推荐。"
+MEMORY_SAVE_WARNING = (
+    "⚠️ 本次结果无法用于“换一批”，但上面的推荐内容仍然有效。"
+)
 
 
 @dataclass(frozen=True)
@@ -249,8 +252,17 @@ class SteamGameRecommenderPlugin(Star):
             else:
                 prepared = await self._prepare_recommendation(event, raw_text)
                 run = await self._run_recommendation(event, prepared)
-                await self._save_recent_recommendation(event, run)
-                messages = run.messages
+                messages = list(run.messages)
+                try:
+                    await self._save_recent_recommendation(event, run)
+                except Exception as exc:
+                    log_external_failure(
+                        logger,
+                        "recommendation_memory_save_failed",
+                        stage="recommendation_memory_save",
+                        exc=exc,
+                    )
+                    messages.append(MEMORY_SAVE_WARNING)
         except SteamApiError as exc:
             log_external_failure(
                 logger,

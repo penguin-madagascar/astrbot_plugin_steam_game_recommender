@@ -562,6 +562,47 @@ class RecommendationPipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("error_type=%s", logged)
         self.assertIn("RuntimeError", logged)
 
+    async def test_memory_write_failure_keeps_the_generated_recommendation(self) -> None:
+        secret = "sqlite path=/private/data token=secret-key"
+        plugin = object.__new__(SteamGameRecommenderPlugin)
+        preference = GamePreference(platforms=["steam"])
+        plugin._prepare_recommendation = AsyncMock(
+            return_value=PreparedRecommendation("query", preference, 1)
+        )
+        plugin._run_recommendation = AsyncMock(
+            return_value=RecommendationRun(
+                messages=["《Verified Game》"],
+                ranked_games=[RankedGame(appid=1, title="Verified Game")],
+                preference=preference,
+                result_limit=1,
+                raw_query="query",
+            )
+        )
+        plugin._save_recent_recommendation = AsyncMock(
+            side_effect=RuntimeError(secret)
+        )
+        warnings: list[tuple[object, ...]] = []
+
+        with patch.object(
+            main_module.logger,
+            "warning",
+            side_effect=lambda *args, **_kwargs: warnings.append(args),
+        ):
+            results = [
+                result
+                async for result in plugin.recommend_games(
+                    PlainResultEvent(),
+                    "query",
+                )
+            ]
+
+        rendered = results[0][1]
+        logged = " ".join(str(value) for call in warnings for value in call)
+        self.assertIn("《Verified Game》", rendered)
+        self.assertIn("本次结果无法用于“换一批”", rendered)
+        self.assertNotIn(secret, rendered)
+        self.assertNotIn(secret, logged)
+
     async def test_partial_tag_recall_degradation_keeps_ranked_results(self) -> None:
         context = RaisingLlmContext()
         plugin = empty_pipeline_plugin(
