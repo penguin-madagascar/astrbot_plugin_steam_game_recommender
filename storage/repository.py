@@ -587,36 +587,11 @@ class SQLiteCacheRepository:
             connection = self._connect()
             try:
                 with connection:
-                    connection.execute(
-                        """
-                        INSERT INTO steam_account_bindings(
-                            chat_platform,
-                            chat_user_id,
-                            steam_id64,
-                            account_kind,
-                            display_value,
-                            metadata_json,
-                            created_at,
-                            updated_at
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(chat_platform, chat_user_id) DO UPDATE SET
-                            steam_id64 = excluded.steam_id64,
-                            account_kind = excluded.account_kind,
-                            display_value = excluded.display_value,
-                            metadata_json = excluded.metadata_json,
-                            updated_at = excluded.updated_at
-                        """,
-                        (
-                            binding.chat_platform,
-                            binding.chat_user_id,
-                            binding.steam_id64,
-                            binding.account_kind,
-                            binding.display_value,
-                            json.dumps(binding.metadata, ensure_ascii=False),
-                            binding.created_at or now,
-                            now,
-                        ),
+                    self._upsert_steam_account_binding_row(
+                        connection,
+                        binding,
+                        metadata=binding.metadata,
+                        now=now,
                     )
             except (sqlite3.Error, TypeError, ValueError, OverflowError):
                 raise CacheStorageError("account_binding_write_failure") from None
@@ -630,6 +605,131 @@ class SQLiteCacheRepository:
         if saved is None:
             raise CacheStorageError("account_binding_write_failure")
         return saved
+
+    async def upsert_steam_account_binding_claiming_legacy(
+        self,
+        binding: SteamAccountBinding,
+        *,
+        legacy_platform: str,
+    ) -> SteamAccountBinding:
+        return await asyncio.to_thread(
+            self._upsert_steam_account_binding_claiming_legacy_sync,
+            binding,
+            legacy_platform,
+        )
+
+    def _upsert_steam_account_binding_claiming_legacy_sync(
+        self,
+        binding: SteamAccountBinding,
+        legacy_platform: str,
+    ) -> SteamAccountBinding:
+        source_platform = str(legacy_platform or "default").strip() or "default"
+        target_platform = binding.chat_platform or "default"
+        metadata = dict(binding.metadata)
+        now = time.time()
+        with self._lock:
+            connection = self._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                if source_platform != target_platform:
+                    source = steam_account_binding_from_row(
+                        self._select_steam_account_binding_row(
+                            connection,
+                            source_platform,
+                            binding.chat_user_id,
+                        )
+                    )
+                    claimed_by = (
+                        str(
+                            source.metadata.get("migrated_to_platform_instance")
+                            or ""
+                        ).strip()
+                        if source is not None
+                        else ""
+                    )
+                    if source is not None and claimed_by in {"", target_platform}:
+                        source_metadata = dict(source.metadata)
+                        source_metadata["migrated_to_platform_instance"] = (
+                            target_platform
+                        )
+                        metadata["migrated_from_platform"] = source_platform
+                        connection.execute(
+                            """
+                            UPDATE steam_account_bindings
+                            SET metadata_json = ?, updated_at = ?
+                            WHERE chat_platform = ? AND chat_user_id = ?
+                            """,
+                            (
+                                json.dumps(source_metadata, ensure_ascii=False),
+                                now,
+                                source_platform,
+                                binding.chat_user_id,
+                            ),
+                        )
+                self._upsert_steam_account_binding_row(
+                    connection,
+                    binding,
+                    metadata=metadata,
+                    now=now,
+                )
+                saved = steam_account_binding_from_row(
+                    self._select_steam_account_binding_row(
+                        connection,
+                        target_platform,
+                        binding.chat_user_id,
+                    )
+                )
+                connection.commit()
+            except (sqlite3.Error, TypeError, ValueError, OverflowError):
+                if connection.in_transaction:
+                    connection.rollback()
+                raise CacheStorageError("account_binding_write_failure") from None
+            finally:
+                connection.close()
+                self._secure_database_files()
+        if saved is None:
+            raise CacheStorageError("account_binding_write_failure")
+        return saved
+
+    @staticmethod
+    def _upsert_steam_account_binding_row(
+        connection: sqlite3.Connection,
+        binding: SteamAccountBinding,
+        *,
+        metadata: dict[str, Any],
+        now: float,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO steam_account_bindings(
+                chat_platform,
+                chat_user_id,
+                steam_id64,
+                account_kind,
+                display_value,
+                metadata_json,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chat_platform, chat_user_id) DO UPDATE SET
+                steam_id64 = excluded.steam_id64,
+                account_kind = excluded.account_kind,
+                display_value = excluded.display_value,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                binding.chat_platform,
+                binding.chat_user_id,
+                binding.steam_id64,
+                binding.account_kind,
+                binding.display_value,
+                json.dumps(metadata, ensure_ascii=False),
+                binding.created_at or now,
+                now,
+            ),
+        )
 
     async def get_steam_account_binding(
         self,
@@ -692,6 +792,13 @@ class SQLiteCacheRepository:
                 ).fetchone()
                 source = steam_account_binding_from_row(source_row)
                 if source is None:
+                    connection.commit()
+                    return None
+
+                claimed_by = str(
+                    source.metadata.get("migrated_to_platform_instance") or ""
+                ).strip()
+                if claimed_by and claimed_by != target_platform:
                     connection.commit()
                     return None
 
@@ -780,6 +887,70 @@ class SQLiteCacheRepository:
             chat_user_id,
         )
 
+    async def delete_steam_account_data(
+        self,
+        chat_platform: str,
+        chat_user_id: str,
+        *,
+        recommendation_owner_scope: str,
+    ) -> list[SteamAccountBinding]:
+        return await asyncio.to_thread(
+            self._delete_steam_account_data_sync,
+            chat_platform,
+            chat_user_id,
+            recommendation_owner_scope,
+        )
+
+    def _delete_steam_account_data_sync(
+        self,
+        chat_platform: str,
+        chat_user_id: str,
+        recommendation_owner_scope: str,
+    ) -> list[SteamAccountBinding]:
+        current_platform = chat_platform or "default"
+        with self._lock:
+            connection = self._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                deleted = self._steam_account_binding_family(
+                    connection,
+                    current_platform,
+                    chat_user_id,
+                )
+                owner_scopes = {
+                    str(recommendation_owner_scope or "").strip(),
+                    *(
+                        f"steam-account:{binding.steam_id64}"
+                        for binding in deleted
+                    ),
+                }
+                owner_scopes.discard("")
+                if owner_scopes:
+                    connection.executemany(
+                        "DELETE FROM cache WHERE owner_scope = ?",
+                        [(owner_scope,) for owner_scope in sorted(owner_scopes)],
+                    )
+                if deleted:
+                    connection.executemany(
+                        """
+                        DELETE FROM steam_account_bindings
+                        WHERE chat_platform = ? AND chat_user_id = ?
+                        """,
+                        [
+                            (binding.chat_platform, binding.chat_user_id)
+                            for binding in deleted
+                        ],
+                    )
+                connection.commit()
+                return deleted
+            except sqlite3.Error:
+                if connection.in_transaction:
+                    connection.rollback()
+                raise CacheStorageError("account_data_delete_failure") from None
+            finally:
+                connection.close()
+                self._secure_database_files()
+
     def _delete_steam_account_binding_family_sync(
         self,
         chat_platform: str,
@@ -790,33 +961,14 @@ class SQLiteCacheRepository:
             connection = self._connect()
             try:
                 connection.execute("BEGIN IMMEDIATE")
-                current = steam_account_binding_from_row(
-                    self._select_steam_account_binding_row(
-                        connection,
-                        current_platform,
-                        chat_user_id,
-                    )
+                deleted = self._steam_account_binding_family(
+                    connection,
+                    current_platform,
+                    chat_user_id,
                 )
-                if current is None:
+                if not deleted:
                     connection.commit()
                     return []
-
-                deleted = [current]
-                legacy_platform = current.metadata.get("migrated_from_platform")
-                if isinstance(legacy_platform, str) and legacy_platform:
-                    legacy = steam_account_binding_from_row(
-                        self._select_steam_account_binding_row(
-                            connection,
-                            legacy_platform,
-                            chat_user_id,
-                        )
-                    )
-                    if (
-                        legacy is not None
-                        and legacy.metadata.get("migrated_to_platform_instance")
-                        == current_platform
-                    ):
-                        deleted.append(legacy)
 
                 connection.executemany(
                     """
@@ -839,6 +991,40 @@ class SQLiteCacheRepository:
             finally:
                 connection.close()
                 self._secure_database_files()
+
+    def _steam_account_binding_family(
+        self,
+        connection: sqlite3.Connection,
+        current_platform: str,
+        chat_user_id: str,
+    ) -> list[SteamAccountBinding]:
+        current = steam_account_binding_from_row(
+            self._select_steam_account_binding_row(
+                connection,
+                current_platform,
+                chat_user_id,
+            )
+        )
+        if current is None:
+            return []
+
+        family = [current]
+        legacy_platform = current.metadata.get("migrated_from_platform")
+        if isinstance(legacy_platform, str) and legacy_platform:
+            legacy = steam_account_binding_from_row(
+                self._select_steam_account_binding_row(
+                    connection,
+                    legacy_platform,
+                    chat_user_id,
+                )
+            )
+            if (
+                legacy is not None
+                and legacy.metadata.get("migrated_to_platform_instance")
+                == current_platform
+            ):
+                family.append(legacy)
+        return family
 
     async def delete_steam_account_binding(
         self,

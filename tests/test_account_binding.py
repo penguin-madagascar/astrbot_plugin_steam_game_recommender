@@ -15,6 +15,9 @@ from astrbot_plugin_steam_game_recommender.services.account_binding import (
     platform_name_from_event,
     recommendation_scope_from_event,
 )
+from astrbot_plugin_steam_game_recommender.services.recommendation_memory import (
+    recommendation_owner_scope,
+)
 from astrbot_plugin_steam_game_recommender.storage import repository as repository_module
 from astrbot_plugin_steam_game_recommender.storage.models import SteamAccountBinding
 from astrbot_plugin_steam_game_recommender.storage.repository import SQLiteCacheRepository
@@ -229,6 +232,146 @@ class AccountBindingRepositoryTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 current.metadata["migrated_from_platform"],
                 "aiocqhttp",
+            )
+
+    async def test_lazy_migration_cannot_take_over_another_instance_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = SQLiteCacheRepository(Path(tmpdir) / "cache.sqlite3")
+            await repo.upsert_steam_account_binding(
+                SteamAccountBinding(
+                    chat_platform="aiocqhttp",
+                    chat_user_id="user-1",
+                    steam_id64="76561198000000000",
+                    account_kind="steam_id64",
+                    display_value="76561198000000000",
+                    metadata={
+                        "migrated_to_platform_instance": "onebot-instance-a"
+                    },
+                )
+            )
+
+            migrated = await repo.migrate_steam_account_binding(
+                "aiocqhttp",
+                "onebot-instance-b",
+                "user-1",
+            )
+
+            legacy = await repo.get_steam_account_binding("aiocqhttp", "user-1")
+            self.assertIsNone(migrated)
+            self.assertIsNotNone(legacy)
+            assert legacy is not None
+            self.assertEqual(
+                legacy.metadata["migrated_to_platform_instance"],
+                "onebot-instance-a",
+            )
+            self.assertIsNone(
+                await repo.get_steam_account_binding(
+                    "onebot-instance-b",
+                    "user-1",
+                )
+            )
+
+    async def test_explicit_rebind_claims_unowned_legacy_for_atomic_deletion(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = SQLiteCacheRepository(Path(tmpdir) / "cache.sqlite3")
+            await repo.upsert_steam_account_binding(
+                SteamAccountBinding(
+                    chat_platform="aiocqhttp",
+                    chat_user_id="user-1",
+                    steam_id64="76561198000000000",
+                    account_kind="steam_id64",
+                    display_value="76561198000000000",
+                )
+            )
+            saved = await repo.upsert_steam_account_binding_claiming_legacy(
+                SteamAccountBinding(
+                    chat_platform="onebot-instance-b",
+                    chat_user_id="user-1",
+                    steam_id64="76561198000000001",
+                    account_kind="steam_id64",
+                    display_value="76561198000000001",
+                ),
+                legacy_platform="aiocqhttp",
+            )
+            owner = recommendation_owner_scope("onebot-instance-b", "user-1")
+            for key, owner_scope in (
+                ("legacy-library", "steam-account:76561198000000000"),
+                ("current-library", "steam-account:76561198000000001"),
+                ("recommendation", owner),
+                ("unrelated", "steam-account:76561198000000002"),
+            ):
+                await repo.set_json(
+                    key,
+                    {"key": key},
+                    ttl_hours=24,
+                    owner_scope=owner_scope,
+                )
+
+            deleted = await repo.delete_steam_account_data(
+                "onebot-instance-b",
+                "user-1",
+                recommendation_owner_scope=owner,
+            )
+
+            self.assertEqual(
+                saved.metadata["migrated_from_platform"],
+                "aiocqhttp",
+            )
+            self.assertEqual(
+                [binding.chat_platform for binding in deleted],
+                ["onebot-instance-b", "aiocqhttp"],
+            )
+            self.assertIsNone(
+                await repo.get_steam_account_binding("onebot-instance-b", "user-1")
+            )
+            self.assertIsNone(
+                await repo.get_steam_account_binding("aiocqhttp", "user-1")
+            )
+            for key in ("legacy-library", "current-library", "recommendation"):
+                self.assertIsNone(await repo.get_json(key, 24))
+            self.assertEqual(
+                await repo.get_json("unrelated", 24),
+                {"key": "unrelated"},
+            )
+
+    async def test_explicit_rebind_does_not_claim_another_instance_legacy(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = SQLiteCacheRepository(Path(tmpdir) / "cache.sqlite3")
+            await repo.upsert_steam_account_binding(
+                SteamAccountBinding(
+                    chat_platform="aiocqhttp",
+                    chat_user_id="user-1",
+                    steam_id64="76561198000000000",
+                    account_kind="steam_id64",
+                    display_value="76561198000000000",
+                    metadata={
+                        "migrated_to_platform_instance": "onebot-instance-a"
+                    },
+                )
+            )
+
+            saved = await repo.upsert_steam_account_binding_claiming_legacy(
+                SteamAccountBinding(
+                    chat_platform="onebot-instance-b",
+                    chat_user_id="user-1",
+                    steam_id64="76561198000000001",
+                    account_kind="steam_id64",
+                    display_value="76561198000000001",
+                ),
+                legacy_platform="aiocqhttp",
+            )
+
+            legacy = await repo.get_steam_account_binding("aiocqhttp", "user-1")
+            self.assertNotIn("migrated_from_platform", saved.metadata)
+            self.assertIsNotNone(legacy)
+            assert legacy is not None
+            self.assertEqual(
+                legacy.metadata["migrated_to_platform_instance"],
+                "onebot-instance-a",
             )
 
     async def test_binding_family_delete_atomically_removes_migrated_pair(self) -> None:
