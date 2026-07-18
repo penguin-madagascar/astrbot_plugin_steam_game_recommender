@@ -100,7 +100,7 @@ class SteamOnlyMetadataTest(unittest.TestCase):
             "/gamerec 排除已有 -US 双人合作解谜，预算 30 美元",
             "/gamerec 类似黑暗之魂的游戏",
             "/gamerec 推荐 3 款支持简体中文、预算 100 元以内的合作游戏",
-            "/gamerec 模拟类游戏，要有节日活动，最好由 ConcernedApe 开发",
+            "/gamerec 模拟类游戏，希望有丰富的长期游玩内容，最好由 ConcernedApe 开发",
             "/gamerec 即将发售的类魂游戏",
         ):
             self.assertIn(example, readme)
@@ -110,7 +110,12 @@ class SteamOnlyMetadataTest(unittest.TestCase):
             "升级前已经设置为 5 款",
             "参考游戏本身不会作为结果返回",
             "续作和同系列作品仍可参与推荐",
-            "Steam 标签、类型和商店描述",
+            "### 更细致的玩法要求",
+            "有些需求无法直接对应固定的 Steam 分类",
+            "Steam 标签、类型和商店介绍",
+            "明确不符合或无法确认的游戏会被移除",
+            "检查服务暂时异常时，游戏会保留并标注未确认",
+            "资料不足的游戏只会在结果不足时补位",
             "即使写了“仅限”或“只要”",
             "不会用完全没有核心玩法直接证据的候选凑数",
             "部分核心特征证据不足的候选仍可能返回",
@@ -132,6 +137,17 @@ class SteamOnlyMetadataTest(unittest.TestCase):
             "解绑时会删除当前平台实例的绑定",
         ):
             self.assertIn(user_visible_behavior, readme)
+
+        self.assertIn(
+            "推荐理由：合作解谜玩法符合你的需求，Steam 玩家评价也较稳定。",
+            readme,
+        )
+        self.assertIn(
+            "不推荐理由：暂时无法确认是否支持简体中文。",
+            readme,
+        )
+        for removed_example in ("节日活动", "结婚", "昼夜循环"):
+            self.assertNotIn(removed_example, readme)
 
         for implementation_detail in (
             "语义分 =",
