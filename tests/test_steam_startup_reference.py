@@ -202,12 +202,17 @@ class StorefrontContractRegressionTest(unittest.IsolatedAsyncioTestCase):
             url="https://store.steampowered.com/app/10/",
         )
 
-        for response in (redirected, missing_main):
+        for response, expected_calls in (
+            (redirected, 1),
+            (missing_main, 2),
+        ):
             with self.subTest(response=response):
                 cache = MemoryCache()
-                client = SteamClient(QueueHttpClient([response]), cache)
+                http_client = QueueHttpClient([response] * expected_calls)
+                client = SteamClient(http_client, cache)
                 with self.assertRaises(SteamApiError):
                     await client.get_store_page_tags(10)
+                self.assertEqual(len(http_client.calls), expected_calls)
                 self.assertEqual(cache.payloads, {})
 
 
@@ -294,7 +299,7 @@ class SteamReadRetryRegressionTest(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(sleeps, [])
 
-    async def test_non_retryable_404_and_contract_failure_each_attempt_once(self) -> None:
+    async def test_non_retryable_404_attempts_once(self) -> None:
         not_found_http = QueueHttpClient([json_response({}, status_code=404)])
         with self.assertRaises(SteamApiError):
             await SteamClient(not_found_http, MemoryCache()).search_game_refs(
@@ -302,20 +307,33 @@ class SteamReadRetryRegressionTest(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(len(not_found_http.calls), 1)
 
-        contract_http = QueueHttpClient([json_response({"success": 1})])
-        with self.assertRaises(SteamApiError):
-            await SteamClient(contract_http, MemoryCache()).search_storefront_tag(19)
-        self.assertEqual(len(contract_http.calls), 1)
+    async def test_temporary_storefront_contract_failure_retries_once(self) -> None:
+        contract_http = QueueHttpClient(
+            [
+                json_response({"success": 1}),
+                json_response(storefront_payload()),
+            ]
+        )
 
-    async def test_storesearch_contract_failure_is_not_retried_or_cached(self) -> None:
+        page = await SteamClient(
+            contract_http,
+            MemoryCache(),
+        ).search_storefront_tag(19)
+
+        self.assertEqual([hit.appid for hit in page.hits], [10])
+        self.assertEqual(len(contract_http.calls), 2)
+
+    async def test_storesearch_contract_failure_retries_once_and_is_not_cached(
+        self,
+    ) -> None:
         cache = MemoryCache()
-        http_client = QueueHttpClient([json_response({})])
+        http_client = QueueHttpClient([json_response({}), json_response({})])
         client = SteamClient(http_client, cache)
 
         with self.assertRaises(SteamApiError):
             await client.search_game_refs(search="Portal")
 
-        self.assertEqual(len(http_client.calls), 1)
+        self.assertEqual(len(http_client.calls), 2)
         self.assertEqual(cache.payloads, {})
 
 

@@ -101,6 +101,21 @@ class SteamApiError(RuntimeError):
 class SteamTransientError(SteamApiError):
     transient = True
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "steam_api_failure",
+        status_code: int | None = None,
+        retry_after: float | None = None,
+    ) -> None:
+        self.retry_after = retry_after
+        super().__init__(
+            message,
+            code=code,
+            status_code=status_code,
+        )
+
 
 @dataclass(frozen=True)
 class SteamReviewSummary:
@@ -569,7 +584,7 @@ class SteamClient:
 
         expected_url = f"{STEAM_STORE_BASE_URL}/{resolved_appid}/"
         tags: list[str] | None = None
-        for _attempt in range(2):
+        for attempt in range(2):
             try:
                 response = await self._request_get(
                     expected_url,
@@ -578,7 +593,9 @@ class SteamClient:
                     cookies=STEAM_AGE_COOKIES,
                 )
                 tags = validated_store_page_tags(resolved_appid, response)
-            except SteamTransientError:
+            except SteamTransientError as exc:
+                if attempt == 0:
+                    await self._sleep_before_retry(exc)
                 continue
             break
         if tags is None:
@@ -808,6 +825,7 @@ class SteamClient:
                 )
                 return payload, fetched_at
             if attempt == 0:
+                await self._sleep_before_retry(error)
                 continue
 
         stale = await self.cache.get_json(
@@ -875,7 +893,7 @@ class SteamClient:
         **kwargs: Any,
     ) -> tuple[Any, Any]:
         last_error: SteamTransientError | None = None
-        for _attempt in range(2):
+        for attempt in range(2):
             try:
                 response = await self._request_get(
                     url,
@@ -893,6 +911,8 @@ class SteamClient:
                 parsed = contract(payload)
             except SteamTransientError as exc:
                 last_error = exc
+                if attempt == 0:
+                    await self._sleep_before_retry(exc)
                 continue
             except SteamApiError:
                 raise
@@ -908,7 +928,7 @@ class SteamClient:
         **kwargs: Any,
     ) -> tuple[str, Any]:
         last_error: SteamTransientError | None = None
-        for _attempt in range(2):
+        for attempt in range(2):
             try:
                 response = await self._request_get(
                     url,
@@ -926,6 +946,8 @@ class SteamClient:
                 parsed = contract(payload)
             except SteamTransientError as exc:
                 last_error = exc
+                if attempt == 0:
+                    await self._sleep_before_retry(exc)
                 continue
             except SteamApiError:
                 raise
@@ -958,26 +980,31 @@ class SteamClient:
                 raise
             except httpx.HTTPError as exc:
                 retryable = is_retryable_steam_read_error(exc)
+                retry_after = retry_after_seconds(exc) if retryable else None
                 if attempt + 1 < attempts and retryable:
-                    retry_after = retry_after_seconds(exc)
                     if retry_after is not None:
                         await self._sleeper(retry_after)
                     continue
-                error_type = SteamTransientError if retryable else SteamApiError
                 response = getattr(exc, "response", None)
                 status_code = getattr(response, "status_code", None)
-                raise error_type(
-                    "Steam 服务暂时不可用，请稍后重试。"
-                    if retryable
-                    else "Steam 请求未成功。",
-                    code=(
-                        "steam_request_transient"
-                        if retryable
-                        else "steam_request_rejected"
-                    ),
-                    status_code=(status_code if isinstance(status_code, int) else None),
+                resolved_status = status_code if isinstance(status_code, int) else None
+                if retryable:
+                    raise SteamTransientError(
+                        "Steam 服务暂时不可用，请稍后重试。",
+                        code="steam_request_transient",
+                        status_code=resolved_status,
+                        retry_after=retry_after,
+                    ) from None
+                raise SteamApiError(
+                    "Steam 请求未成功。",
+                    code="steam_request_rejected",
+                    status_code=resolved_status,
                 ) from None
         raise AssertionError("unreachable")
+
+    async def _sleep_before_retry(self, error: SteamTransientError) -> None:
+        if error.retry_after is not None:
+            await self._sleeper(error.retry_after)
 
     async def _set_cache_json(
         self,
