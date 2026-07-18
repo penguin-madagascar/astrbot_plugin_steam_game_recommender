@@ -9,6 +9,7 @@ from typing import Any
 
 from ..storage.models import GameCandidate, RankedGame, RecommendationEvidence
 from .recommendation_scoring import popularity
+from .safe_errors import log_external_failure
 from .tag_presentation import sanitize_user_facing_tag_text
 
 logger = logging.getLogger(__name__)
@@ -71,8 +72,11 @@ async def generate_recommendation_reasons(
                 evidence,
             )
         except Exception as exc:
-            logger.warning(
-                "Steam recommendation reason generation failed for %s: %s", game.appid, exc
+            log_external_failure(
+                logger,
+                "recommendation_reason_failed",
+                stage="recommendation_reason",
+                exc=exc,
             )
             result = None
         if result is None:
@@ -110,7 +114,12 @@ async def generate_unplayed_reason(
         )
         result = validate_reason_response(raw, game.appid, evidence)
     except Exception as exc:
-        logger.warning("Steam unplayed reason generation failed for %s: %s", game.appid, exc)
+        log_external_failure(
+            logger,
+            "unplayed_reason_failed",
+            stage="unplayed_reason",
+            exc=exc,
+        )
         result = None
     if result is None:
         return fallback_unplayed_reason(evidence)
@@ -631,5 +640,11 @@ async def resolve_provider_id(context: Any, event: Any, provider_id: str) -> str
     try:
         return str(await getter(umo=event.unified_msg_origin) or "")
     except Exception as exc:
-        logger.debug("Failed to resolve current LLM provider: %s", exc)
+        log_external_failure(
+            logger,
+            "provider_resolution_failed",
+            stage="reason_provider_resolution",
+            exc=exc,
+            level=logging.DEBUG,
+        )
         return ""

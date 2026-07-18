@@ -75,6 +75,27 @@ class ParseOutcomeTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("provider unavailable", notice.text)
         self.assertEqual(len(context.calls), 1)
 
+    async def test_provider_exception_text_is_not_logged(self) -> None:
+        secret = "secret /private/provider/path?token=abcdef"
+        warnings: list[tuple[object, ...]] = []
+        parser = PreferenceParser(
+            SequencedContext(RuntimeError(secret)),
+            provider_id="provider/test",
+        )
+
+        with patch.object(
+            parser_module.logger,
+            "warning",
+            side_effect=lambda *args, **_kwargs: warnings.append(args),
+        ):
+            outcome = await parser.parse_preference(object(), "推荐解谜游戏")
+
+        output = " ".join(str(value) for call in warnings for value in call)
+        self.assertEqual(outcome.path, "keyword_fallback")
+        self.assertNotIn(secret, output)
+        self.assertNotIn("token=", output)
+        self.assertIn("PreferenceProviderError", output)
+
     async def test_invalid_payload_repairs_exactly_once(self) -> None:
         context = SequencedContext(
             "not json",

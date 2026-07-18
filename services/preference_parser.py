@@ -18,6 +18,7 @@ from ..storage.models import (
 )
 from .preference_rules import infer_preference_from_text, merge_text_preference
 from .run_notices import RunNotice
+from .safe_errors import log_external_failure
 
 SYSTEM_PROMPT = """你是游戏推荐插件的偏好解析器。
 只把用户自然语言解析成 JSON，不要推荐游戏，不要补充解释，不要使用 Markdown。
@@ -140,13 +141,23 @@ class PreferenceParser:
         try:
             raw = await self._llm_parse(event, text)
         except PreferenceProviderError as exc:
-            logger.warning(f"游戏推荐偏好模型不可用，使用关键词 fallback：{exc}")
+            log_external_failure(
+                logger,
+                "preference_parse_provider_failed",
+                stage="preference_parse",
+                exc=exc,
+            )
             return self._fallback_outcome(text)
 
         try:
             parsed = parse_preference_json(raw)
         except PreferencePayloadError as exc:
-            logger.warning(f"游戏推荐偏好 JSON 无效，尝试修复一次：{exc}")
+            log_external_failure(
+                logger,
+                "preference_parse_contract_failed",
+                stage="preference_parse_contract",
+                exc=exc,
+            )
         else:
             preference = merge_text_preference(parsed, text)
             logger.debug(
@@ -158,13 +169,23 @@ class PreferenceParser:
         try:
             fixed = await self._llm_repair(event, text)
         except PreferenceProviderError as exc:
-            logger.warning(f"游戏推荐偏好 JSON 修复模型不可用，使用关键词 fallback：{exc}")
+            log_external_failure(
+                logger,
+                "preference_repair_provider_failed",
+                stage="preference_repair",
+                exc=exc,
+            )
             return self._fallback_outcome(text)
 
         try:
             parsed = parse_preference_json(fixed)
         except PreferencePayloadError as exc:
-            logger.warning(f"游戏推荐偏好 JSON 修复无效，使用关键词 fallback：{exc}")
+            log_external_failure(
+                logger,
+                "preference_repair_contract_failed",
+                stage="preference_repair_contract",
+                exc=exc,
+            )
             return self._fallback_outcome(text)
         else:
             preference = merge_text_preference(parsed, text)

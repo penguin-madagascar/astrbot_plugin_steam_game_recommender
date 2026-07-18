@@ -86,7 +86,6 @@ class ReasonValidationTest(unittest.TestCase):
                         evidence=self.evidence,
                     )
                 )
-
     def test_rejects_wrong_sentence_count_and_overlong_reason(self) -> None:
         one_sentence = {
             "appid": 123,
@@ -232,6 +231,29 @@ class ReasonValidationTest(unittest.TestCase):
         )
 
         self.assertIsNone(result)
+
+
+class ReasonFailureLoggingTest(unittest.IsolatedAsyncioTestCase):
+    async def test_provider_exception_text_is_not_logged(self) -> None:
+        secret = "secret /private/provider/path?token=abcdef"
+        game = ranked_game(1)
+
+        with self.assertLogs(
+            "astrbot_plugin_steam_game_recommender.services.explanation_builder",
+            level="WARNING",
+        ) as captured:
+            result = await generate_recommendation_reasons(
+                ThrowingReasonContext(secret),
+                FakeEvent(),
+                "provider-1",
+                [game],
+            )
+
+        output = "\n".join(captured.output)
+        self.assertEqual(len(result), 1)
+        self.assertNotIn(secret, output)
+        self.assertNotIn("token=", output)
+        self.assertIn("error_type=RuntimeError", output)
 
 
 class ConcurrentReasonGenerationTest(unittest.IsolatedAsyncioTestCase):
@@ -483,6 +505,14 @@ class StaticReasonContext:
 
     async def llm_generate(self, **_kwargs):
         return FakeResponse(json.dumps(self.payload, ensure_ascii=False))
+
+
+class ThrowingReasonContext:
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+    async def llm_generate(self, **_kwargs):
+        raise RuntimeError(self.message)
 
 
 if __name__ == "__main__":
