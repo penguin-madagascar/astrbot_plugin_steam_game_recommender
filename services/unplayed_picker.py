@@ -19,7 +19,29 @@ RANDOM_RECOMMENDATION_TIMEOUT_SECONDS = 20.0
 
 
 class UnplayedRecommendationError(ValueError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "unplayed_recommendation_unavailable",
+    ) -> None:
+        self.code = code
+        super().__init__(message)
+
+
+UNPLAYED_USER_MESSAGES = {
+    "no_unplayed_games": "Steam 游戏库中没有未游玩过的游戏。",
+    "random_scan_timeout": "随机推荐检查超时，请稍后再试。",
+    "review_service_unavailable": "Steam 评测服务暂不可用，请稍后再试。",
+    "no_qualified_games": "没有找到达到当前评测门槛的未玩游戏。",
+}
+
+
+def unplayed_user_message(error: UnplayedRecommendationError) -> str:
+    return UNPLAYED_USER_MESSAGES.get(
+        error.code,
+        "随机推荐暂不可用，请稍后重试。",
+    )
 
 
 class UnplayedSteamClient(Protocol):
@@ -52,7 +74,10 @@ async def pick_random_unplayed_game(
         if game.appid
     ]
     if not candidates:
-        raise UnplayedRecommendationError("Steam 游戏库中没有未游玩过的游戏。")
+        raise UnplayedRecommendationError(
+            "Steam 游戏库中没有未游玩过的游戏。",
+            code="no_unplayed_games",
+        )
 
     shuffled = list(candidates)
     if rng is None:
@@ -108,16 +133,29 @@ async def pick_random_unplayed_game(
         )
         for start in range(0, len(shuffled), batch_size):
             batch = shuffled[start : start + batch_size]
-            outcomes = await asyncio.gather(
-                *(
+            tasks = [
+                asyncio.create_task(
                     check_candidate(owned_game, start + position + 1)
-                    for position, owned_game in enumerate(batch)
                 )
-            )
-            review_success_count += sum(succeeded for succeeded, _result in outcomes)
-            for _succeeded, result in outcomes:
-                if result is not None:
-                    return result
+                for position, owned_game in enumerate(batch)
+            ]
+            task_order = {task: index for index, task in enumerate(tasks)}
+            pending = set(tasks)
+            try:
+                while pending:
+                    done, pending = await asyncio.wait(
+                        pending,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for task in sorted(done, key=task_order.__getitem__):
+                        succeeded, result = task.result()
+                        review_success_count += int(succeeded)
+                        if result is not None:
+                            return result
+            finally:
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
         return None
 
     parsed_timeout = optional_float(timeout_seconds)
@@ -136,15 +174,22 @@ async def pick_random_unplayed_game(
             timeout=resolved_timeout,
         )
     except TimeoutError as exc:
-        raise UnplayedRecommendationError("随机推荐检查超时，请稍后再试。") from exc
+        raise UnplayedRecommendationError(
+            "随机推荐检查超时，请稍后再试。",
+            code="random_scan_timeout",
+        ) from exc
     if recommendation is not None:
         return recommendation
 
     if review_success_count == 0:
-        raise UnplayedRecommendationError("Steam 评测服务暂不可用，请稍后再试。")
+        raise UnplayedRecommendationError(
+            "Steam 评测服务暂不可用，请稍后再试。",
+            code="review_service_unavailable",
+        )
     raise UnplayedRecommendationError(
         "没有找到未游玩且评价过线的游戏"
-        f"（门槛：至少 {min_count} 条评测、好评率不低于 {min_ratio:.0%}）。"
+        f"（门槛：至少 {min_count} 条评测、好评率不低于 {min_ratio:.0%}）。",
+        code="no_qualified_games",
     )
 
 

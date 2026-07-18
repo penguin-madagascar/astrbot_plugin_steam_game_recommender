@@ -362,6 +362,26 @@ class UnplayedPickerTest(unittest.IsolatedAsyncioTestCase):
                 timeout_seconds=0.01,
             )
 
+    async def test_returns_completed_match_without_waiting_for_slow_batch_peer(
+        self,
+    ) -> None:
+        from astrbot_plugin_steam_game_recommender.services.unplayed_picker import (
+            pick_random_unplayed_game,
+        )
+
+        result = await pick_random_unplayed_game(
+            [
+                SteamOwnedGame(appid=1, name="Ready Game", playtime_forever=0),
+                SteamOwnedGame(appid=2, name="Slow Game", playtime_forever=0),
+            ],
+            ReadyThenSlowClient(),
+            rng=NoShuffleRandom(),
+            concurrency=2,
+            timeout_seconds=0.05,
+        )
+
+        self.assertEqual(result.game.appid, 1)
+
     async def test_non_finite_picker_options_use_safe_defaults(self) -> None:
         from astrbot_plugin_steam_game_recommender.services.unplayed_picker import (
             pick_random_unplayed_game,
@@ -452,6 +472,22 @@ class SlowReviewClient:
 
     async def get_game_detail(self, _appid: int) -> GameCandidate:
         raise AssertionError("low-review games must not load details")
+
+
+class ReadyThenSlowClient:
+    async def get_review_summary(self, appid: int) -> FakeReview:
+        if appid == 2:
+            await asyncio.sleep(1)
+        return FakeReview(total_reviews=500, positive_ratio=0.9)
+
+    async def get_game_detail(self, appid: int) -> GameCandidate:
+        return GameCandidate(
+            title=game_title(appid),
+            appid=appid,
+            app_type="game",
+            platforms=["PC"],
+            stores=["Steam"],
+        )
 
 
 class ProgrammingErrorReviewClient:
