@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import tempfile
 import time
@@ -19,6 +20,7 @@ from astrbot_plugin_steam_game_recommender.clients.steam import (
 from astrbot_plugin_steam_game_recommender.storage import repository as repository_module
 from astrbot_plugin_steam_game_recommender.storage.models import (
     GameCandidate,
+    SteamAccountBinding,
     SteamSearchHit,
 )
 from astrbot_plugin_steam_game_recommender.storage.repository import SQLiteCacheRepository
@@ -591,6 +593,97 @@ class SteamClientTest(unittest.IsolatedAsyncioTestCase):
         await client.get_owned_games("76561198000000000")
 
         self.assertEqual(http_client.call_count, 1)
+
+    async def test_owned_games_finishing_after_unbind_does_not_restore_cache(
+        self,
+    ) -> None:
+        request_started = asyncio.Event()
+        release_response = asyncio.Event()
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            request_started.set()
+            await release_response.wait()
+            return httpx.Response(
+                200,
+                json={"response": {"games": []}},
+                request=request,
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache = SQLiteCacheRepository(Path(temp_dir) / "cache.sqlite3")
+            await cache.upsert_steam_account_binding(
+                SteamAccountBinding(
+                    chat_platform="onebot-instance",
+                    chat_user_id="user-1",
+                    steam_id64="76561198000000000",
+                    account_kind="steam_id64",
+                    display_value="76561198000000000",
+                )
+            )
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ) as http:
+                request = asyncio.create_task(
+                    SteamClient(
+                        http,
+                        cache,
+                        steam_api_key="PRIVATE_KEY",
+                    ).get_owned_games("76561198000000000")
+                )
+                await request_started.wait()
+                deleted = await cache.delete_steam_account_data(
+                    "onebot-instance",
+                    "user-1",
+                    recommendation_owner_scope="recommendation:user-1",
+                )
+                release_response.set()
+                await request
+
+            self.assertEqual(len(deleted), 1)
+            with sqlite3.connect(cache.db_path) as connection:
+                rows = connection.execute(
+                    "SELECT COUNT(*) FROM cache WHERE owner_scope = ?",
+                    ("steam-account:76561198000000000",),
+                ).fetchone()
+            self.assertEqual(rows, (0,))
+
+    async def test_owned_games_real_cache_reuses_data_while_account_is_bound(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache = SQLiteCacheRepository(Path(temp_dir) / "cache.sqlite3")
+            await cache.upsert_steam_account_binding(
+                SteamAccountBinding(
+                    chat_platform="onebot-instance",
+                    chat_user_id="user-1",
+                    steam_id64="76561198000000000",
+                    account_kind="steam_id64",
+                    display_value="76561198000000000",
+                )
+            )
+            http_client = FakeHttpClient(
+                {
+                    "https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/": {
+                        "response": {"games": []}
+                    }
+                }
+            )
+            client = SteamClient(
+                http_client,
+                cache,
+                steam_api_key="PRIVATE_KEY",
+            )
+
+            await client.get_owned_games("76561198000000000")
+            await client.get_owned_games("76561198000000000")
+
+            self.assertEqual(http_client.call_count, 1)
+            with sqlite3.connect(cache.db_path) as connection:
+                rows = connection.execute(
+                    "SELECT COUNT(*) FROM cache WHERE owner_scope = ?",
+                    ("steam-account:76561198000000000",),
+                ).fetchone()
+            self.assertEqual(rows, (1,))
 
     async def test_owned_games_cache_varies_by_api_key_fingerprint(self) -> None:
         cache = MemoryCache()

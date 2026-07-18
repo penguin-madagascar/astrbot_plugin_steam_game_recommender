@@ -1014,6 +1014,21 @@ class SteamClient:
         ttl_hours: int | float,
         owner_scope: str = "",
     ) -> None:
+        conditional_setter = getattr(
+            self.cache,
+            "set_json_if_steam_account_bound",
+            None,
+        )
+        if owner_scope.startswith("steam-account:") and callable(
+            conditional_setter
+        ):
+            await conditional_setter(
+                key,
+                payload,
+                ttl_hours=ttl_hours,
+                owner_scope=owner_scope,
+            )
+            return
         await set_json_with_ttl(
             self.cache,
             key,

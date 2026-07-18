@@ -257,6 +257,29 @@ class SQLiteCacheRepository:
             payload,
             resolved_ttl_hours,
             owner_scope,
+            None,
+        )
+
+    async def set_json_if_steam_account_bound(
+        self,
+        key: str,
+        payload: Any,
+        ttl_hours: int | float = CACHE_DEFAULT_TTL_HOURS,
+        *,
+        owner_scope: str,
+    ) -> bool:
+        resolved_owner = str(owner_scope or "").strip()
+        prefix = "steam-account:"
+        steam_id64 = resolved_owner.removeprefix(prefix).strip()
+        if not resolved_owner.startswith(prefix) or not steam_id64:
+            raise CacheStorageError("invalid_cache_owner")
+        return await asyncio.to_thread(
+            self._set_json_sync,
+            key,
+            payload,
+            ttl_hours,
+            resolved_owner,
+            steam_id64,
         )
 
     def _set_json_sync(
@@ -265,7 +288,8 @@ class SQLiteCacheRepository:
         payload: Any,
         ttl_hours: int | float,
         owner_scope: str,
-    ) -> None:
+        required_steam_id64: str | None,
+    ) -> bool:
         ttl = _validated_ttl_hours(ttl_hours)
         try:
             encoded = json.dumps(payload, ensure_ascii=False)
@@ -281,7 +305,7 @@ class SQLiteCacheRepository:
         with self._lock:
             connection = self._connect()
             try:
-                self._write_with_capacity(
+                written = self._write_with_capacity(
                     connection,
                     key=key,
                     encoded=encoded,
@@ -289,7 +313,10 @@ class SQLiteCacheRepository:
                     owner_scope=resolved_owner,
                     now=now,
                     expires_at=expires_at,
+                    required_steam_id64=required_steam_id64,
                 )
+                if not written:
+                    return False
                 self._successful_writes += 1
                 should_cleanup = (
                     self._successful_writes % CACHE_CLEANUP_WRITE_INTERVAL == 0
@@ -298,6 +325,7 @@ class SQLiteCacheRepository:
                 )
                 if should_cleanup:
                     self._cleanup_connection(connection, now=now, enforce_limits=True)
+                return True
             except CacheStorageError:
                 raise
             except sqlite3.Error:
@@ -317,10 +345,23 @@ class SQLiteCacheRepository:
         owner_scope: str,
         now: float,
         expires_at: float,
-    ) -> None:
+        required_steam_id64: str | None,
+    ) -> bool:
         while True:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                if required_steam_id64 is not None:
+                    still_bound = connection.execute(
+                        """
+                        SELECT 1 FROM steam_account_bindings
+                        WHERE steam_id64 = ?
+                        LIMIT 1
+                        """,
+                        (required_steam_id64,),
+                    ).fetchone()
+                    if still_bound is None:
+                        connection.commit()
+                        return False
                 existing = connection.execute(
                     "SELECT payload_bytes FROM cache WHERE key = ?",
                     (key,),
@@ -364,7 +405,7 @@ class SQLiteCacheRepository:
                         ),
                     )
                     connection.commit()
-                    return
+                    return True
 
                 deleted = self._delete_expired_batch(connection, now)
                 if not deleted:
