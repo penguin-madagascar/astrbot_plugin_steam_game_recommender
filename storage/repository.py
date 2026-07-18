@@ -50,9 +50,11 @@ class SQLiteCacheRepository:
         self._initialize()
 
     def _secure_directory(self) -> None:
-        self.db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             os.chmod(self.db_path.parent, 0o700)
+        except NotADirectoryError:
+            raise CacheStorageError("cache_directory_failure") from None
         except OSError:
             raise CacheStorageError("cache_permission_failure") from None
 

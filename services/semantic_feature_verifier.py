@@ -833,7 +833,7 @@ def apply_feature_verdicts(
                         category="supporting" if feature.role == "optional" else "constraint",
                         sentiment="positive",
                         text=(
-                            f"语义特征“{feature.normalized_text}”已由 Steam 描述核验"
+                            f"用户原文特性“{feature.source_span}”已由 Steam 描述核验"
                             + (f"：{verdict.evidence_quote}" if verdict.evidence_quote else "")
                         ),
                     )
@@ -863,7 +863,7 @@ def apply_feature_verdicts(
                             "negative" if verdict.status == "violated" else "uncertain"
                         ),
                         text=(
-                            f"可选语义特征“{feature.normalized_text}”"
+                            f"用户原文可选特性“{feature.source_span}”"
                             + (
                                 "与 Steam 描述不符"
                                 if verdict.status == "violated"

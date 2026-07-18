@@ -15,6 +15,22 @@ from astrbot_plugin_steam_game_recommender.storage.repository import SQLiteCache
 
 
 class SQLiteCacheRepositoryTest(unittest.IsolatedAsyncioTestCase):
+    def test_directory_creation_failure_does_not_expose_local_path(self) -> None:
+        secret = "/private/provider-token-secret/cache.sqlite3"
+
+        with (
+            patch.object(
+                Path,
+                "mkdir",
+                side_effect=NotADirectoryError(secret),
+            ),
+            self.assertRaises(repository_module.CacheStorageError) as raised,
+        ):
+            SQLiteCacheRepository(Path(secret))
+
+        self.assertEqual(raised.exception.code, "cache_directory_failure")
+        self.assertNotIn(secret, str(raised.exception))
+
     async def test_legacy_cache_is_rebuilt_without_losing_account_bindings(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "cache.sqlite3"

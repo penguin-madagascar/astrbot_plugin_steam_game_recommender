@@ -31,16 +31,50 @@ sys.modules.setdefault("astrbot.api", api_module)
 sys.modules.setdefault("astrbot.api.event", event_module)
 sys.modules.setdefault("astrbot.api.star", star_module)
 
-from astrbot_plugin_steam_game_recommender.services import preference_parser as parser_module
-from astrbot_plugin_steam_game_recommender.services.preference_parser import (
-    PreferencePayloadError,
+from astrbot_plugin_steam_game_recommender.services import (  # noqa: E402
+    preference_parser as parser_module,
+)
+from astrbot_plugin_steam_game_recommender.services.preference_parser import (  # noqa: E402
     PreferenceParser,
+    PreferencePayloadError,
     parse_preference_json,
 )
-from astrbot_plugin_steam_game_recommender.storage.models import GamePreference
+from astrbot_plugin_steam_game_recommender.storage.models import GamePreference  # noqa: E402
 
 
 class ParseOutcomeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_internal_field_in_first_completion_triggers_safe_repair(self) -> None:
+        secret = "provider-token-secret /private/provider/path?token=abcdef"
+        context = SequencedContext(
+            {"parse_warnings": [secret]},
+            {"genres_like": ["puzzle"]},
+        )
+        parser = PreferenceParser(context, provider_id="provider/test")
+
+        outcome = await parser.parse_preference(object(), "推荐解谜游戏")
+
+        self.assertEqual(outcome.path, "llm_repair")
+        self.assertNotIn(secret, " ".join(outcome.preference.parse_warnings))
+
+    async def test_internal_field_in_repair_falls_back_without_disclosure(self) -> None:
+        secret = "provider-token-secret /private/provider/path?token=abcdef"
+        context = SequencedContext(
+            "not json",
+            {"parse_warnings": [secret]},
+        )
+        parser = PreferenceParser(context, provider_id="provider/test")
+
+        outcome = await parser.parse_preference(object(), "推荐解谜游戏")
+
+        self.assertEqual(outcome.path, "keyword_fallback")
+        rendered = " ".join(
+            [
+                *outcome.preference.parse_warnings,
+                *(notice.text for notice in outcome.prelude_messages),
+            ]
+        )
+        self.assertNotIn(secret, rendered)
+
     async def test_success_returns_outcome_and_ignores_llm_result_count(self) -> None:
         context = SequencedContext(
             {

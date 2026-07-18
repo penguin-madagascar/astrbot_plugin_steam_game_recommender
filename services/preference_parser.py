@@ -5,11 +5,10 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import ValidationError
-
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import Context
+from pydantic import ValidationError
 
 from ..storage.models import (
     MAX_REFERENCE_ALIASES_PER_ENTITY,
@@ -81,7 +80,8 @@ PREFERENCE_SCHEMA_HINT = """
   “只要某公司”仍是软偏好。
 - 如果把用户原文中的玩法短语翻译为不同语言的规范标签，必须在 explicit_tag_evidence
   中写入 {"target":"genres_like","tag":"规范标签","span":"原文最短连续片段"}；
-  target 只能是 required_tags、genres_like、extra_tags 或 genres_dislike，并且必须与标签所在字段一致。
+  target 只能是 required_tags、genres_like、extra_tags 或 genres_dislike，
+  并且必须与标签所在字段一致。
 - span 必须逐字复制用户原文中的最短玩法表达。质量、预算、平台、语言、数量、参考游戏名
   以及 3A/AAA/大作本身都不能作为标签证据；不要为推测出的玩法编造 span。
 - reference_entities 最多 3 项，每项包含 display_title、aliases、polarity；polarity
@@ -104,6 +104,37 @@ PREFERENCE_SCHEMA_HINT = """
 - library_filter_mode 只在用户明确要求时填写：排除已有/exclude-owned 为 "exclude_owned"；
   仅查看已有/only-owned 为 "only_owned"；否则为 null。
 """
+
+LLM_PREFERENCE_FIELDS = frozenset(
+    {
+        "platforms",
+        "required_tags",
+        "genres_like",
+        "extra_tags",
+        "explicit_tag_evidence",
+        "derived_intent_tags",
+        "soft_features",
+        "company_preferences",
+        "genres_dislike",
+        "reference_entities",
+        "reference_games_like",
+        "reference_search_terms",
+        "reference_games_dislike",
+        "library_filter_mode",
+        "players",
+        "budget",
+        "budget_is_required",
+        "region",
+        "budget_currency",
+        "preferred_languages",
+        "required_languages",
+        "difficulty",
+        "mood",
+        "quality_intent",
+        "allow_unreleased",
+        "result_count",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -260,6 +291,8 @@ def parse_preference_json(text: str) -> GamePreference:
 def validate_llm_payload_contract(data: Any) -> None:
     if not isinstance(data, dict):
         raise PreferencePayloadError("preference payload must be an object")
+    if not set(data).issubset(LLM_PREFERENCE_FIELDS):
+        raise PreferencePayloadError("preference payload contains unsupported fields")
     reference_entities = data.get("reference_entities", [])
     if not isinstance(reference_entities, list):
         raise PreferencePayloadError("reference_entities must be an array")

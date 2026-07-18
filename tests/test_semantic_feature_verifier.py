@@ -1656,6 +1656,41 @@ class SemanticFeaturePolicyTest(unittest.TestCase):
         self.assertIn("不推荐理由", rendered)
         self.assertIn(feature.source_span, rendered)
 
+    def test_provider_normalized_text_never_enters_user_evidence(self) -> None:
+        module = importlib.import_module(MODULE)
+        secret = "provider-token-secret /private/provider/path?token=abcdef"
+        feature = SoftFeature(
+            constraint_id="branching",
+            source_span="分支剧情",
+            normalized_text=secret,
+            role="optional",
+            polarity="positive",
+        )
+        outcome = module.FeatureVerificationOutcome(
+            verdicts=(
+                module.FeatureVerdict(
+                    1,
+                    "branching",
+                    "positive",
+                    "satisfied",
+                    "",
+                ),
+            )
+        )
+
+        applied = module.apply_feature_verdicts(
+            [self.ranked(1)],
+            [feature],
+            outcome,
+        )
+        rendered = " ".join(
+            evidence.text for evidence in applied[0].recommendation_evidence
+        )
+
+        self.assertIn(feature.source_span, rendered)
+        self.assertNotIn(secret, rendered)
+        self.assertNotIn("/private", rendered)
+
     def test_required_normal_verdicts_retain_only_satisfied_candidate(self) -> None:
         module = importlib.import_module(MODULE)
         feature = SoftFeature(

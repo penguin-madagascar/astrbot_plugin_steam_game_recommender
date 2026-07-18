@@ -30,16 +30,29 @@ sys.modules.setdefault("astrbot.api", api_module)
 sys.modules.setdefault("astrbot.api.event", event_module)
 sys.modules.setdefault("astrbot.api.star", star_module)
 
-from astrbot_plugin_steam_game_recommender.services.preference_parser import (
+from astrbot_plugin_steam_game_recommender.services import (  # noqa: E402
+    preference_parser as parser_module,
+)
+from astrbot_plugin_steam_game_recommender.services.preference_parser import (  # noqa: E402
     PREFERENCE_SCHEMA_HINT,
-    PreferencePayloadError,
     PreferenceParser,
+    PreferencePayloadError,
     parse_preference_json,
-)  # noqa: E402
-from astrbot_plugin_steam_game_recommender.services import preference_parser as parser_module  # noqa: E402
+)
 
 
 class PreferenceParserIntentTest(unittest.TestCase):
+    def test_internal_preference_fields_are_not_valid_llm_output(self) -> None:
+        for field in ("parse_warnings", "resolved_reference_games"):
+            with self.subTest(field=field), self.assertRaises(
+                PreferencePayloadError
+            ):
+                parse_preference_json(
+                    json.dumps(
+                        {field: ["provider-token-secret /private/provider/path"]}
+                    )
+                )
+
     def test_schema_requests_quality_and_release_intents_without_aaa_expansion(self) -> None:
         self.assertIn('"quality_intent": "normal"', PREFERENCE_SCHEMA_HINT)
         self.assertIn('"allow_unreleased": false', PREFERENCE_SCHEMA_HINT)
@@ -48,7 +61,8 @@ class PreferenceParserIntentTest(unittest.TestCase):
         self.assertIn('"explicit_tag_evidence": []', PREFERENCE_SCHEMA_HINT)
         self.assertIn("span 必须逐字复制用户原文", PREFERENCE_SCHEMA_HINT)
         self.assertIn("3A/AAA/大作本身都不能作为标签证据", PREFERENCE_SCHEMA_HINT)
-        self.assertIn("genres_dislike，并且必须与标签所在字段一致", PREFERENCE_SCHEMA_HINT)
+        self.assertIn("genres_dislike", PREFERENCE_SCHEMA_HINT)
+        self.assertIn("必须与标签所在字段一致", PREFERENCE_SCHEMA_HINT)
 
     def test_schema_describes_singleplayer_tags_with_explicit_polarity(self) -> None:
         self.assertNotIn("肉鸽、纯单人、pvp", PREFERENCE_SCHEMA_HINT)
