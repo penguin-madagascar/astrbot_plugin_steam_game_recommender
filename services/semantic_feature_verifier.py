@@ -7,6 +7,7 @@ import time
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Iterable
 
+from ..storage.cache_access import set_json_with_ttl
 from ..storage.models import (
     GameCandidate,
     RankedGame,
@@ -17,6 +18,7 @@ from ..storage.models import (
 from .ranking_precedence import effective_score, ranked_game_precedence_prefix
 from .recommendation_intent import QualityIntent
 from .recommendation_scoring import layer_score
+from .safe_errors import log_external_failure
 from .semantic_verification_contract import (
     FEATURE_PROMPT_VERSION,
     FEATURE_SCHEMA_VERSION,
@@ -250,7 +252,7 @@ class SemanticFeatureVerifier:
                 int(candidate.appid or 0): candidate
                 for candidate in selected_candidates
             }
-            for request, result in zip(requests, results):
+            for request, result in zip(requests, results, strict=True):
                 notices.extend(result.notices)
                 failures.extend(result.failures)
                 fresh_by_pair.update(
@@ -283,9 +285,11 @@ class SemanticFeatureVerifier:
                     if verdict is None or pair not in cacheable_fresh_pairs:
                         continue
                     try:
-                        await self.cache.set_json(
+                        await set_json_with_ttl(
+                            self.cache,
                             key_by_pair[pair],
                             verdict_cache_payload(verdict, now),
+                            ttl_hours=FEATURE_CACHE_TTL_HOURS,
                         )
                     except Exception as exc:
                         notices.append(cache_failure_notice("write", exc))
@@ -312,7 +316,12 @@ class SemanticFeatureVerifier:
             try:
                 response = await self._generate(request.payload)
             except Exception as exc:
-                logger.warning("Semantic feature provider failed: %s", exc)
+                log_external_failure(
+                    logger,
+                    "semantic_feature_external_failure",
+                    stage="provider_generate",
+                    exc=exc,
+                )
                 return VerificationRequestResult(
                     failures=failures_for_pairs(request.pairs, "provider"),
                     notices=(technical_failure_notice("provider"),),
@@ -349,7 +358,12 @@ class SemanticFeatureVerifier:
             try:
                 repair_response = await self._generate(repair_payload)
             except Exception as exc:
-                logger.warning("Semantic feature repair provider failed: %s", exc)
+                log_external_failure(
+                    logger,
+                    "semantic_feature_external_failure",
+                    stage="provider_repair",
+                    exc=exc,
+                )
                 return VerificationRequestResult(
                     verdicts=first,
                     failures=failures_for_pairs(unresolved, "provider"),
@@ -616,7 +630,12 @@ def salvage_response(
             candidate_payloads=request.payload["candidates"],
         )
     except FeatureVerificationContractError as exc:
-        logger.warning("Semantic feature contract failed: %s", exc)
+        log_external_failure(
+            logger,
+            "semantic_feature_external_failure",
+            stage="response_contract",
+            exc=exc,
+        )
         return ()
 
 
@@ -738,7 +757,7 @@ def apply_feature_verdicts(
             continue
         has_technical_failure = bool(verification_features) and any(
             technical_failures[(feature.constraint_id, feature.polarity)] is not None
-            for feature in selected_features
+            for feature in verification_features
         )
 
         optional_satisfied = 0
@@ -890,6 +909,7 @@ async def verify_ranked_features(
     *,
     result_limit: int = DEFAULT_RANKED_RESULT_LIMIT,
     quality_intent: QualityIntent | str = QualityIntent.NORMAL,
+    downstream_rerank: bool = False,
 ) -> RankedFeatureVerificationOutcome:
     ranked_games = tuple(games)
     selected_features = tuple(features)[:3]
@@ -904,12 +924,12 @@ async def verify_ranked_features(
     verifies_core_features = any(
         feature.role in {"required", "core"} for feature in selected_features
     )
-    candidate_cap = (
-        MAX_RANKED_VERIFICATION_CANDIDATES
-        if verifies_core_features
-        else RANKED_VERIFICATION_WINDOW_SIZE
+    requires_complete_pool = (
+        verifier is None
+        or downstream_rerank
+        or any(feature.role == "optional" for feature in selected_features)
     )
-    attemptable = eligible[:candidate_cap]
+    attemptable = eligible[:MAX_RANKED_VERIFICATION_CANDIDATES]
     attempted: list[RankedGame] = []
     verdicts: list[FeatureVerdict] = []
     failures: list[FeatureVerificationFailure] = []
@@ -937,8 +957,8 @@ async def verify_ranked_features(
         for notice in window_verification.notices:
             notices_by_code.setdefault(notice.code, notice)
 
-        if verifier is None or not verifies_core_features:
-            break
+        if requires_complete_pool:
+            continue
         accumulated = FeatureVerificationOutcome(
             verdicts=tuple(verdicts),
             failures=tuple(failures),
@@ -1033,11 +1053,16 @@ def copy_score_breakdown(
 
 
 def contract_failure(
-    message: str,
+    _message: str,
     *,
     pairs: Iterable[tuple[int, str, str]] = (),
 ) -> FeatureVerificationOutcome:
-    logger.warning("Semantic feature contract failed: %s", message)
+    log_external_failure(
+        logger,
+        "semantic_feature_external_failure",
+        stage="preflight_contract",
+        exc=FeatureVerificationContractError("contract failure"),
+    )
     return FeatureVerificationOutcome(
         notices=(technical_failure_notice("contract"),),
         failures=failures_for_pairs(tuple(pairs), "contract"),
@@ -1045,7 +1070,12 @@ def contract_failure(
 
 
 def cache_failure_notice(operation: str, exc: Exception) -> FeatureVerificationNotice:
-    logger.warning("Semantic feature cache %s failed: %s", operation, exc)
+    log_external_failure(
+        logger,
+        "semantic_feature_external_failure",
+        stage=f"cache_{operation}",
+        exc=exc,
+    )
     return FeatureVerificationNotice(
         code="semantic_feature_cache_failure",
         message="语义特征核验缓存暂不可用，已继续使用本次有效核验结果。",

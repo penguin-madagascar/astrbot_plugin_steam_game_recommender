@@ -147,7 +147,7 @@ class EditionDeduplicationTest(unittest.TestCase):
 
         self.assertEqual([game.appid for game in selected], [2])
 
-    def test_prefers_standard_game_even_when_an_edition_scores_higher(self) -> None:
+    def test_final_rank_wins_before_standard_edition_tie_break(self) -> None:
         games = [
             ranked(2, "Control Ultimate Edition", 95),
             ranked(1, "Control", 70),
@@ -156,7 +156,17 @@ class EditionDeduplicationTest(unittest.TestCase):
 
         selected = deduplicate_game_editions(games)
 
-        self.assertEqual([game.appid for game in selected], [3, 1])
+        self.assertEqual([game.appid for game in selected], [2, 3])
+
+    def test_standard_edition_wins_when_final_rank_is_equal(self) -> None:
+        games = [
+            ranked(2, "Control Ultimate Edition", 90),
+            ranked(1, "Control", 90),
+        ]
+
+        selected = deduplicate_game_editions(games)
+
+        self.assertEqual([game.appid for game in selected], [1])
 
     def test_keeps_highest_scoring_edition_when_no_standard_game_exists(self) -> None:
         games = [

@@ -5,21 +5,34 @@ import unittest
 from types import SimpleNamespace
 from typing import Any
 
-from astrbot_plugin_steam_game_recommender.clients.steam import SteamApiError
+from astrbot_plugin_steam_game_recommender.clients.steam import (
+    SteamApiError,
+    SteamTransientError,
+)
 from astrbot_plugin_steam_game_recommender.services.similarity_ranker import (
     build_profile_from_preference,
 )
 from astrbot_plugin_steam_game_recommender.services.steam_index import (
+    SNAPSHOT_STORAGE_TTL_HOURS,
     STEAM_INDEX_CACHE_KEY,
     STEAM_INDEX_SCHEMA_VERSION,
     SteamGameIndexService,
     SteamIndexEntry,
     SteamIndexSnapshot,
+    entry_is_current,
+    entry_with_candidate,
+    merge_recall_candidate_evidence,
     parse_snapshot,
     prune_snapshot,
     reference_candidates,
     search_terms_for,
+)
+from astrbot_plugin_steam_game_recommender.services.steam_index import (
     snapshot_payload as serialize_snapshot,
+)
+from astrbot_plugin_steam_game_recommender.services.steam_recall import (
+    CandidateHit,
+    CandidateSourceHit,
 )
 from astrbot_plugin_steam_game_recommender.storage.models import (
     GameCandidate,
@@ -30,6 +43,138 @@ from astrbot_plugin_steam_game_recommender.storage.models import (
 
 
 class SteamIndexSnapshotTest(unittest.IsolatedAsyncioTestCase):
+    async def test_snapshot_writes_keep_long_storage_retention(self) -> None:
+        cache = MemoryCache({})
+        service = SteamGameIndexService(NoopSteamClient(), cache, clock=lambda: 1.0)
+
+        await service._merge_and_persist_snapshot([], {})
+
+        self.assertEqual(cache.write_ttls, [SNAPSHOT_STORAGE_TTL_HOURS])
+
+    def test_released_entry_expires_after_index_ttl(self) -> None:
+        record = SteamIndexEntry(
+            candidate=game(1, "Released", ["Action"]),
+            refreshed_at=1.0,
+        )
+
+        self.assertFalse(entry_is_current(record, now=3_602.0, ttl_hours=1))
+
+    def test_recall_evidence_replaces_previous_dynamic_tags(self) -> None:
+        cached = game(1, "Released", ["Action"])
+        cached.ordered_tags = ["old dynamic"]
+        recalled = game(1, "Released", ["Action"])
+        recalled.ordered_tags = ["new dynamic"]
+
+        merged = merge_recall_candidate_evidence(cached, recalled)
+
+        self.assertEqual(merged.ordered_tags, ["new dynamic"])
+
+    def test_empty_current_recall_clears_previous_dynamic_tags(self) -> None:
+        cached = game(1, "Released", ["Action"])
+        cached.ordered_tags = ["old dynamic"]
+        recalled = game(1, "Released", ["Action"])
+        recalled.ordered_tags = []
+
+        merged = merge_recall_candidate_evidence(cached, recalled)
+
+        self.assertEqual(merged.ordered_tags, [])
+
+    def test_recall_evidence_update_preserves_existing_refresh_time(self) -> None:
+        record = SteamIndexEntry(
+            candidate=game(1, "Released", ["Action"]),
+            refreshed_at=1.0,
+        )
+        recalled = game(1, "Released", ["Action", "Co-op"])
+
+        updated = entry_with_candidate(
+            record,
+            recalled,
+            fallback_refreshed_at=7_201.0,
+        )
+
+        self.assertEqual(updated.refreshed_at, 1.0)
+
+    async def test_expired_released_entry_is_refreshed_and_bumps_timestamp(self) -> None:
+        client = RefreshingDetailSteamClient()
+        service = SteamGameIndexService(
+            client,
+            MemoryCache({}),
+            ttl_hours=1,
+            clock=lambda: 7_201.0,
+        )
+        records = {
+            "appid:1": SteamIndexEntry(
+                candidate=game(1, "Stale title", ["Old"]),
+                refreshed_at=1.0,
+            )
+        }
+
+        validated = await service._validate_recall_hits(
+            (candidate_hit(1),),
+            records,
+            {},
+        )
+
+        self.assertEqual(client.detail_calls, [(1, True)])
+        self.assertEqual(validated.hits[0].candidate.title, "Refreshed 1")
+        self.assertEqual(records["appid:1"].refreshed_at, 7_201.0)
+
+    async def test_transient_refresh_retains_stale_entry_without_bump(self) -> None:
+        client = TransientDetailSteamClient()
+        service = SteamGameIndexService(
+            client,
+            MemoryCache({}),
+            ttl_hours=1,
+            clock=lambda: 7_201.0,
+        )
+        records = {
+            "appid:1": SteamIndexEntry(
+                candidate=game(1, "Stale title", ["Old"]),
+                refreshed_at=1.0,
+            )
+        }
+
+        validated = await service._validate_recall_hits(
+            (candidate_hit(1),),
+            records,
+            {},
+        )
+
+        self.assertEqual(client.detail_calls, [(1, True)])
+        self.assertEqual(validated.transient_failures, 1)
+        self.assertEqual(validated.hits[0].candidate.title, "Stale title")
+        self.assertIn(
+            "metadata_stale:steam_detail",
+            validated.hits[0].candidate.internal_source_markers,
+        )
+        self.assertEqual(records["appid:1"].refreshed_at, 1.0)
+
+    async def test_excessively_old_metadata_is_not_used_after_refresh_failure(
+        self,
+    ) -> None:
+        client = TransientDetailSteamClient()
+        service = SteamGameIndexService(
+            client,
+            MemoryCache({}),
+            ttl_hours=1,
+            clock=lambda: 8 * 24 * 60 * 60,
+        )
+        records = {
+            "appid:1": SteamIndexEntry(
+                candidate=game(1, "Very stale title", ["Old"]),
+                refreshed_at=1.0,
+            )
+        }
+
+        validated = await service._validate_recall_hits(
+            (candidate_hit(1),),
+            records,
+            {},
+        )
+
+        self.assertEqual(validated.hits, ())
+        self.assertEqual(validated.transient_failures, 1)
+
     def test_snapshot_evicts_oldest_entries_and_search_terms(self) -> None:
         snapshot = SteamIndexSnapshot(
             entries=[
@@ -320,17 +465,47 @@ class MemoryCache:
     def __init__(self, payloads: dict[str, Any]) -> None:
         self.payloads = payloads
         self.read_keys: list[str] = []
+        self.write_ttls: list[int | float] = []
 
     async def get_json(self, key: str, _ttl_hours: int) -> Any | None:
         self.read_keys.append(key)
         return self.payloads.get(key)
 
-    async def set_json(self, key: str, payload: Any) -> None:
+    async def set_json(
+        self,
+        key: str,
+        payload: Any,
+        ttl_hours: int | float = 24,
+    ) -> None:
         self.payloads[key] = payload
+        self.write_ttls.append(ttl_hours)
 
 
 class NoopSteamClient:
     pass
+
+
+class RefreshingDetailSteamClient:
+    def __init__(self) -> None:
+        self.detail_calls: list[tuple[int, bool]] = []
+
+    async def get_game_detail(
+        self,
+        appid: int,
+        bypass_cache: bool = False,
+    ) -> GameCandidate:
+        self.detail_calls.append((appid, bypass_cache))
+        return game(appid, f"Refreshed {appid}", ["New"])
+
+
+class TransientDetailSteamClient(RefreshingDetailSteamClient):
+    async def get_game_detail(
+        self,
+        appid: int,
+        bypass_cache: bool = False,
+    ) -> GameCandidate:
+        self.detail_calls.append((appid, bypass_cache))
+        raise SteamTransientError("temporary detail failure")
 
 
 class QueryAwareSteamClient:
@@ -471,6 +646,16 @@ def snapshot_payload(
     else:
         payload["version"] = version
     return payload
+
+
+def candidate_hit(appid: int) -> CandidateHit:
+    source = CandidateSourceHit("index", "index", None, 1, 0.35)
+    return CandidateHit(
+        candidate=GameCandidate(appid=appid, title=f"Recall {appid}"),
+        source_hits=(source,),
+        rrf_score=0.35 / 61,
+        retrieval_rank=1,
+    )
 
 
 def game(

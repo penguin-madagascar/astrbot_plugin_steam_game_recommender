@@ -12,6 +12,7 @@ from typing import Any, Callable, Protocol
 import httpx
 
 from ..clients.steam import SteamApiError, is_retryable_steam_read_error
+from ..storage.cache_access import set_json_with_ttl
 from ..storage.models import (
     COMPANY_ALIAS_LIMIT,
     CompanyPreference,
@@ -21,14 +22,13 @@ from ..storage.models import (
     ResolvedReferenceGame,
     SteamSearchHit,
 )
+from .candidate_tag_evidence import build_candidate_tag_evidence
 from .company_preferences import (
     CompanyMatchStatus,
     company_match_status,
     matches_company_preference,
 )
-from .candidate_tag_evidence import build_candidate_tag_evidence
 from .game_identity import (
-    deduplicate_game_editions,
     game_family_key,
     is_confirmed_base_game,
 )
@@ -49,6 +49,7 @@ from .similarity_ranker import (
     rank_steam_candidates,
 )
 from .steam_recall import (
+    RRF_K,
     CandidateHit,
     CandidateRecallResult,
     RecallHealth,
@@ -56,7 +57,6 @@ from .steam_recall import (
     RecallSourceHealth,
     RecallSourceStatus,
     RecallUnavailableError,
-    RRF_K,
     merge_candidate_sources,
     select_recall_seeds,
 )
@@ -88,8 +88,11 @@ STEAM_TAG_ALIASES_FRESH_SECONDS = 24 * 60 * 60
 STEAM_TAG_ALIASES_STALE_SECONDS = 7 * STEAM_TAG_ALIASES_FRESH_SECONDS
 RELEASE_STATUS_FRESH_SECONDS = 60 * 60
 RELEASE_STATUS_STALE_SECONDS = 6 * 60 * 60
+METADATA_STALE_MIN_SECONDS = 7 * 24 * 60 * 60
+METADATA_STALE_TTL_MULTIPLIER = 2
 SNAPSHOT_STORAGE_TTL_HOURS = 24 * 3650
 REFERENCE_MATCH_THRESHOLD = 0.75
+STEAM_METADATA_STALE_MARKER = "metadata_stale:steam_detail"
 
 STEAM_INDEX_FALLBACK_WARNING = (
     "Steam 索引暂不可用，已尝试通过 Steam 公共搜索刷新候选；"
@@ -283,7 +286,6 @@ class SteamGameIndexService:
             for game in ranked
             if game.score_breakdown.relevance_tier != "C"
         ]
-        ranked = deduplicate_game_editions(ranked, preferred_appids)
         return ranked[:limit]
 
     async def _recall_specific_candidates(
@@ -405,7 +407,7 @@ class SteamGameIndexService:
                 fetch,
                 source=replace(fetch.source, weight=seed.weight),
             )
-            for seed, fetch in zip(seeds, tag_fetches)
+            for seed, fetch in zip(seeds, tag_fetches, strict=True)
         ]
         more_like_fetches = list(
             await asyncio.gather(
@@ -435,7 +437,11 @@ class SteamGameIndexService:
         source_fetches.extend(company_fetches)
         company_preferences_by_source = {
             fetch.source.source_id: company
-            for fetch, company in zip(company_fetches, preference.company_preferences)
+            for fetch, company in zip(
+                company_fetches,
+                preference.company_preferences,
+                strict=True,
+            )
         }
 
         has_anchor = any(
@@ -593,7 +599,12 @@ class SteamGameIndexService:
             preference.parse_warnings.append(STEAM_TAG_RECALL_DEGRADED_WARNING)
 
         for hit in verified.hits:
-            records[entry_key(hit.candidate)] = SteamIndexEntry(hit.candidate, now)
+            key = entry_key(hit.candidate)
+            records[key] = entry_with_candidate(
+                records.get(key),
+                hit.candidate,
+                fallback_refreshed_at=now,
+            )
         persisted = await self._merge_and_persist_snapshot(
             records.values(),
             snapshot.search_coverage,
@@ -761,10 +772,10 @@ class SteamGameIndexService:
         fetches = await asyncio.gather(
             *(self._fetch_tag_source(tag, prefetched) for tag in tags)
         )
-        source_by_tag = dict(zip(tags, fetches))
+        source_by_tag = dict(zip(tags, fetches, strict=True))
         counts_by_tag = {
             tag: fetch.total_count
-            for tag, fetch in zip(tags, fetches)
+            for tag, fetch in zip(tags, fetches, strict=True)
             if fetch.health.status
             not in {
                 RecallSourceStatus.TRANSIENT_FAILURE,
@@ -902,7 +913,10 @@ class SteamGameIndexService:
                 if current is None:
                     by_appid[appid] = (candidate, rank, (request_index, rank))
                 else:
-                    merged = merge_recall_candidate_evidence(current[0], candidate)
+                    merged = merge_current_recall_candidate_evidence(
+                        current[0],
+                        candidate,
+                    )
                     best_rank = min(current[1], rank)
                     best_seen = (
                         (request_index, rank)
@@ -1200,7 +1214,7 @@ class SteamGameIndexService:
             int(record.candidate.appid): record.candidate
             for record in records.values()
             if record.candidate.appid is not None
-            and entry_is_current(record, now)
+            and entry_is_current(record, now, self.ttl_hours)
         }
         legacy_appids = {
             int(record.candidate.appid)
@@ -1214,11 +1228,21 @@ class SteamGameIndexService:
             appid = int(hit.candidate.appid or 0)
             local_record = records_by_appid.get(appid)
             candidate = existing.get(appid)
+            uses_cached_candidate = candidate is not None
             validation_status: RecallSourceStatus | None = None
             force_release_refresh = (
                 local_record is not None
                 and entry_is_validated(local_record)
                 and not entry_release_status_is_fresh(local_record, now)
+            )
+            force_metadata_refresh = (
+                local_record is not None
+                and entry_is_validated(local_record)
+                and not entry_metadata_is_fresh(
+                    local_record,
+                    now,
+                    self.ttl_hours,
+                )
             )
             company_hits = [
                 source
@@ -1239,6 +1263,7 @@ class SteamGameIndexService:
             )
             if force_company_refresh:
                 candidate = None
+                uses_cached_candidate = False
             if candidate is None:
                 try:
                     candidate = await self._fetch_candidate(
@@ -1248,6 +1273,7 @@ class SteamGameIndexService:
                             appid in legacy_appids
                             or force_company_refresh
                             or force_release_refresh
+                            or force_metadata_refresh
                         ),
                     )
                 except Exception as exc:
@@ -1255,13 +1281,19 @@ class SteamGameIndexService:
                     if (
                         status is RecallSourceStatus.TRANSIENT_FAILURE
                         and local_record is not None
-                        and entry_release_status_is_usable_stale(local_record, now)
+                        and entry_is_usable_stale(
+                            local_record,
+                            now,
+                            self.ttl_hours,
+                        )
                     ):
-                        candidate = local_record.candidate
+                        candidate = mark_stale_metadata(local_record.candidate)
+                        uses_cached_candidate = True
                         validation_status = status
                     else:
                         return None, status
                 else:
+                    uses_cached_candidate = False
                     if candidate is not None:
                         refreshed_record = SteamIndexEntry(candidate, now)
                         if (
@@ -1293,7 +1325,11 @@ class SteamGameIndexService:
                 for source in hit.source_hits
                 if source not in retained_sources and source.source_kind == "company"
             )
-            candidate = merge_recall_candidate_evidence(candidate, hit.candidate)
+            if hit.candidate.ordered_tags or uses_cached_candidate:
+                candidate = merge_recall_candidate_evidence(
+                    candidate,
+                    hit.candidate,
+                )
             return (
                 replace(
                     hit,
@@ -1564,9 +1600,11 @@ class SteamGameIndexService:
                 needs_revalidation=True,
                 preserve_coverage=False,
             )
-            await self.cache.set_json(
+            await set_json_with_ttl(
+                self.cache,
                 STEAM_INDEX_CACHE_KEY,
                 snapshot_payload(migrated),
+                ttl_hours=SNAPSHOT_STORAGE_TTL_HOURS,
             )
             return migrated
 
@@ -1578,9 +1616,11 @@ class SteamGameIndexService:
             if not is_legacy_snapshot_payload(legacy_payload):
                 continue
             migrated = parse_legacy_snapshot(legacy_payload)
-            await self.cache.set_json(
+            await set_json_with_ttl(
+                self.cache,
                 STEAM_INDEX_CACHE_KEY,
                 snapshot_payload(migrated),
+                ttl_hours=SNAPSHOT_STORAGE_TTL_HOURS,
             )
             return migrated
         return SteamIndexSnapshot()
@@ -1666,14 +1706,14 @@ class SteamGameIndexService:
                 int(record.candidate.appid)
                 for record in records.values()
                 if record.candidate.appid is not None
-                and entry_is_current(record, now)
+                and entry_is_current(record, now, self.ttl_hours)
             }
             revalidation_appids = {
                 int(record.candidate.appid)
                 for record in records.values()
                 if record.candidate.appid is not None and (
                     record.needs_revalidation
-                    or not entry_release_status_is_fresh(record, now)
+                    or not entry_is_current(record, now, self.ttl_hours)
                 )
             }
             new_hits: list[SteamSearchHit] = []
@@ -1778,7 +1818,8 @@ class SteamGameIndexService:
             )
             candidate = (
                 matched_record.candidate
-                if matched_record is not None and entry_is_current(matched_record, now)
+                if matched_record is not None
+                and entry_is_current(matched_record, now, self.ttl_hours)
                 else None
             )
             refreshed_at = (
@@ -1806,7 +1847,11 @@ class SteamGameIndexService:
                     if observed_match is not None
                     else None
                 )
-                if existing_record is not None and entry_is_current(existing_record, now):
+                if existing_record is not None and entry_is_current(
+                    existing_record,
+                    now,
+                    self.ttl_hours,
+                ):
                     match = observed_match
                     evidence_hit = max(
                         (
@@ -1844,13 +1889,17 @@ class SteamGameIndexService:
                             known_candidates={
                                 appid: record.candidate
                                 for appid, record in records_by_appid.items()
-                                if entry_is_current(record, now)
+                                if entry_is_current(record, now, self.ttl_hours)
                             },
                             bypass_cache_appids={
                                 appid
                                 for appid, record in records_by_appid.items()
                                 if record.needs_revalidation
-                                or not entry_release_status_is_fresh(record, now)
+                                or not entry_is_current(
+                                    record,
+                                    now,
+                                    self.ttl_hours,
+                                )
                             },
                         )
                     )
@@ -1873,7 +1922,11 @@ class SteamGameIndexService:
                             refreshed_at = now
                         elif (
                             selected_record.needs_revalidation
-                            or not entry_release_status_is_fresh(selected_record, now)
+                            or not entry_is_current(
+                                selected_record,
+                                now,
+                                self.ttl_hours,
+                            )
                         ):
                             refreshed_at = now
                         else:
@@ -2058,9 +2111,7 @@ class SteamGameIndexService:
         if not mapped:
             return candidate
         data = dump_model(candidate)
-        data["ordered_tags"] = dedupe_texts(
-            [*mapped, *(data.get("ordered_tags") or [])]
-        )
+        data["ordered_tags"] = mapped
         markers = list(data.get("internal_source_markers") or [])
         marker = "tag_enrichment:steam_storefront_result"
         if marker not in markers:
@@ -2248,9 +2299,11 @@ class SteamGameIndexService:
                     search_coverage=coverage,
                 )
             )
-            await self.cache.set_json(
+            await set_json_with_ttl(
+                self.cache,
                 STEAM_INDEX_CACHE_KEY,
                 snapshot_payload(snapshot),
+                ttl_hours=SNAPSHOT_STORAGE_TTL_HOURS,
             )
             return snapshot
 
@@ -2872,8 +2925,60 @@ def entry_release_status_is_usable_stale(
     return age is not None and age <= RELEASE_STATUS_STALE_SECONDS
 
 
-def entry_is_current(record: SteamIndexEntry, now: float) -> bool:
-    return entry_is_validated(record) and entry_release_status_is_fresh(record, now)
+def entry_metadata_is_fresh(
+    record: SteamIndexEntry,
+    now: float,
+    ttl_hours: int,
+) -> bool:
+    age = max(float(now) - float(record.refreshed_at), 0.0)
+    return age <= max(int(ttl_hours), 0) * 60 * 60
+
+
+def entry_is_current(
+    record: SteamIndexEntry,
+    now: float,
+    ttl_hours: int,
+) -> bool:
+    return (
+        entry_is_validated(record)
+        and entry_metadata_is_fresh(record, now, ttl_hours)
+        and entry_release_status_is_fresh(record, now)
+    )
+
+
+def entry_is_usable_stale(
+    record: SteamIndexEntry,
+    now: float,
+    ttl_hours: int,
+) -> bool:
+    if not entry_is_validated(record):
+        return False
+    if record.candidate.coming_soon:
+        return entry_release_status_is_usable_stale(record, now)
+    age = max(float(now) - float(record.refreshed_at), 0.0)
+    stale_limit = max(
+        max(int(ttl_hours), 0)
+        * 60
+        * 60
+        * METADATA_STALE_TTL_MULTIPLIER,
+        METADATA_STALE_MIN_SECONDS,
+    )
+    return age <= stale_limit
+
+
+def entry_with_candidate(
+    current: SteamIndexEntry | None,
+    candidate: GameCandidate,
+    *,
+    fallback_refreshed_at: float,
+) -> SteamIndexEntry:
+    if current is None:
+        return SteamIndexEntry(candidate, float(fallback_refreshed_at))
+    return SteamIndexEntry(
+        candidate,
+        current.refreshed_at,
+        needs_revalidation=current.needs_revalidation,
+    )
 
 
 def entry_is_recall_usable(record: SteamIndexEntry) -> bool:
@@ -2973,7 +3078,7 @@ def filter_recall_source(
     ranks = source.candidate_ranks or tuple(range(1, len(source.candidates) + 1))
     retained = [
         (candidate, rank)
-        for candidate, rank in zip(source.candidates, ranks)
+        for candidate, rank in zip(source.candidates, ranks, strict=True)
         if candidate.appid is not None and int(candidate.appid) not in excluded_appids
     ]
     return replace(
@@ -3057,11 +3162,29 @@ def merge_recall_candidate_evidence(
     candidate: GameCandidate,
     recalled: GameCandidate,
 ) -> GameCandidate:
+    data = dump_model(candidate)
+    data["ordered_tags"] = dedupe_texts(recalled.ordered_tags)
+    return validate_candidate(data)
+
+
+def mark_stale_metadata(candidate: GameCandidate) -> GameCandidate:
+    data = dump_model(candidate)
+    markers = list(data.get("internal_source_markers") or [])
+    if STEAM_METADATA_STALE_MARKER not in markers:
+        markers.append(STEAM_METADATA_STALE_MARKER)
+    data["internal_source_markers"] = markers
+    return validate_candidate(data)
+
+
+def merge_current_recall_candidate_evidence(
+    candidate: GameCandidate,
+    recalled: GameCandidate,
+) -> GameCandidate:
     if not recalled.ordered_tags:
         return candidate
     data = dump_model(candidate)
     data["ordered_tags"] = dedupe_texts(
-        [*recalled.ordered_tags, *(data.get("ordered_tags") or [])]
+        [*candidate.ordered_tags, *recalled.ordered_tags]
     )
     return validate_candidate(data)
 

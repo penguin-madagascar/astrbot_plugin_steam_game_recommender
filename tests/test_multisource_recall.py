@@ -11,11 +11,10 @@ from astrbot_plugin_steam_game_recommender.clients.steam import (
     SteamStorefrontPage,
     SteamTransientError,
 )
-from astrbot_plugin_steam_game_recommender.services import steam_recall
+from astrbot_plugin_steam_game_recommender.services import ranking_precedence, steam_recall
 from astrbot_plugin_steam_game_recommender.services.game_identity import (
     is_confirmed_base_game,
 )
-from astrbot_plugin_steam_game_recommender.services import ranking_precedence
 from astrbot_plugin_steam_game_recommender.services.recommendation_intent import (
     IntentTagRole,
     IntentTagSource,
@@ -31,8 +30,8 @@ from astrbot_plugin_steam_game_recommender.services.similarity_ranker import (
     ranked_game_sort_key,
 )
 from astrbot_plugin_steam_game_recommender.services.steam_index import (
-    STEAM_INDEX_CACHE_KEY,
     SteamGameIndexService,
+    merge_current_recall_candidate_evidence,
 )
 from astrbot_plugin_steam_game_recommender.services.steam_price_bridge import (
     attach_price_summary,
@@ -43,7 +42,6 @@ from astrbot_plugin_steam_game_recommender.storage.models import (
     GamePriceSummary,
     SteamSearchHit,
 )
-
 
 MORE_LIKE_HTML = """
 <main>
@@ -116,12 +114,10 @@ class MoreLikeContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.hits, ())
         self.assertFalse(result.stale)
         self.assertEqual(empty_http.call_count, 1)
-        self.assertTrue(
-            all(
-                payload["html"] == '<section id="released"></section>'
-                for key, payload in cache.payloads.items()
-                if key.endswith((":fresh", ":stale"))
-            )
+        self.assertEqual(len(cache.payloads), 1)
+        self.assertEqual(
+            next(iter(cache.payloads.values()))["html"],
+            '<section id="released"></section>',
         )
 
     async def test_more_like_network_first_failure_uses_seven_day_stale(self) -> None:
@@ -209,8 +205,13 @@ class MoreLikeContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([hit.appid for hit in page.upcoming], [3])
 
     async def test_upcoming_is_gated_exact_seed_is_excluded_and_stale_is_typed(self) -> None:
+        now = [1_000.0]
         cache = ClientMemoryCache()
-        online = SteamClient(HtmlHttpClient(MORE_LIKE_HTML), cache)
+        online = SteamClient(
+            HtmlHttpClient(MORE_LIKE_HTML),
+            cache,
+            clock=lambda: now[0],
+        )
         getter = getattr(online, "get_more_like", None)
         self.assertIsNotNone(getter, "More Like This client method is missing")
 
@@ -221,8 +222,12 @@ class MoreLikeContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([hit.appid for hit in allowed.hits], [901, 902])
         self.assertFalse(released.stale)
 
-        cache.drop_fresh()
-        stale_client = SteamClient(FailingHttpClient(), cache)
+        now[0] += 24 * 60 * 60 + 1
+        stale_client = SteamClient(
+            FailingHttpClient(),
+            cache,
+            clock=lambda: now[0],
+        )
         stale = await stale_client.get_more_like(900, allow_unreleased=False)
         self.assertEqual([hit.appid for hit in stale.hits], [901])
         self.assertTrue(stale.stale)
@@ -487,8 +492,10 @@ class RankingPolicyTest(unittest.TestCase):
                 currency="CNY",
                 current_price="¥1",
                 current_amount=1,
+                current_currency="CNY",
                 historic_low="¥1",
                 historic_low_amount=1,
+                historic_low_currency="CNY",
             ),
             GamePreference(budget=10, budget_currency="CNY"),
         )
@@ -524,7 +531,7 @@ class RankingPolicyTest(unittest.TestCase):
 
 
 class RecallPipelineTest(unittest.IsolatedAsyncioTestCase):
-    async def test_resolved_reference_adds_more_like_and_preserves_hit_tag_evidence(
+    async def test_resolved_reference_replaces_stale_tags_with_current_hit_evidence(
         self,
     ) -> None:
         client = PipelineClient(
@@ -557,7 +564,15 @@ class RecallPipelineTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(client.more_like_calls, [(900, True)])
         self.assertEqual([game.appid for game in ranked], [901])
-        self.assertEqual(ranked[0].ordered_tags[:2], ["puzzle", "unrelated"])
+        self.assertEqual(ranked[0].ordered_tags, ["puzzle"])
+
+    def test_multiple_hits_in_one_refresh_merge_their_current_tag_evidence(self) -> None:
+        merged = merge_current_recall_candidate_evidence(
+            _candidate(1, ["Puzzle"]),
+            _candidate(1, ["Adventure"]),
+        )
+
+        self.assertEqual(merged.ordered_tags, ["puzzle", "adventure"])
 
     async def test_sources_use_intersection_and_three_deep_single_anchor_queries(self) -> None:
         client = PipelineClient(

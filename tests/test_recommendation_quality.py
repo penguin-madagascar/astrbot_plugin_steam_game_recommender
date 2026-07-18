@@ -152,7 +152,11 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
                 ]
             }
         )
-        service = SteamGameIndexService(NoLiveSearchSteamClient(), cache)
+        service = SteamGameIndexService(
+            NoLiveSearchSteamClient(),
+            cache,
+            clock=lambda: 1.0,
+        )
 
         ranked = await service.recommend(
             GamePreference(
@@ -196,7 +200,11 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
                 ]
             }
         )
-        service = SteamGameIndexService(NoLiveSearchSteamClient(), cache)
+        service = SteamGameIndexService(
+            NoLiveSearchSteamClient(),
+            cache,
+            clock=lambda: 1.0,
+        )
 
         ranked = await service.recommend(
             GamePreference(platforms=["steam"], genres_like=["co-op", "puzzle"]),
@@ -231,7 +239,11 @@ class RecommendationQualityTest(unittest.IsolatedAsyncioTestCase):
                 ]
             }
         )
-        service = SteamGameIndexService(NoLiveSearchSteamClient(), cache)
+        service = SteamGameIndexService(
+            NoLiveSearchSteamClient(),
+            cache,
+            clock=lambda: 1.0,
+        )
 
         ranked = await service.recommend(
             GamePreference(platforms=["steam"], genres_like=["co-op", "puzzle"]),

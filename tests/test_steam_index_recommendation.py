@@ -583,7 +583,7 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("steam_index", ranked[0].internal_source_markers)
 
-    async def test_recommend_preferred_appid_selects_owned_edition(self) -> None:
+    async def test_recommend_defers_edition_selection_until_final_ranking(self) -> None:
         cache = MemoryCache(
             {
                 "steam_index": [
@@ -630,8 +630,8 @@ class SteamIndexServiceTest(unittest.IsolatedAsyncioTestCase):
             preferred_appids=[2],
         )
 
+        self.assertIn(1, [game.appid for game in ranked])
         self.assertIn(2, [game.appid for game in ranked])
-        self.assertNotIn(1, [game.appid for game in ranked])
 
 
 def optional_import(module_name: str):
@@ -687,7 +687,10 @@ class MemoryCache:
                 "schema_version": optional_import(
                     "astrbot_plugin_steam_game_recommender.services.steam_index"
                 ).STEAM_INDEX_SCHEMA_VERSION,
-                "entries": [{"candidate": entry, "refreshed_at": 1.0} for entry in payload],
+                "entries": [
+                    {"candidate": entry, "refreshed_at": 10_000_000_000.0}
+                    for entry in payload
+                ],
                 "search_coverage": {},
             }
         return payload

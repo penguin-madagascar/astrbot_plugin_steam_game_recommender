@@ -11,14 +11,14 @@ from astrbot_plugin_steam_game_recommender.clients.steam import (
     SteamTransientError,
 )
 from astrbot_plugin_steam_game_recommender.services import tag_normalizer
-from astrbot_plugin_steam_game_recommender.services.steam_recall import (
-    RecallUnavailableError,
-)
 from astrbot_plugin_steam_game_recommender.services.steam_index import (
     STEAM_INDEX_CACHE_KEY,
     STEAM_INDEX_SCHEMA_VERSION,
     STEAM_TAG_RECALL_DEGRADED_WARNING,
     SteamGameIndexService,
+)
+from astrbot_plugin_steam_game_recommender.services.steam_recall import (
+    RecallUnavailableError,
 )
 from astrbot_plugin_steam_game_recommender.storage.models import (
     GameCandidate,
@@ -829,7 +829,7 @@ def snapshot(candidates: list[GameCandidate]) -> dict[str, Any]:
                 "candidate": (
                     item.model_dump() if hasattr(item, "model_dump") else item.dict()
                 ),
-                "refreshed_at": 1.0,
+                "refreshed_at": 10_000_000_000.0,
             }
             for item in candidates
         ],
@@ -840,7 +840,9 @@ def snapshot(candidates: list[GameCandidate]) -> dict[str, Any]:
 def snapshot_with_refresh_order(candidates: list[GameCandidate]) -> dict[str, Any]:
     payload = snapshot(candidates)
     for position, item in enumerate(payload["entries"]):
-        item["refreshed_at"] = float(len(candidates) - position)
+        item["refreshed_at"] = 10_000_000_000.0 + float(
+            len(candidates) - position
+        )
     return payload
 
 

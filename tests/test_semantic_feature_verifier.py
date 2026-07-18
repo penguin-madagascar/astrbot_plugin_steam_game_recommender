@@ -16,7 +16,6 @@ from astrbot_plugin_steam_game_recommender.storage.models import (
     SoftFeature,
 )
 
-
 MODULE = (
     "astrbot_plugin_steam_game_recommender.services.semantic_feature_verifier"
 )
@@ -426,13 +425,20 @@ class MemoryCache:
     def __init__(self) -> None:
         self.payloads: dict[str, object] = {}
         self.writes: list[tuple[str, object]] = []
+        self.write_ttls: list[int | float] = []
 
     async def get_json(self, key: str, _ttl_hours: int):
         return self.payloads.get(key)
 
-    async def set_json(self, key: str, payload: object) -> None:
+    async def set_json(
+        self,
+        key: str,
+        payload: object,
+        ttl_hours: int | float = 24,
+    ) -> None:
         self.payloads[key] = payload
         self.writes.append((key, payload))
+        self.write_ttls.append(ttl_hours)
 
 
 class FailingReadCache(MemoryCache):
@@ -733,6 +739,7 @@ class SemanticFeatureVerifierCacheTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(outcome.verdicts), 2)
         self.assertEqual(outcome.notices, ())
         self.assertEqual(len(cache.writes), 2)
+        self.assertEqual(cache.write_ttls, [module.FEATURE_CACHE_TTL_HOURS] * 2)
         by_status = {payload["verdict"]["status"]: payload for _, payload in cache.writes}
         self.assertEqual(by_status["satisfied"]["expires_at"] - now, 7 * 24 * 3600)
         self.assertEqual(by_status["unknown"]["expires_at"] - now, 24 * 3600)
@@ -1214,10 +1221,14 @@ class SemanticFeatureVerifierCacheTest(unittest.IsolatedAsyncioTestCase):
             provider_id="provider-a",
         )
 
-        outcome = await verifier.verify(
-            features=[feature],
-            candidates=[GameCandidate(appid=10, title="One")],
-        )
+        with self.assertLogs(
+            "astrbot_plugin_steam_game_recommender.services.semantic_feature_verifier",
+            level="WARNING",
+        ) as logs:
+            outcome = await verifier.verify(
+                features=[feature],
+                candidates=[GameCandidate(appid=10, title="One")],
+            )
 
         self.assertEqual(outcome.verdicts, ())
         self.assertEqual(len(outcome.notices), 1)
@@ -1227,6 +1238,46 @@ class SemanticFeatureVerifierCacheTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("secret", outcome.notices[0].message)
         self.assertNotIn("/private", outcome.notices[0].message)
+        rendered_logs = "\n".join(logs.output)
+        self.assertNotIn("secret", rendered_logs)
+        self.assertNotIn("/private", rendered_logs)
+        self.assertIn("error_id=", rendered_logs)
+
+    async def test_contract_failure_logs_do_not_include_provider_completion(
+        self,
+    ) -> None:
+        module = importlib.import_module(MODULE)
+        secret = "provider-token-secret /private/provider/path"
+        feature = SoftFeature(
+            constraint_id="branching",
+            source_span="必须有分支",
+            normalized_text="branching story",
+            role="core",
+            polarity="positive",
+        )
+        verifier = module.SemanticFeatureVerifier(
+            FakeContext([f"not-json {secret}", f"still-not-json {secret}"]),
+            MemoryCache(),
+            provider_id="provider-a",
+        )
+
+        with self.assertLogs(
+            "astrbot_plugin_steam_game_recommender.services.semantic_feature_verifier",
+            level="WARNING",
+        ) as logs:
+            outcome = await verifier.verify(
+                features=[feature],
+                candidates=[GameCandidate(appid=10, title="One")],
+            )
+
+        self.assertEqual(
+            [notice.code for notice in outcome.notices],
+            ["semantic_feature_contract_failure"],
+        )
+        rendered_logs = "\n".join(logs.output)
+        self.assertNotIn(secret, rendered_logs)
+        self.assertNotIn("/private", rendered_logs)
+        self.assertIn("error_id=", rendered_logs)
 
     async def test_cache_identity_covers_versions_provider_locale_and_evidence(self) -> None:
         module = importlib.import_module(MODULE)
@@ -1692,7 +1743,7 @@ class SemanticFeaturePolicyTest(unittest.TestCase):
 
         self.assertEqual(set(by_appid), {1, 2, 3, 4})
         self.assertEqual(by_appid[1].core_feature_verification, "verified")
-        self.assertEqual(by_appid[2].core_feature_verification, "technical_failure")
+        self.assertEqual(by_appid[2].core_feature_verification, "unknown")
         self.assertEqual(by_appid[3].core_feature_verification, "unknown")
         self.assertEqual(by_appid[4].core_feature_verification, "technical_failure")
         self.assertEqual(by_appid[3].score, games[2].score)
@@ -2117,7 +2168,7 @@ class SemanticFeaturePipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Steam", unknown_notices[0].message)
         self.assertIn("谨慎", unknown_notices[0].message)
 
-    async def test_optional_only_verifies_first_window_and_keeps_tail_baseline(
+    async def test_optional_only_verifies_complete_candidate_pool(
         self,
     ) -> None:
         module = importlib.import_module(MODULE)
@@ -2129,7 +2180,7 @@ class SemanticFeaturePipelineTest(unittest.IsolatedAsyncioTestCase):
             polarity="positive",
         )
         games = self.ranked_games(25)
-        tail_baseline = games[-1].score_breakdown
+        tail_supporting = games[-1].score_breakdown.supporting_similarity
         verifier = RecordingVerifier(module)
 
         outcome = await module.verify_ranked_features(
@@ -2139,15 +2190,17 @@ class SemanticFeaturePipelineTest(unittest.IsolatedAsyncioTestCase):
             result_limit=5,
         )
 
-        self.assertEqual(len(verifier.calls), 1)
         self.assertEqual(
-            [game.appid for game in verifier.calls[0][1]],
-            list(range(1, 21)),
+            [[game.appid for game in call[1]] for call in verifier.calls],
+            [list(range(1, 21)), list(range(21, 26))],
         )
-        self.assertEqual(outcome.candidate_count, 20)
+        self.assertEqual(outcome.candidate_count, 25)
         by_appid = {game.appid: game for game in outcome.games}
         self.assertEqual(set(by_appid), set(range(1, 26)))
-        self.assertEqual(by_appid[25].score_breakdown, tail_baseline)
+        self.assertGreater(
+            by_appid[25].score_breakdown.supporting_similarity,
+            tail_supporting,
+        )
         self.assertEqual(by_appid[25].core_feature_verification, "not_applicable")
 
     async def test_optional_only_provider_failure_preserves_baseline_order(
@@ -2169,7 +2222,7 @@ class SemanticFeaturePipelineTest(unittest.IsolatedAsyncioTestCase):
             result_limit=5,
         )
 
-        self.assertEqual(outcome.candidate_count, 20)
+        self.assertEqual(outcome.candidate_count, 25)
         self.assertEqual([game.appid for game in outcome.games], list(range(1, 26)))
         self.assertEqual([game.appid for game in outcome.games[:5]], list(range(1, 6)))
         self.assertTrue(
@@ -2182,7 +2235,7 @@ class SemanticFeaturePipelineTest(unittest.IsolatedAsyncioTestCase):
             [notice.code for notice in outcome.notices],
             ["semantic_feature_provider_failure"],
         )
-        for game in outcome.games[:20]:
+        for game in outcome.games:
             failure = next(
                 item
                 for item in game.recommendation_evidence
@@ -2190,11 +2243,8 @@ class SemanticFeaturePipelineTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(failure.sentiment, "uncertain")
             self.assertTrue(failure.important)
-        self.assertTrue(
-            all(not game.recommendation_evidence for game in outcome.games[20:])
-        )
 
-    async def test_missing_verifier_uses_only_first_technical_failure_window(
+    async def test_missing_verifier_marks_complete_candidate_pool_as_technical_failure(
         self,
     ) -> None:
         module = importlib.import_module(MODULE)
@@ -2206,8 +2256,8 @@ class SemanticFeaturePipelineTest(unittest.IsolatedAsyncioTestCase):
             result_limit=5,
         )
 
-        self.assertEqual(outcome.candidate_count, 20)
-        self.assertEqual([game.appid for game in outcome.games], list(range(1, 21)))
+        self.assertEqual(outcome.candidate_count, 45)
+        self.assertEqual([game.appid for game in outcome.games], list(range(1, 46)))
         self.assertTrue(
             all(
                 game.core_feature_verification == "technical_failure"
@@ -2221,6 +2271,28 @@ class SemanticFeaturePipelineTest(unittest.IsolatedAsyncioTestCase):
                 "semantic_feature_required_unverified",
             ],
         )
+
+    async def test_downstream_rerank_disables_pure_core_early_stop(self) -> None:
+        module = importlib.import_module(MODULE)
+        verifier = RecordingVerifier(module)
+
+        outcome = await module.verify_ranked_features(
+            self.ranked_games(45),
+            [self.core_feature()],
+            verifier,
+            result_limit=5,
+            downstream_rerank=True,
+        )
+
+        self.assertEqual(
+            [[game.appid for game in call[1]] for call in verifier.calls],
+            [
+                list(range(1, 21)),
+                list(range(21, 41)),
+                list(range(41, 46)),
+            ],
+        )
+        self.assertEqual(outcome.candidate_count, 45)
 
     async def test_only_top_twenty_ab_candidates_are_verified(self) -> None:
         module = importlib.import_module(MODULE)

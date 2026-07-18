@@ -100,6 +100,7 @@ class UserProfileSteamIndexTest(unittest.IsolatedAsyncioTestCase):
                     steam_game(2, "Craft Co-op Puzzle", ["Co-op", "Puzzle", "Farming"]),
                 ]
             ),
+            clock=lambda: 1.0,
         )
 
         ranked = await service.recommend(
@@ -125,6 +126,7 @@ class UserProfileSteamIndexTest(unittest.IsolatedAsyncioTestCase):
                     steam_game(2, "Huge Wrong Match", ["Action"], reviews=1_000_000),
                 ]
             ),
+            clock=lambda: 1.0,
         )
 
         ranked = await service.recommend(

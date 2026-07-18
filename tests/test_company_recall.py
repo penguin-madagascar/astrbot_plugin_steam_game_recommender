@@ -7,19 +7,19 @@ from astrbot_plugin_steam_game_recommender.clients.steam import (
     SteamTransientError,
 )
 from astrbot_plugin_steam_game_recommender.services.steam_index import (
-    RecallSourceFetch,
     STEAM_INDEX_SCHEMA_VERSION,
+    RecallSourceFetch,
     SteamGameIndexService,
     SteamIndexEntry,
     SteamIndexSnapshot,
     successful_source_fetch,
 )
 from astrbot_plugin_steam_game_recommender.services.steam_recall import (
+    RRF_K,
     CandidateHit,
     CandidateSourceHit,
     RecallSource,
     RecallSourceStatus,
-    RRF_K,
     merge_candidate_sources,
 )
 from astrbot_plugin_steam_game_recommender.storage.models import (
@@ -251,7 +251,13 @@ class CompanyRecallServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fetch.source.source_id, "company:0")
         self.assertEqual(fetch.source.weight, 1.0)
         self.assertEqual(
-            list(zip([item.appid for item in fetch.source.candidates], fetch.source.candidate_ranks)),
+            list(
+                zip(
+                    [item.appid for item in fetch.source.candidates],
+                    fetch.source.candidate_ranks,
+                    strict=True,
+                )
+            ),
             [(1, 1), (3, 1), (4, 1), (2, 2)],
         )
 
@@ -281,7 +287,9 @@ class CompanyRecallServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(company.aliases), 5)
         self.assertLessEqual(len(client.company_calls), 10)
 
-    async def test_progressive_company_validation_globally_reranks_after_provenance_removal(self) -> None:
+    async def test_progressive_company_validation_globally_reranks_after_provenance_removal(
+        self,
+    ) -> None:
         service = ProgressiveCompanyRankService()
         game_preference = GamePreference(
             company_preferences=[preference()],
@@ -318,7 +326,9 @@ class CompanyRecallServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(by_appid[1].rrf_score, 0.5 / (RRF_K + 1))
         self.assertAlmostEqual(by_appid[61].rrf_score, 1.5 / (RRF_K + 61))
 
-    async def test_progressive_company_validation_stops_when_first_batch_has_enough_matches(self) -> None:
+    async def test_progressive_company_validation_stops_when_first_batch_has_enough_matches(
+        self,
+    ) -> None:
         service = ProgressiveCompanyRankService(match_from=1)
         game_preference = GamePreference(
             company_preferences=[preference()],
@@ -334,7 +344,9 @@ class CompanyRecallServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.validation_batches, [tuple(range(1, 61))])
         self.assertEqual(len(recall.hits), 60)
 
-    async def test_appdetails_removes_false_positive_company_provenance_and_refreshes_old_metadata(self) -> None:
+    async def test_appdetails_removes_false_positive_company_provenance_and_refreshes_old_metadata(
+        self,
+    ) -> None:
         client = CompanySteamClient()
         service = SteamGameIndexService(client, MemoryCache())
         company_hit = CandidateSourceHit("company:0", "company", None, 1, 1.0)
@@ -373,7 +385,7 @@ class CompanyRecallServiceTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_cached_company_metadata_is_refreshed_for_the_requested_role(self) -> None:
         client = CompanySteamClient()
-        service = SteamGameIndexService(client, MemoryCache())
+        service = SteamGameIndexService(client, MemoryCache(), clock=lambda: 200.0)
         publisher_preference = CompanyPreference(
             display_name="Acme Interactive",
             role="publisher",

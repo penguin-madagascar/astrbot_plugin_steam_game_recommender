@@ -70,21 +70,21 @@ def deduplicate_game_editions(
 
     selected: list[RankedGame] = []
     for family in families.values():
-        best_tier_order = min(ranked_game_precedence_key(game)[0] for game in family)
-        tier_family = [
+        best_rank = min(ranked_game_precedence_prefix(game) for game in family)
+        tied_games = [
             game
             for game in family
-            if ranked_game_precedence_key(game)[0] == best_tier_order
+            if ranked_game_precedence_prefix(game) == best_rank
         ]
         preferred_games = [
             game
-            for game in tier_family
+            for game in tied_games
             if game.appid is not None and int(game.appid) in preferred
         ]
         standard_games = [
-            game for game in tier_family if not is_edition_title(game.title)
+            game for game in tied_games if not is_edition_title(game.title)
         ]
-        pool = preferred_games or standard_games or tier_family
+        pool = preferred_games or standard_games or tied_games
         selected.append(min(pool, key=ranked_game_precedence_key))
     return sorted(selected, key=ranked_game_precedence_key)
 
