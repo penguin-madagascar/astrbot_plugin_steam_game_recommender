@@ -91,6 +91,71 @@ class RegionalPriceBridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.detail_appids, [])
         self.assertEqual(service.history_countries, [])
 
+    async def test_title_fallback_rejects_demo_identity(self) -> None:
+        service = TrackingPriceService(
+            history=active_history(),
+            resolved_appid=999,
+            details_appid=999,
+            details_name="Test Game Demo",
+            details_game_type="demo",
+        )
+        bridge = SteamPriceBridge(
+            client=object(),
+            config={"default_region": "US"},
+            service_factory=lambda _config, _client: service,
+        )
+
+        summary = await bridge.lookup("Test Game", country="US")
+
+        self.assertIsNone(summary)
+
+    async def test_title_fallback_rejects_other_edition(self) -> None:
+        service = TrackingPriceService(
+            history=active_history(),
+            resolved_appid=999,
+            details_appid=999,
+            details_name="Test Game Ultimate Edition",
+        )
+        bridge = SteamPriceBridge(
+            client=object(),
+            config={"default_region": "US"},
+            service_factory=lambda _config, _client: service,
+        )
+
+        summary = await bridge.lookup("Test Game", country="US")
+
+        self.assertIsNone(summary)
+
+    async def test_title_fallback_requires_details_for_identity_verification(self) -> None:
+        service = TrackingPriceService(
+            history=active_history(),
+            details_failure=RuntimeError("details unavailable"),
+        )
+        bridge = SteamPriceBridge(
+            client=object(),
+            config={"default_region": "US"},
+            service_factory=lambda _config, _client: service,
+        )
+
+        summary = await bridge.lookup("Test Game", country="US")
+
+        self.assertIsNone(summary)
+
+    async def test_title_fallback_accepts_exact_normalized_base_game(self) -> None:
+        service = TrackingPriceService(
+            history=active_history(),
+            details_name="TEST GAME™",
+        )
+        bridge = SteamPriceBridge(
+            client=object(),
+            config={"default_region": "US"},
+            service_factory=lambda _config, _client: service,
+        )
+
+        summary = await bridge.lookup("Test Game", country="US")
+
+        self.assertIsNotNone(summary)
+
     async def test_lookup_requests_only_selected_region_and_never_global_prices(self) -> None:
         service = TrackingPriceService(history=active_history())
         bridge = SteamPriceBridge(
@@ -168,6 +233,82 @@ class RegionalPriceBridgeTest(unittest.IsolatedAsyncioTestCase):
 
 
 class RegionalBudgetAndFormattingTest(unittest.TestCase):
+    def test_summary_currency_never_substitutes_current_currency(self) -> None:
+        game = RankedGame(title="Missing Current Currency", appid=123, score=80)
+        summary = GamePriceSummary(
+            region="CN",
+            currency="CNY",
+            current_price="¥40",
+            current_amount=40,
+            historic_low="¥120",
+            historic_low_amount=120,
+            historic_low_currency="CNY",
+        )
+
+        enriched = attach_price_summary(
+            game,
+            summary,
+            GamePreference(budget=100, budget_currency="CNY"),
+        )
+
+        self.assertEqual(enriched.score_breakdown.budget_adjustment, -2)
+        evidence = next(
+            item for item in enriched.recommendation_evidence if item.category == "budget"
+        )
+        self.assertEqual(evidence.evidence_id, "budget_price_unknown")
+
+    def test_summary_currency_never_substitutes_historic_currency(self) -> None:
+        game = RankedGame(title="Missing Historic Currency", appid=123, score=80)
+        summary = GamePriceSummary(
+            region="CN",
+            currency="CNY",
+            current_price="¥120",
+            current_amount=120,
+            current_currency="CNY",
+            historic_low="¥40",
+            historic_low_amount=40,
+        )
+
+        enriched = attach_price_summary(
+            game,
+            summary,
+            GamePreference(budget=100, budget_currency="CNY"),
+        )
+
+        self.assertEqual(enriched.score_breakdown.budget_adjustment, -2)
+        evidence = next(
+            item for item in enriched.recommendation_evidence if item.category == "budget"
+        )
+        self.assertEqual(evidence.evidence_id, "budget_price_unknown")
+
+    def test_recent_sale_currency_mismatch_makes_budget_uncertain(self) -> None:
+        game = RankedGame(title="Mixed Recent Currency", appid=123, score=80)
+        summary = GamePriceSummary(
+            region="CN",
+            currency="CNY",
+            current_price="¥120",
+            current_amount=120,
+            current_currency="CNY",
+            historic_low="¥110",
+            historic_low_amount=110,
+            historic_low_currency="CNY",
+            recent_sale_price="ARS 50",
+            recent_sale_amount=50,
+            recent_sale_currency="ARS",
+        )
+
+        enriched = attach_price_summary(
+            game,
+            summary,
+            GamePreference(budget=100, budget_currency="CNY"),
+        )
+
+        self.assertEqual(enriched.score_breakdown.budget_adjustment, -2)
+        evidence = next(
+            item for item in enriched.recommendation_evidence if item.category == "budget"
+        )
+        self.assertEqual(evidence.evidence_id, "budget_currency_mismatch")
+
     def test_historic_low_in_different_currency_is_not_compared_to_budget(self) -> None:
         game = RankedGame(title="Mixed Currency Game", appid=123, score=80)
         summary = GamePriceSummary(
@@ -201,8 +342,10 @@ class RegionalBudgetAndFormattingTest(unittest.TestCase):
             currency="USD",
             current_price="$40",
             current_amount=40,
+            current_currency="USD",
             historic_low="$20",
             historic_low_amount=20,
+            historic_low_currency="USD",
         )
 
         enriched = attach_price_summary(
@@ -221,8 +364,10 @@ class RegionalBudgetAndFormattingTest(unittest.TestCase):
             currency="USD",
             current_price="$40",
             current_amount=40,
+            current_currency="USD",
             historic_low="$20",
             historic_low_amount=20,
+            historic_low_currency="USD",
         )
 
         enriched = attach_price_summary(
@@ -379,10 +524,16 @@ class TrackingPriceService:
         *,
         resolved_appid: int = 123,
         details_appid: int = 123,
+        details_name: str = "Test Game",
+        details_game_type: str = "game",
+        details_failure: Exception | None = None,
     ) -> None:
         self.history = history
         self.resolved_appid = resolved_appid
         self.details_appid = details_appid
+        self.details_name = details_name
+        self.details_game_type = details_game_type
+        self.details_failure = details_failure
         self.resolve_queries: list[str] = []
         self.detail_appids: list[int] = []
         self.detail_countries: list[str] = []
@@ -404,7 +555,13 @@ class TrackingPriceService:
     async def details(self, appid: int, country: str, _language: str) -> SteamGameDetails:
         self.detail_appids.append(appid)
         self.detail_countries.append(country)
-        return steam_details(appid=self.details_appid)
+        if self.details_failure is not None:
+            raise self.details_failure
+        return steam_details(
+            appid=self.details_appid,
+            name=self.details_name,
+            game_type=self.details_game_type,
+        )
 
     async def load_history(self, _appid: int, country: str) -> PriceHistory | None:
         self.history_countries.append(country)
@@ -415,11 +572,16 @@ class TrackingPriceService:
         raise AssertionError("global_prices must not be called")
 
 
-def steam_details(appid: int = 123) -> SteamGameDetails:
+def steam_details(
+    appid: int = 123,
+    *,
+    name: str = "Test Game",
+    game_type: str = "game",
+) -> SteamGameDetails:
     return SteamGameDetails(
         appid=appid,
-        name="Test Game",
-        game_type="game",
+        name=name,
+        game_type=game_type,
         is_free=False,
         coming_soon=False,
         release_date="2026-01-01",

@@ -738,6 +738,7 @@ class BudgetScoringTest(unittest.TestCase):
             currency="CNY",
             historic_low="¥80",
             historic_low_amount=80,
+            historic_low_currency="CNY",
         )
 
         enriched = attach_price_summary(
@@ -808,10 +809,13 @@ def price_summary(current_cny: float, lowest_cny: float) -> GamePriceSummary:
         currency="CNY",
         current_price=f"¥{current_cny:g}",
         current_amount=current_cny,
+        current_currency="CNY",
         historic_low=f"¥{lowest_cny:g}",
         historic_low_amount=lowest_cny,
+        historic_low_currency="CNY",
         recent_sale_price=f"¥{lowest_cny:g}",
         recent_sale_amount=lowest_cny,
+        recent_sale_currency="CNY",
         sale_time_status="结束于 10 天前",
     )
 

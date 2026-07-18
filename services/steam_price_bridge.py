@@ -17,6 +17,7 @@ from ..storage.models import (
     RecommendationEvidence,
     ScoreBreakdown,
 )
+from .game_identity import normalize_game_title
 from .ranking_precedence import effective_score
 from .region_query import normalize_region, region_currency
 from .safe_errors import log_external_failure
@@ -236,6 +237,8 @@ class SteamPriceBridge:
         details = details_result if is_steam_details(details_result) else None
         if details is not None and int(details.appid) != int(identity.appid):
             details = None
+        if requested_appid <= 0 and not title_fallback_identity_matches(title, details):
+            return None
         history = history_result if is_price_history(history_result) else None
         if details is None and history is None:
             return None
@@ -412,14 +415,41 @@ def evaluate_budget(
     currency: str,
     budget_is_required: bool = False,
 ) -> tuple[float, RecommendationEvidence]:
+    currency = normalize_currency(currency)
     budget_text = format_money(budget, currency)
-    fallback_currency = normalize_currency(summary.currency or "")
-    current_currency = normalize_currency(
-        summary.current_currency or fallback_currency
+    current_currency = normalize_currency(summary.current_currency or "")
+    historic_currency = normalize_currency(summary.historic_low_currency or "")
+    recent_currency = normalize_currency(summary.recent_sale_currency or "")
+    components = (
+        (summary.current_amount, current_currency),
+        (summary.historic_low_amount, historic_currency),
+        (summary.recent_sale_amount, recent_currency),
     )
-    historic_currency = normalize_currency(
-        summary.historic_low_currency or fallback_currency
-    )
+    mismatched = [
+        component_currency
+        for amount, component_currency in components
+        if amount is not None
+        and component_currency
+        and component_currency != currency
+    ]
+    if mismatched:
+        return -2.0, budget_evidence(
+            "budget_currency_mismatch",
+            "uncertain",
+            (
+                f"预算币种 {currency} 与部分价格币种"
+                f" {', '.join(dict.fromkeys(mismatched))} 不一致，预算匹配无法确认"
+            ),
+        )
+    if any(
+        amount is not None and not component_currency
+        for amount, component_currency in components
+    ):
+        return -2.0, budget_evidence(
+            "budget_price_unknown",
+            "uncertain",
+            "价格分项币种未获取完整，预算匹配无法确认",
+        )
     current_comparable = (
         summary.current_amount is not None and current_currency == currency
     )
@@ -444,25 +474,6 @@ def evaluate_budget(
             f"{current_context}，但史低 {summary.historic_low} 曾低于预算",
         )
     if not current_comparable or not historic_comparable:
-        mismatched = [
-            component_currency
-            for amount, component_currency in (
-                (summary.current_amount, current_currency),
-                (summary.historic_low_amount, historic_currency),
-            )
-            if amount is not None
-            and component_currency
-            and component_currency != currency
-        ]
-        if mismatched:
-            return -2.0, budget_evidence(
-                "budget_currency_mismatch",
-                "uncertain",
-                (
-                    f"预算币种 {currency} 与部分价格币种"
-                    f" {', '.join(dict.fromkeys(mismatched))} 不一致，预算匹配无法确认"
-                ),
-            )
         return -2.0, budget_evidence(
             "budget_price_unknown",
             "uncertain",
@@ -475,6 +486,14 @@ def evaluate_budget(
         (f"当前价 {summary.current_price} 与史低 {summary.historic_low} 都高于预算 {budget_text}"),
         important=True,
     )
+
+
+def title_fallback_identity_matches(title: str, details: Any | None) -> bool:
+    if details is None or str(getattr(details, "game_type", "")).casefold() != "game":
+        return False
+    requested = normalize_game_title(title)
+    resolved = normalize_game_title(str(getattr(details, "name", "")))
+    return bool(requested) and resolved == requested
 
 
 def attach_missing_price_warning(game: RankedGame) -> RankedGame:

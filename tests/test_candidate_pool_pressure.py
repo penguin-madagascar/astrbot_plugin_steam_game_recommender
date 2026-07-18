@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import patch
 
 try:
@@ -59,8 +58,10 @@ class RecordingPriceBridge(SteamPriceBridge):
         self,
         title: str,
         country: str | None = None,
+        *,
+        appid: int | None = None,
     ) -> GamePriceSummary | None:
-        del country
+        del country, appid
         self.lookup_calls.append(title)
         return self.summaries[title]
 
@@ -106,8 +107,10 @@ def price_summary(current_amount: float, historic_low_amount: float) -> GamePric
         currency="CNY",
         current_price=f"¥{current_amount:g}",
         current_amount=current_amount,
+        current_currency="CNY",
         historic_low=f"¥{historic_low_amount:g}",
         historic_low_amount=historic_low_amount,
+        historic_low_currency="CNY",
     )
 
 
