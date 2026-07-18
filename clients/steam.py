@@ -613,7 +613,12 @@ class SteamClient:
     def has_web_api_key(self) -> bool:
         return bool(self.steam_api_key)
 
-    async def get_owned_games(self, steam_id64: str) -> list[SteamOwnedGame]:
+    async def get_owned_games(
+        self,
+        steam_id64: str,
+        *,
+        binding_identity: tuple[str, str] | None = None,
+    ) -> list[SteamOwnedGame]:
         if not self.steam_api_key:
             raise SteamApiError("未配置 steam_api_key，无法查询 Steam 游戏库。")
 
@@ -632,6 +637,7 @@ class SteamClient:
             follow_redirects=False,
             cache_identity={"api_key_fingerprint": key_fingerprint},
             owner_scope=f"steam-account:{steam_id64}",
+            binding_identity=binding_identity,
             validator=validate_owned_games_payload,
         )
         response = data.get("response") if isinstance(data, dict) else None
@@ -667,6 +673,7 @@ class SteamClient:
         follow_redirects: bool | None = None,
         cache_identity: dict[str, Any] | None = None,
         owner_scope: str = "",
+        binding_identity: tuple[str, str] | None = None,
     ) -> Any:
         cache_key = self._cache_key(
             url,
@@ -722,6 +729,7 @@ class SteamClient:
             data,
             ttl_hours=stale_ttl_hours,
             owner_scope=owner_scope,
+            binding_identity=binding_identity,
         )
         return data
 
@@ -1013,7 +1021,28 @@ class SteamClient:
         *,
         ttl_hours: int | float,
         owner_scope: str = "",
+        binding_identity: tuple[str, str] | None = None,
     ) -> None:
+        exact_setter = getattr(
+            self.cache,
+            "set_json_if_steam_account_binding",
+            None,
+        )
+        if (
+            owner_scope.startswith("steam-account:")
+            and binding_identity is not None
+            and callable(exact_setter)
+        ):
+            await exact_setter(
+                key,
+                payload,
+                chat_platform=binding_identity[0],
+                chat_user_id=binding_identity[1],
+                steam_id64=owner_scope.removeprefix("steam-account:"),
+                ttl_hours=ttl_hours,
+                owner_scope=owner_scope,
+            )
+            return
         conditional_setter = getattr(
             self.cache,
             "set_json_if_steam_account_bound",

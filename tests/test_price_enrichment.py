@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT.parent))
@@ -72,6 +73,8 @@ class CommandRegistrationTest(unittest.TestCase):
         self.assertIn("游戏推荐", commands["gamerec"])
         self.assertIn("accountbind", commands)
         self.assertIn("账号绑定", commands["accountbind"])
+        self.assertIn("accountunbind", commands)
+        self.assertIn("解除绑定", commands["accountunbind"])
         self.assertIn("randomrec", commands)
         self.assertIn("随机推荐", commands["randomrec"])
         self.assertNotIn("unplayedrec", commands)
@@ -314,6 +317,97 @@ class FormatterLlmIoBoundaryTest(unittest.IsolatedAsyncioTestCase):
 
 
 class PriceBridgeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_optional_price_initialization_failure_is_safely_disabled(
+        self,
+    ) -> None:
+        secret = "token=secret-key /private/price-provider/path"
+
+        def failing_factory(_config, _client):
+            raise RuntimeError(secret)
+
+        with self.assertLogs(
+            "astrbot_plugin_steam_game_recommender.services.steam_price_bridge",
+            level="WARNING",
+        ) as captured:
+            bridge = SteamPriceBridge(
+                client=object(),
+                config={"default_region": "CN"},
+                service_factory=failing_factory,
+            )
+
+        output = "\n".join(captured.output)
+        self.assertFalse(bridge.is_available())
+        self.assertNotIn(secret, output)
+        self.assertNotIn("secret-key", output)
+        self.assertIn("error_type=RuntimeError", output)
+
+    async def test_optional_country_parser_failure_is_safely_disabled(self) -> None:
+        secret = "token=secret-key /private/country-parser/path"
+
+        with (
+            patch(
+                "astrbot_plugin_steam_game_recommender.services."
+                "steam_price_bridge.normalize_country",
+                side_effect=RuntimeError(secret),
+            ),
+            self.assertLogs(
+                "astrbot_plugin_steam_game_recommender.services.steam_price_bridge",
+                level="WARNING",
+            ) as captured,
+        ):
+            bridge = SteamPriceBridge(
+                client=object(),
+                config={"default_region": "CN"},
+                service_factory=lambda _config, _client: object(),
+            )
+
+        output = "\n".join(captured.output)
+        self.assertFalse(bridge.is_available())
+        self.assertNotIn(secret, output)
+        self.assertNotIn("secret-key", output)
+
+    async def test_runtime_country_parser_failure_only_skips_price_enrichment(
+        self,
+    ) -> None:
+        secret = "regional parser failure token=secret"
+
+        def parse_country(value: str) -> str:
+            if value == "US":
+                raise RuntimeError(secret)
+            return value
+
+        with patch(
+            "astrbot_plugin_steam_game_recommender.services."
+            "steam_price_bridge.normalize_country",
+            side_effect=parse_country,
+        ):
+            bridge = SteamPriceBridge(
+                client=object(),
+                config={"default_region": "CN"},
+                service_factory=lambda _config, _client: FakePriceService(),
+            )
+            with self.assertLogs(
+                "astrbot_plugin_steam_game_recommender.services.steam_price_bridge",
+                level="WARNING",
+            ) as captured:
+                enriched = await bridge.enrich_ranked_games(
+                    [
+                        RankedGame(
+                            title="Test Game",
+                            score=10,
+                            stores=["Steam"],
+                        )
+                    ],
+                    GamePreference(region="US", budget=100),
+                )
+
+        output = "\n".join(captured.output)
+        self.assertTrue(bridge.is_available())
+        self.assertEqual(enriched[0].title, "Test Game")
+        self.assertIsNone(enriched[0].price_summary)
+        self.assertNotIn(secret, output)
+        self.assertIn("error_type=RuntimeError", output)
+
     async def test_missing_http_client_leaves_games_unchanged(self) -> None:
         bridge = SteamPriceBridge(client=None, config={})
         games = [RankedGame(title="Test Game", score=10)]
@@ -519,6 +613,48 @@ class PriceBridgeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(bridge.lookup_calls), 10)
         self.assertIsNone(enriched[-1].price_summary)
+
+    async def test_existing_price_summary_is_not_looked_up_again(self) -> None:
+        existing = price_summary(current_cny=30, lowest_cny=20)
+        bridge = FixedPriceBridge(
+            {"Missing Price": price_summary(current_cny=40, lowest_cny=25)}
+        )
+        games = [
+            RankedGame(
+                title="Already Priced",
+                platforms=["PC"],
+                stores=["Steam"],
+                price_summary=existing,
+            ),
+            RankedGame(
+                title="Missing Price",
+                platforms=["PC"],
+                stores=["Steam"],
+            ),
+        ]
+
+        enriched = await bridge.enrich_ranked_games(games, GamePreference())
+
+        self.assertIs(enriched[0].price_summary, existing)
+        self.assertIsNotNone(enriched[1].price_summary)
+        self.assertEqual(bridge.lookup_calls, ["Missing Price"])
+
+    async def test_failed_no_budget_lookup_is_not_repeated(self) -> None:
+        bridge = FixedPriceBridge({})
+        games = [
+            RankedGame(
+                title="Unavailable Price",
+                appid=10,
+                platforms=["PC"],
+                stores=["Steam"],
+            )
+        ]
+
+        first = await bridge.enrich_ranked_games(games, GamePreference())
+        second = await bridge.enrich_ranked_games(first, GamePreference())
+
+        self.assertIsNone(second[0].price_summary)
+        self.assertEqual(bridge.lookup_calls, ["Unavailable Price"])
 
     async def test_price_lookup_concurrency_is_capped_at_four(self) -> None:
         bridge = ConcurrentPriceBridge()

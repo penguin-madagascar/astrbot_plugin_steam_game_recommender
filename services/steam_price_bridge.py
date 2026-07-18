@@ -31,6 +31,7 @@ PRICE_LOOKUP_CONCURRENCY = 4
 DEFAULT_HISTORY_DAYS = 720
 DEFAULT_LANGUAGE = "schinese"
 PRICE_PLUGIN_PACKAGE = "astrbot_plugin_steam_price_heybox"
+PRICE_LOOKUP_ATTEMPTED_PREFIX = "price_lookup_attempted:"
 PRICE_PLUGIN_IMPORT_ERROR: Exception | None = None
 _PRICE_PLUGIN_SYMBOLS: "PricePluginSymbols | None" = None
 
@@ -111,33 +112,45 @@ class SteamPriceBridge:
         service_factory: ServiceFactory | None = None,
         today_provider: Callable[[], date] = date.today,
     ) -> None:
-        self.default_country = normalize_country(str(config.get("default_region") or "CN"))
+        self.default_country = "CN"
         self.lookup_limit = DEFAULT_PRICE_LOOKUP_LIMIT
         self.today_provider = today_provider
         self.service: Any | None = None
 
-        if client is None:
-            return
-        factory = service_factory or default_service_factory()
-        if factory is None:
-            if PRICE_PLUGIN_IMPORT_ERROR:
-                log_external_failure(
-                    logger,
-                    "price_bridge_import_failed",
-                    stage="price_bridge_import",
-                    exc=PRICE_PLUGIN_IMPORT_ERROR,
-                    level=logging.DEBUG,
-                )
-            return
+        try:
+            self.default_country = normalize_country(
+                str(config.get("default_region") or "CN")
+            )
+            if client is None:
+                return
+            factory = service_factory or default_service_factory()
+            if factory is None:
+                if PRICE_PLUGIN_IMPORT_ERROR:
+                    log_external_failure(
+                        logger,
+                        "price_bridge_import_failed",
+                        stage="price_bridge_import",
+                        exc=PRICE_PLUGIN_IMPORT_ERROR,
+                        level=logging.DEBUG,
+                    )
+                return
 
-        price_config = {
-            "default_country": self.default_country,
-            "default_history_country": self.default_country,
-            "default_language": DEFAULT_LANGUAGE,
-            "history_days": DEFAULT_HISTORY_DAYS,
-            "llm_name_retry_count": 0,
-        }
-        self.service = factory(price_config, client)
+            price_config = {
+                "default_country": self.default_country,
+                "default_history_country": self.default_country,
+                "default_language": DEFAULT_LANGUAGE,
+                "history_days": DEFAULT_HISTORY_DAYS,
+                "llm_name_retry_count": 0,
+            }
+            self.service = factory(price_config, client)
+        except Exception as exc:
+            self.service = None
+            log_external_failure(
+                logger,
+                "price_bridge_initialization_failed",
+                stage="price_bridge_initialization",
+                exc=exc,
+            )
 
     def is_available(self) -> bool:
         return self.service is not None
@@ -150,17 +163,25 @@ class SteamPriceBridge:
         if self.lookup_limit <= 0:
             return games
         if not self.is_available():
-            if preference.budget is None:
-                return games
-            return [
-                attach_missing_price_warning(game) if has_steam_purchase_signal(game) else game
-                for game in games
-            ]
+            return games_without_price_enrichment(games, preference)
 
-        country = normalize_country(preference.region or self.default_country)
+        try:
+            country = normalize_country(preference.region or self.default_country)
+        except Exception as exc:
+            log_external_failure(
+                logger,
+                "price_region_parse_failed",
+                stage="price_region_parse",
+                exc=exc,
+            )
+            return games_without_price_enrichment(games, preference)
         semaphore = asyncio.Semaphore(PRICE_LOOKUP_CONCURRENCY)
 
         async def enrich_one(index: int, game: RankedGame) -> RankedGame:
+            if game.price_summary is not None:
+                return game
+            if price_lookup_was_attempted(game, country):
+                return game
             if not has_steam_purchase_signal(game):
                 return game
             # A budget adjustment can pull any same-tier candidate into the
@@ -174,7 +195,12 @@ class SteamPriceBridge:
                     country,
                     appid=game.appid,
                 )
-            return attach_price_summary(game, summary, preference)
+            resolved_game = (
+                mark_price_lookup_attempted(game, country)
+                if summary is None
+                else game
+            )
+            return attach_price_summary(resolved_game, summary, preference)
 
         enriched = list(
             await asyncio.gather(*(enrich_one(index, game) for index, game in enumerate(games)))
@@ -184,7 +210,6 @@ class SteamPriceBridge:
             if preference.budget is not None
             else enriched
         )
-
     async def lookup(
         self,
         title: str,
@@ -248,6 +273,18 @@ class SteamPriceBridge:
             history,
             today=self.today_provider(),
         )
+
+
+def games_without_price_enrichment(
+    games: list[RankedGame],
+    preference: GamePreference,
+) -> list[RankedGame]:
+    if preference.budget is None:
+        return games
+    return [
+        attach_missing_price_warning(game) if has_steam_purchase_signal(game) else game
+        for game in games
+    ]
 
 
 def default_service_factory() -> ServiceFactory | None:
@@ -592,6 +629,26 @@ def has_steam_purchase_signal(game: RankedGame) -> bool:
         term in " | ".join([*game.platforms, *game.stores]).lower()
         for term in ("steam", "pc", "windows")
     )
+
+
+def price_lookup_was_attempted(game: RankedGame, country: str) -> bool:
+    return price_lookup_attempt_marker(country) in game.internal_source_markers
+
+
+def mark_price_lookup_attempted(game: RankedGame, country: str) -> RankedGame:
+    marker = price_lookup_attempt_marker(country)
+    if marker in game.internal_source_markers:
+        return game
+    data = dump_model(game)
+    data["internal_source_markers"] = [
+        *game.internal_source_markers,
+        marker,
+    ]
+    return RankedGame(**data)
+
+
+def price_lookup_attempt_marker(country: str) -> str:
+    return f"{PRICE_LOOKUP_ATTEMPTED_PREFIX}{normalize_region(country)}"
 
 
 def decimal_to_float(value: Decimal | None) -> float | None:

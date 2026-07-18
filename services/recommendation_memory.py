@@ -52,6 +52,7 @@ class RecommendationMemory:
     last_results: list[RecommendationResultSummary] = field(default_factory=list)
     feedback: list[RecommendationFeedback] = field(default_factory=list)
     conversation_scope: str = ""
+    storage_revision: str = ""
 
 
 def build_recommendation_memory(
@@ -80,18 +81,36 @@ def build_recommendation_memory(
     return append_shown_games(memory, games)
 
 
-async def save_recommendation_memory(cache: Any, memory: RecommendationMemory) -> None:
+async def save_recommendation_memory(
+    cache: Any,
+    memory: RecommendationMemory,
+) -> bool:
     scope = memory.conversation_scope or memory.chat_platform
+    key = recommendation_memory_key(scope, memory.chat_user_id)
+    payload = dump_memory(memory)
+    owner_scope = recommendation_owner_scope(
+        memory.chat_platform,
+        memory.chat_user_id,
+    )
+    conditional_setter = getattr(cache, "set_json_if_revision", None)
+    if memory.storage_revision and callable(conditional_setter):
+        return bool(
+            await conditional_setter(
+                key,
+                payload,
+                expected_revision=memory.storage_revision,
+                ttl_seconds=MEMORY_TTL_MINUTES * 60,
+                owner_scope=owner_scope,
+            )
+        )
     await cache_set_json(
         cache,
-        recommendation_memory_key(scope, memory.chat_user_id),
-        dump_memory(memory),
+        key,
+        payload,
         ttl_seconds=MEMORY_TTL_MINUTES * 60,
-        owner_scope=recommendation_owner_scope(
-            memory.chat_platform,
-            memory.chat_user_id,
-        ),
+        owner_scope=owner_scope,
     )
+    return True
 
 
 async def load_recommendation_memory(
@@ -101,7 +120,7 @@ async def load_recommendation_memory(
     ttl_minutes: int = MEMORY_TTL_MINUTES,
     now: float | None = None,
 ) -> RecommendationMemory | None:
-    payload = await cache_get_json(
+    payload, storage_revision = await cache_get_json_with_revision(
         cache,
         recommendation_memory_key(chat_platform, chat_user_id),
     )
@@ -120,6 +139,7 @@ async def load_recommendation_memory(
     return replace(
         memory,
         feedback=[item for item in memory.feedback if item.created_at >= cutoff],
+        storage_revision=storage_revision,
     )
 
 
@@ -282,6 +302,22 @@ async def cache_get_json(cache: Any, key: str) -> Any | None:
     if "allow_stale_seconds" in inspect.signature(getter).parameters:
         return await getter(key, 24, allow_stale_seconds=0)
     return await getter(key, 24)
+
+
+async def cache_get_json_with_revision(
+    cache: Any,
+    key: str,
+) -> tuple[Any | None, str]:
+    getter = getattr(cache, "get_json_with_revision", None)
+    if callable(getter):
+        kwargs = (
+            {"allow_stale_seconds": 0}
+            if "allow_stale_seconds" in inspect.signature(getter).parameters
+            else {}
+        )
+        payload, revision = await getter(key, 24, **kwargs)
+        return payload, str(revision or "")
+    return await cache_get_json(cache, key), ""
 
 
 async def cache_set_json(

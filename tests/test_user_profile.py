@@ -259,7 +259,13 @@ class FakeOwnedGamesClient:
     def has_web_api_key(self) -> bool:
         return self.has_key
 
-    async def get_owned_games(self, _steam_id64: str) -> list[SteamOwnedGame]:
+    async def get_owned_games(
+        self,
+        _steam_id64: str,
+        *,
+        binding_identity=None,
+    ) -> list[SteamOwnedGame]:
+        del binding_identity
         return [
             SteamOwnedGame(appid=1, name="Farm Workshop", playtime_forever=2400),
             SteamOwnedGame(appid=2, name="Arena Shooter", playtime_forever=30),

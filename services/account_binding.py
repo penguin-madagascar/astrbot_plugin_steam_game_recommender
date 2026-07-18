@@ -9,7 +9,34 @@ STEAM_ACCOUNT_ID_MAX = 2**32 - 1
 
 
 class AccountBindingError(ValueError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "account_binding_invalid",
+    ) -> None:
+        self.code = code
+        super().__init__(message)
+
+
+ACCOUNT_BINDING_USER_MESSAGES = {
+    "account_input_required": "请输入 SteamID64 或纯数字好友码。",
+    "account_format_invalid": "Steam 账号只能填写 SteamID64 或纯数字好友码。",
+    "account_range_invalid": "SteamID64 或好友码不在个人账号有效范围内。",
+    "conversation_identity_unavailable": "无法识别当前会话。",
+    "sender_identity_unavailable": "无法识别当前发送者。",
+    "legacy_binding_ambiguous": (
+        "检测到旧版账号绑定，但无法确认唯一的平台实例；"
+        "请使用 /accountbind 重新绑定。"
+    ),
+}
+
+
+def account_binding_user_message(error: AccountBindingError) -> str:
+    return ACCOUNT_BINDING_USER_MESSAGES.get(
+        error.code,
+        "账号信息无效或当前会话无法识别，请检查后重试。",
+    )
 
 
 @dataclass(frozen=True)
@@ -23,7 +50,10 @@ class ParsedSteamAccount:
 def parse_account_binding_command(text: str) -> ParsedSteamAccount:
     raw = str(text or "").strip()
     if not raw:
-        raise AccountBindingError("请输入账号，例如：/accountbind 76561198000000000")
+        raise AccountBindingError(
+            "请输入账号，例如：/accountbind 76561198000000000",
+            code="account_input_required",
+        )
     return parse_steam_account(raw)
 
 
@@ -31,7 +61,10 @@ def parse_steam_account(value: str) -> ParsedSteamAccount:
     display_value = str(value or "").strip()
     digits = re.sub(r"[\s-]+", "", display_value)
     if not digits or not digits.isdigit():
-        raise AccountBindingError("Steam 账号只能填写 SteamID64 或纯数字好友码。")
+        raise AccountBindingError(
+            "Steam 账号只能填写 SteamID64 或纯数字好友码。",
+            code="account_format_invalid",
+        )
 
     number = int(digits)
     if (
@@ -53,7 +86,8 @@ def parse_steam_account(value: str) -> ParsedSteamAccount:
         )
 
     raise AccountBindingError(
-        "SteamID64 应为 17 位数字；好友码应为较短的纯数字。"
+        "SteamID64 应为 17 位数字；好友码应为较短的纯数字。",
+        code="account_range_invalid",
     )
 
 
@@ -75,7 +109,10 @@ def recommendation_scope_from_event(event: Any) -> tuple[str, str]:
     user_id = sender_id_from_event(event)
     unified_msg_origin = str(getattr(event, "unified_msg_origin", "") or "").strip()
     if not unified_msg_origin:
-        raise AccountBindingError("无法识别当前会话。")
+        raise AccountBindingError(
+            "无法识别当前会话。",
+            code="conversation_identity_unavailable",
+        )
     return unified_msg_origin, user_id
 
 
@@ -124,7 +161,10 @@ def sender_id_from_event(event: Any) -> str:
     user_id = str(user_getter() if callable(user_getter) else getattr(event, "sender_id", ""))
     user_id = user_id.strip()
     if not user_id:
-        raise AccountBindingError("无法识别当前发送者。")
+        raise AccountBindingError(
+            "无法识别当前发送者。",
+            code="sender_identity_unavailable",
+        )
     return user_id
 
 

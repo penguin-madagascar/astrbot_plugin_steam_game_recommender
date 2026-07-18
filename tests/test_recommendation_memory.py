@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 from typing import Any
 
 from astrbot_plugin_steam_game_recommender.services.recommendation_memory import (
@@ -20,6 +22,7 @@ from astrbot_plugin_steam_game_recommender.services.steam_index import (
     SteamGameIndexService,
 )
 from astrbot_plugin_steam_game_recommender.storage.models import GamePreference, RankedGame
+from astrbot_plugin_steam_game_recommender.storage.repository import SQLiteCacheRepository
 
 
 class RecommendationMemoryTest(unittest.IsolatedAsyncioTestCase):
@@ -153,6 +156,89 @@ class RecommendationMemoryTest(unittest.IsolatedAsyncioTestCase):
             cache.deleted_owner_scopes,
             [recommendation_owner_scope("onebot-instance", "user-1")],
         )
+
+    async def test_loaded_memory_cannot_be_restored_after_owner_deletion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = SQLiteCacheRepository(Path(tmpdir) / "cache.sqlite3")
+            memory = build_recommendation_memory(
+                chat_platform="onebot-instance",
+                chat_user_id="user-1",
+                conversation_scope="onebot-instance:GroupMessage:group-1",
+                raw_query="private retry query",
+                preference=GamePreference(),
+                result_limit=1,
+                games=[ranked_game("Game A", 1)],
+                now=1000,
+            )
+            await save_recommendation_memory(cache, memory)
+            loaded = await load_recommendation_memory(
+                memory.conversation_scope,
+                memory.chat_user_id,
+                cache,
+                now=1010,
+            )
+            assert loaded is not None
+
+            await cache.delete_owner_scope(
+                recommendation_owner_scope("onebot-instance", "user-1")
+            )
+            saved = await save_recommendation_memory(cache, loaded)
+
+            self.assertIs(saved, False)
+            self.assertIsNone(
+                await cache.get_json(
+                    recommendation_memory_key(
+                        memory.conversation_scope,
+                        memory.chat_user_id,
+                    ),
+                    24,
+                )
+            )
+
+    async def test_stale_loaded_memory_cannot_overwrite_newer_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = SQLiteCacheRepository(Path(tmpdir) / "cache.sqlite3")
+            old_memory = build_recommendation_memory(
+                chat_platform="onebot-instance",
+                chat_user_id="user-1",
+                conversation_scope="onebot-instance:GroupMessage:group-1",
+                raw_query="old query",
+                preference=GamePreference(),
+                result_limit=1,
+                games=[ranked_game("Game A", 1)],
+                now=1000,
+            )
+            await save_recommendation_memory(cache, old_memory)
+            loaded_old = await load_recommendation_memory(
+                old_memory.conversation_scope,
+                old_memory.chat_user_id,
+                cache,
+                now=1010,
+            )
+            assert loaded_old is not None
+            new_memory = build_recommendation_memory(
+                chat_platform=old_memory.chat_platform,
+                chat_user_id=old_memory.chat_user_id,
+                conversation_scope=old_memory.conversation_scope,
+                raw_query="new query",
+                preference=GamePreference(),
+                result_limit=1,
+                games=[ranked_game("Game B", 2)],
+                now=1020,
+            )
+            await save_recommendation_memory(cache, new_memory)
+
+            saved = await save_recommendation_memory(cache, loaded_old)
+            loaded_new = await load_recommendation_memory(
+                new_memory.conversation_scope,
+                new_memory.chat_user_id,
+                cache,
+                now=1030,
+            )
+
+            self.assertIs(saved, False)
+            assert loaded_new is not None
+            self.assertEqual(loaded_new.raw_query, "new query")
 
     async def test_legacy_memory_defaults_budget_requirement_to_false(self) -> None:
         cache = MemoryCache()

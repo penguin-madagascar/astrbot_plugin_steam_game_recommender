@@ -613,6 +613,15 @@ class SteamClientTest(unittest.IsolatedAsyncioTestCase):
             cache = SQLiteCacheRepository(Path(temp_dir) / "cache.sqlite3")
             await cache.upsert_steam_account_binding(
                 SteamAccountBinding(
+                    chat_platform="onebot-other-instance",
+                    chat_user_id="other-user",
+                    steam_id64="76561198000000000",
+                    account_kind="steam_id64",
+                    display_value="76561198000000000",
+                )
+            )
+            await cache.upsert_steam_account_binding(
+                SteamAccountBinding(
                     chat_platform="onebot-instance",
                     chat_user_id="user-1",
                     steam_id64="76561198000000000",
@@ -628,7 +637,10 @@ class SteamClientTest(unittest.IsolatedAsyncioTestCase):
                         http,
                         cache,
                         steam_api_key="PRIVATE_KEY",
-                    ).get_owned_games("76561198000000000")
+                    ).get_owned_games(
+                        "76561198000000000",
+                        binding_identity=("onebot-instance", "user-1"),
+                    )
                 )
                 await request_started.wait()
                 deleted = await cache.delete_steam_account_data(
@@ -674,8 +686,14 @@ class SteamClientTest(unittest.IsolatedAsyncioTestCase):
                 steam_api_key="PRIVATE_KEY",
             )
 
-            await client.get_owned_games("76561198000000000")
-            await client.get_owned_games("76561198000000000")
+            await client.get_owned_games(
+                "76561198000000000",
+                binding_identity=("onebot-instance", "user-1"),
+            )
+            await client.get_owned_games(
+                "76561198000000000",
+                binding_identity=("onebot-instance", "user-1"),
+            )
 
             self.assertEqual(http_client.call_count, 1)
             with sqlite3.connect(cache.db_path) as connection:

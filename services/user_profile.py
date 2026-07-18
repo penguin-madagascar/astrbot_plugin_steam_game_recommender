@@ -23,7 +23,10 @@ async def load_bound_user_tag_weights(
     if not callable(has_key) or not has_key():
         return {}
     try:
-        owned_games = await steam_client.get_owned_games(binding.steam_id64)
+        owned_games = await steam_client.get_owned_games(
+            binding.steam_id64,
+            binding_identity=(binding.chat_platform, binding.chat_user_id),
+        )
     except Exception:
         return {}
     return build_user_tag_weights(owned_games, index_entries)

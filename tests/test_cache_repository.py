@@ -232,6 +232,43 @@ class SQLiteCacheRepositoryTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(await repository.get_json("public", 24), {"value": 3})
 
+    async def test_personal_cache_write_requires_the_exact_chat_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repository = SQLiteCacheRepository(Path(tmpdir) / "cache.sqlite3")
+            await repository.upsert_steam_account_binding(
+                SteamAccountBinding(
+                    chat_platform="onebot-instance-a",
+                    chat_user_id="user-1",
+                    steam_id64="76561198000000000",
+                    account_kind="steam_id64",
+                    display_value="76561198000000000",
+                )
+            )
+
+            foreign_write = await repository.set_json_if_steam_account_binding(
+                "foreign",
+                {"games": [1]},
+                chat_platform="onebot-instance-b",
+                chat_user_id="user-1",
+                steam_id64="76561198000000000",
+                ttl_hours=24,
+                owner_scope="steam-account:76561198000000000",
+            )
+            bound_write = await repository.set_json_if_steam_account_binding(
+                "bound",
+                {"games": [1]},
+                chat_platform="onebot-instance-a",
+                chat_user_id="user-1",
+                steam_id64="76561198000000000",
+                ttl_hours=24,
+                owner_scope="steam-account:76561198000000000",
+            )
+
+            self.assertIs(foreign_write, False)
+            self.assertIsNone(await repository.get_json("foreign", 24))
+            self.assertIs(bound_write, True)
+            self.assertEqual(await repository.get_json("bound", 24), {"games": [1]})
+
     async def test_hard_limit_evicts_lru_rows_to_low_watermark(self) -> None:
         with (
             tempfile.TemporaryDirectory() as tmpdir,

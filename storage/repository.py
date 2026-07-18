@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import os
@@ -194,12 +195,39 @@ class SQLiteCacheRepository:
             allow_stale_seconds,
         )
 
+    async def get_json_with_revision(
+        self,
+        key: str,
+        ttl_hours: int | float = CACHE_DEFAULT_TTL_HOURS,
+        *,
+        allow_stale_seconds: int | float = 0,
+    ) -> tuple[Any | None, str]:
+        return await asyncio.to_thread(
+            self._get_json_with_revision_sync,
+            key,
+            ttl_hours,
+            allow_stale_seconds,
+        )
+
     def _get_json_sync(
         self,
         key: str,
         ttl_hours: int | float,
         allow_stale_seconds: int | float,
     ) -> Any | None:
+        value, _revision = self._get_json_with_revision_sync(
+            key,
+            ttl_hours,
+            allow_stale_seconds,
+        )
+        return value
+
+    def _get_json_with_revision_sync(
+        self,
+        key: str,
+        ttl_hours: int | float,
+        allow_stale_seconds: int | float,
+    ) -> tuple[Any | None, str]:
         ttl = _validated_ttl_hours(ttl_hours)
         stale_seconds = _validated_non_negative_seconds(allow_stale_seconds)
         now = time.time()
@@ -211,26 +239,27 @@ class SQLiteCacheRepository:
                     (key,),
                 ).fetchone()
                 if not row:
-                    return None
+                    return None, ""
                 payload, created_at, expires_at = row
                 if now > float(expires_at):
                     with connection:
                         connection.execute("DELETE FROM cache WHERE key = ?", (key,))
-                    return None
+                    return None, ""
                 if now - float(created_at) > ttl * 3600 + stale_seconds:
-                    return None
+                    return None, ""
                 try:
                     value = json.loads(payload)
                 except (TypeError, json.JSONDecodeError):
                     with connection:
                         connection.execute("DELETE FROM cache WHERE key = ?", (key,))
-                    return None
+                    return None, ""
                 with connection:
                     connection.execute(
                         "UPDATE cache SET last_accessed_at = ? WHERE key = ?",
                         (now, key),
                     )
-                return value
+                revision = hashlib.sha256(str(payload).encode("utf-8")).hexdigest()
+                return value, revision
             except sqlite3.Error:
                 raise CacheStorageError("cache_read_failure") from None
             finally:
@@ -258,6 +287,8 @@ class SQLiteCacheRepository:
             resolved_ttl_hours,
             owner_scope,
             None,
+            None,
+            None,
         )
 
     async def set_json_if_steam_account_bound(
@@ -280,6 +311,69 @@ class SQLiteCacheRepository:
             ttl_hours,
             resolved_owner,
             steam_id64,
+            None,
+            None,
+        )
+
+    async def set_json_if_steam_account_binding(
+        self,
+        key: str,
+        payload: Any,
+        *,
+        chat_platform: str,
+        chat_user_id: str,
+        steam_id64: str,
+        ttl_hours: int | float = CACHE_DEFAULT_TTL_HOURS,
+        owner_scope: str,
+    ) -> bool:
+        resolved_platform = str(chat_platform or "default").strip() or "default"
+        resolved_user = str(chat_user_id or "").strip()
+        resolved_steam_id = str(steam_id64 or "").strip()
+        resolved_owner = str(owner_scope or "").strip()
+        if (
+            not resolved_user
+            or not resolved_steam_id
+            or resolved_owner != f"steam-account:{resolved_steam_id}"
+        ):
+            raise CacheStorageError("invalid_cache_owner")
+        return await asyncio.to_thread(
+            self._set_json_sync,
+            key,
+            payload,
+            ttl_hours,
+            resolved_owner,
+            None,
+            (resolved_platform, resolved_user, resolved_steam_id),
+            None,
+        )
+
+    async def set_json_if_revision(
+        self,
+        key: str,
+        payload: Any,
+        *,
+        expected_revision: str,
+        ttl_hours: int | float = CACHE_DEFAULT_TTL_HOURS,
+        ttl_seconds: int | float | None = None,
+        owner_scope: str = "",
+    ) -> bool:
+        revision = str(expected_revision or "").strip()
+        if not revision:
+            raise CacheStorageError("invalid_cache_revision")
+        resolved_ttl_hours = (
+            _validated_positive_seconds(ttl_seconds) / 3600
+            if ttl_seconds is not None
+            else ttl_hours
+        )
+        return await asyncio.to_thread(
+            self._set_json_sync,
+            key,
+            payload,
+            resolved_ttl_hours,
+            owner_scope,
+            None,
+            None,
+            revision,
         )
 
     def _set_json_sync(
@@ -289,6 +383,8 @@ class SQLiteCacheRepository:
         ttl_hours: int | float,
         owner_scope: str,
         required_steam_id64: str | None,
+        required_steam_binding: tuple[str, str, str] | None,
+        expected_revision: str | None,
     ) -> bool:
         ttl = _validated_ttl_hours(ttl_hours)
         try:
@@ -314,6 +410,8 @@ class SQLiteCacheRepository:
                     now=now,
                     expires_at=expires_at,
                     required_steam_id64=required_steam_id64,
+                    required_steam_binding=required_steam_binding,
+                    expected_revision=expected_revision,
                 )
                 if not written:
                     return False
@@ -346,10 +444,26 @@ class SQLiteCacheRepository:
         now: float,
         expires_at: float,
         required_steam_id64: str | None,
+        required_steam_binding: tuple[str, str, str] | None,
+        expected_revision: str | None,
     ) -> bool:
         while True:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                if required_steam_binding is not None:
+                    still_bound = connection.execute(
+                        """
+                        SELECT 1 FROM steam_account_bindings
+                        WHERE chat_platform = ?
+                          AND chat_user_id = ?
+                          AND steam_id64 = ?
+                        LIMIT 1
+                        """,
+                        required_steam_binding,
+                    ).fetchone()
+                    if still_bound is None:
+                        connection.commit()
+                        return False
                 if required_steam_id64 is not None:
                     still_bound = connection.execute(
                         """
@@ -360,6 +474,19 @@ class SQLiteCacheRepository:
                         (required_steam_id64,),
                     ).fetchone()
                     if still_bound is None:
+                        connection.commit()
+                        return False
+                if expected_revision is not None:
+                    current = connection.execute(
+                        "SELECT payload FROM cache WHERE key = ?",
+                        (key,),
+                    ).fetchone()
+                    current_revision = (
+                        hashlib.sha256(str(current[0]).encode("utf-8")).hexdigest()
+                        if current is not None
+                        else ""
+                    )
+                    if current_revision != expected_revision:
                         connection.commit()
                         return False
                 existing = connection.execute(

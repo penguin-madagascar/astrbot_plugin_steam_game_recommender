@@ -26,7 +26,33 @@ TEXT_ARGUMENTS = (
 
 
 class LibraryFilterModeError(ValueError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "library_filter_invalid",
+    ) -> None:
+        self.code = code
+        super().__init__(message)
+
+
+LIBRARY_FILTER_USER_MESSAGES = {
+    "query_required": "请输入游戏需求后再试。",
+    "account_binding_required": (
+        "当前用户未绑定 Steam 账号；请先使用 /accountbind 完成绑定。"
+    ),
+    "account_binding_unavailable": "无法确认当前 Steam 账号绑定，请重新绑定后再试。",
+    "steam_api_key_required": "未配置 Steam Web API Key，无法读取个人游戏库。",
+    "steam_library_unavailable": "Steam 游戏库暂时不可读，请稍后重试。",
+    "steam_library_empty": "Steam 游戏库为空或不可见，无法执行游戏库过滤。",
+}
+
+
+def library_filter_user_message(error: LibraryFilterModeError) -> str:
+    return LIBRARY_FILTER_USER_MESSAGES.get(
+        error.code,
+        "游戏库过滤条件无效，请检查后重试。",
+    )
 
 
 @dataclass(frozen=True)

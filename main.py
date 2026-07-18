@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import time
@@ -17,8 +18,12 @@ from astrbot.core.star.filter.command import GreedyStr
 from .clients.steam import SteamApiError, SteamClient
 from .services.account_binding import (
     AccountBindingError,
-    chat_identity_from_event,
+    account_binding_user_message,
+    account_identity_from_event,
     parse_account_binding_command,
+    platform_instance_ids_for_name,
+    platform_name_from_event,
+    recommendation_scope_from_event,
 )
 from .services.explanation_builder import (
     generate_recommendation_reasons,
@@ -26,7 +31,10 @@ from .services.explanation_builder import (
     resolve_provider_id,
 )
 from .services.formatter import format_recommendation_messages
-from .services.game_identity import is_confirmed_base_game
+from .services.game_identity import (
+    deduplicate_game_editions,
+    is_confirmed_base_game,
+)
 from .services.llm_fallback import (
     LlmFallbackContractError,
     LlmFallbackProviderError,
@@ -35,13 +43,14 @@ from .services.llm_fallback import (
     generate_unverified_game_suggestions,
     verify_fallback_suggestion_titles,
 )
-from .services.message_delivery import build_forward_message_chain
+from .services.message_delivery import prepare_message_delivery
 from .services.played_filter import (
     LIBRARY_FILTER_EXCLUDE_OWNED,
     LIBRARY_FILTER_ONLY_OWNED,
     LibraryFilterModeError,
     detect_library_filter_mode,
     filter_games_by_library_mode,
+    library_filter_user_message,
     parse_library_filter_command,
     resolve_library_filter_mode,
 )
@@ -59,6 +68,7 @@ from .services.recommendation_memory import (
     append_shown_games,
     build_recommendation_memory,
     load_recommendation_memory,
+    recommendation_owner_scope,
     save_recommendation_memory,
     summarize_games,
 )
@@ -69,13 +79,14 @@ from .services.retry_command import (
     parse_preference_patch,
     parse_retry_request,
 )
+from .services.run_notices import RunNotice, dedupe_run_notices
+from .services.safe_errors import log_external_failure
 from .services.semantic_feature_verifier import (
     SemanticFeatureVerifier,
     verify_ranked_features,
 )
-from .services.run_notices import RunNotice, dedupe_run_notices
-from .services.safe_errors import log_external_failure
 from .services.steam_index import (
+    STEAM_METADATA_STALE_MARKER,
     STEAM_TAG_RECALL_DEGRADED_WARNING,
     SteamGameIndexService,
     has_supported_steam_platform,
@@ -86,6 +97,7 @@ from .services.unplayed_picker import (
     UnplayedRecommendationError,
     format_unplayed_recommendation,
     pick_random_unplayed_game,
+    unplayed_user_message,
 )
 from .services.user_profile import build_user_tag_weights
 from .storage.models import GamePreference, RankedGame, SteamAccountBinding, SteamOwnedGame
@@ -97,6 +109,7 @@ PLUGIN_DESCRIPTION = "基于 Steam 公开数据、连续评分和可信证据生
 MEMORY_SAVE_WARNING = (
     "⚠️ 本次结果无法用于“换一批”，但上面的推荐内容仍然有效。"
 )
+CACHE_CLEANUP_INTERVAL_SECONDS = 5 * 60
 
 
 @dataclass(frozen=True)
@@ -176,6 +189,9 @@ class SteamGameRecommenderPlugin(Star):
             10,
         )
         self.default_region = normalize_region(str(price_config.get("default_region") or "CN"))
+        data_dir = Path(StarTools.get_data_dir(PLUGIN_NAME))
+        self.cache = SQLiteCacheRepository(data_dir / "steam_cache.sqlite3")
+        self._cache_cleanup_task: asyncio.Task[None] | None = None
         self.http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout),
             follow_redirects=True,
@@ -184,8 +200,6 @@ class SteamGameRecommenderPlugin(Star):
                 "Accept": "application/json",
             },
         )
-        data_dir = Path(StarTools.get_data_dir(PLUGIN_NAME))
-        self.cache = SQLiteCacheRepository(data_dir / "steam_cache.sqlite3")
         self.steam_client = SteamClient(
             client=self.http_client,
             cache=self.cache,
@@ -224,10 +238,39 @@ class SteamGameRecommenderPlugin(Star):
                 "astrbot_plugin_steam_price_heybox is not available; "
                 "game recommendations continue without price enrichment."
             )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            self._cache_cleanup_task = loop.create_task(self._cache_cleanup_loop())
 
     async def terminate(self) -> None:
+        cleanup_task = getattr(self, "_cache_cleanup_task", None)
+        if cleanup_task is not None:
+            cleanup_task.cancel()
+            try:
+                await cleanup_task
+            except asyncio.CancelledError:
+                pass
+            self._cache_cleanup_task = None
         await self.http_client.aclose()
         logger.info("Game recommender plugin stopped.")
+
+    async def _cache_cleanup_loop(self) -> None:
+        while True:
+            await asyncio.sleep(CACHE_CLEANUP_INTERVAL_SECONDS)
+            try:
+                await self.cache.cleanup()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log_external_failure(
+                    logger,
+                    "cache_cleanup_failed",
+                    stage="periodic_cache_cleanup",
+                    exc=exc,
+                )
 
     @filter.command(
         "gamerec",
@@ -273,7 +316,9 @@ class SteamGameRecommenderPlugin(Star):
             yield event.plain_result("Steam 查询暂时不可用，请稍后重试。")
             return
         except LibraryFilterModeError as exc:
-            yield event.plain_result(f"游戏库过滤参数错误：{exc}")
+            yield event.plain_result(
+                f"游戏库过滤参数错误：{library_filter_user_message(exc)}"
+            )
             return
         except Exception as exc:
             log_external_failure(
@@ -285,7 +330,8 @@ class SteamGameRecommenderPlugin(Star):
             yield event.plain_result("游戏推荐暂时失败，请稍后重试。")
             return
 
-        yield self._recommendation_result(event, messages)
+        for result in self._recommendation_results(event, messages):
+            yield result
 
     @filter.command(
         "gamerec_retry",
@@ -308,7 +354,9 @@ class SteamGameRecommenderPlugin(Star):
             yield event.plain_result("Steam 查询暂时不可用，请稍后重试。")
             return
         except LibraryFilterModeError as exc:
-            yield event.plain_result(f"游戏库过滤参数错误：{exc}")
+            yield event.plain_result(
+                f"游戏库过滤参数错误：{library_filter_user_message(exc)}"
+            )
             return
         except Exception as exc:
             log_external_failure(
@@ -320,7 +368,8 @@ class SteamGameRecommenderPlugin(Star):
             yield event.plain_result("重新推荐暂时失败，请稍后重试。")
             return
 
-        yield self._recommendation_result(event, messages)
+        for result in self._recommendation_results(event, messages):
+            yield result
 
     @filter.command(
         "accountbind",
@@ -330,9 +379,9 @@ class SteamGameRecommenderPlugin(Star):
     async def account_bind(self, event: AstrMessageEvent, query: GreedyStr):
         text = str(query).strip()
         try:
-            chat_platform, chat_user_id = chat_identity_from_event(event)
+            chat_platform, chat_user_id = account_identity_from_event(event)
             if not text:
-                binding = await self.cache.get_steam_account_binding(chat_platform, chat_user_id)
+                binding = await self._account_binding_for_event(event)
                 if binding is None:
                     yield event.plain_result(
                         "还没有绑定账号。请使用 /accountbind <SteamID64 或好友码>。"
@@ -344,18 +393,43 @@ class SteamGameRecommenderPlugin(Star):
                 return
 
             parsed = parse_account_binding_command(text)
-            saved = await self.cache.upsert_steam_account_binding(
-                SteamAccountBinding(
-                    chat_platform=chat_platform,
-                    chat_user_id=chat_user_id,
-                    steam_id64=parsed.steam_id64,
-                    account_kind=parsed.account_kind,
-                    display_value=parsed.display_value,
-                    metadata=parsed.metadata,
-                )
+            existing = await self._account_binding_for_event(
+                event,
+                ignore_ambiguous_legacy=True,
             )
+            metadata = dict(parsed.metadata)
+            if existing is not None:
+                legacy_platform = str(
+                    existing.metadata.get("migrated_from_platform") or ""
+                ).strip()
+                if legacy_platform:
+                    metadata["migrated_from_platform"] = legacy_platform
+                if existing.steam_id64 != parsed.steam_id64:
+                    await self.cache.delete_owner_scope(
+                        f"steam-account:{existing.steam_id64}"
+                    )
+            new_binding = SteamAccountBinding(
+                chat_platform=chat_platform,
+                chat_user_id=chat_user_id,
+                steam_id64=parsed.steam_id64,
+                account_kind=parsed.account_kind,
+                display_value=parsed.display_value,
+                metadata=metadata,
+            )
+            legacy_platform = platform_name_from_event(event)
+            if existing is None and legacy_platform != chat_platform:
+                saved = (
+                    await self.cache.upsert_steam_account_binding_claiming_legacy(
+                        new_binding,
+                        legacy_platform=legacy_platform,
+                    )
+                )
+            else:
+                saved = await self.cache.upsert_steam_account_binding(new_binding)
         except AccountBindingError as exc:
-            yield event.plain_result(f"账号绑定失败：{exc}")
+            yield event.plain_result(
+                f"账号绑定失败：{account_binding_user_message(exc)}"
+            )
             return
         except Exception as exc:
             log_external_failure(
@@ -372,14 +446,53 @@ class SteamGameRecommenderPlugin(Star):
         )
 
     @filter.command(
+        "accountunbind",
+        alias={"解除绑定"},
+        desc="解除当前聊天用户的 Steam 账号绑定并删除相关个人缓存。",
+    )
+    async def account_unbind(self, event: AstrMessageEvent):
+        try:
+            chat_platform, chat_user_id = account_identity_from_event(event)
+            await self._account_binding_for_event(
+                event,
+                ignore_ambiguous_legacy=True,
+            )
+            deleted = await self.cache.delete_steam_account_data(
+                chat_platform,
+                chat_user_id,
+                recommendation_owner_scope=recommendation_owner_scope(
+                    chat_platform,
+                    chat_user_id,
+                ),
+            )
+            if not deleted:
+                yield event.plain_result("当前没有绑定 Steam 账号；相关推荐记录已清理。")
+                return
+        except AccountBindingError as exc:
+            yield event.plain_result(
+                f"解除绑定失败：{account_binding_user_message(exc)}"
+            )
+            return
+        except Exception as exc:
+            log_external_failure(
+                logger,
+                "account_unbind_failed",
+                stage="account_unbind",
+                exc=exc,
+            )
+            yield event.plain_result("解除绑定暂时失败，请稍后重试。")
+            return
+
+        yield event.plain_result("Steam 账号已解除绑定，相关个人缓存也已删除。")
+
+    @filter.command(
         "randomrec",
         alias={"随机推荐"},
         desc="从已绑定 Steam 库中随机推荐一款未玩且评价过线的游戏。",
     )
     async def recommend_random_game(self, event: AstrMessageEvent):
         try:
-            chat_platform, chat_user_id = chat_identity_from_event(event)
-            binding = await self.cache.get_steam_account_binding(chat_platform, chat_user_id)
+            binding = await self._account_binding_for_event(event)
             if binding is None:
                 yield event.plain_result(
                     "当前用户未绑定 Steam 账号；请先使用 /accountbind <SteamID64 或好友码>。"
@@ -389,7 +502,10 @@ class SteamGameRecommenderPlugin(Star):
                 yield event.plain_result("未配置 steam_api_key，无法读取 Steam 游戏库。")
                 return
 
-            owned_games = await self.steam_client.get_owned_games(binding.steam_id64)
+            owned_games = await self.steam_client.get_owned_games(
+                binding.steam_id64,
+                binding_identity=(binding.chat_platform, binding.chat_user_id),
+            )
             if not owned_games:
                 yield event.plain_result("Steam 游戏库为空或不可见，无法进行随机推荐。")
                 return
@@ -419,10 +535,14 @@ class SteamGameRecommenderPlugin(Star):
                 recommendation.game,
             )
         except AccountBindingError as exc:
-            yield event.plain_result(f"随机推荐失败：{exc}")
+            yield event.plain_result(
+                f"随机推荐失败：{account_binding_user_message(exc)}"
+            )
             return
         except UnplayedRecommendationError as exc:
-            yield event.plain_result(f"随机推荐失败：{exc}")
+            yield event.plain_result(
+                f"随机推荐失败：{unplayed_user_message(exc)}"
+            )
             return
         except SteamApiError as exc:
             log_external_failure(
@@ -499,26 +619,33 @@ class SteamGameRecommenderPlugin(Star):
         required: bool,
     ) -> list[SteamOwnedGame]:
         try:
-            chat_platform, chat_user_id = chat_identity_from_event(event)
+            binding = await self._account_binding_for_event(event)
         except AccountBindingError as exc:
             if required:
                 raise LibraryFilterModeError(
-                    f"无法识别当前用户，不能执行游戏库过滤：{exc}"
+                    "account binding unavailable",
+                    code="account_binding_unavailable",
                 ) from exc
             return []
-        binding = await self.cache.get_steam_account_binding(chat_platform, chat_user_id)
         if binding is None:
             if required:
                 raise LibraryFilterModeError(
-                    "当前用户未绑定 Steam 账号；请先使用 /accountbind <SteamID64 或好友码>。"
+                    "当前用户未绑定 Steam 账号。",
+                    code="account_binding_required",
                 )
             return []
         if not self.steam_client.has_web_api_key():
             if required:
-                raise LibraryFilterModeError("未配置 steam_api_key，无法读取 Steam 游戏库。")
+                raise LibraryFilterModeError(
+                    "未配置 steam_api_key，无法读取 Steam 游戏库。",
+                    code="steam_api_key_required",
+                )
             return []
         try:
-            owned_games = await self.steam_client.get_owned_games(binding.steam_id64)
+            owned_games = await self.steam_client.get_owned_games(
+                binding.steam_id64,
+                binding_identity=(binding.chat_platform, binding.chat_user_id),
+            )
         except SteamApiError as exc:
             if required:
                 log_external_failure(
@@ -528,12 +655,77 @@ class SteamGameRecommenderPlugin(Star):
                     exc=exc,
                 )
                 raise LibraryFilterModeError(
-                    "Steam 游戏库暂时不可读，无法执行游戏库过滤。"
+                    "Steam 游戏库暂时不可读，无法执行游戏库过滤。",
+                    code="steam_library_unavailable",
                 ) from exc
             return []
         if required and not owned_games:
-            raise LibraryFilterModeError("Steam 游戏库为空或不可见，无法执行游戏库过滤。")
+            raise LibraryFilterModeError(
+                "Steam 游戏库为空或不可见，无法执行游戏库过滤。",
+                code="steam_library_empty",
+            )
         return owned_games
+
+    async def _account_binding_for_event(
+        self,
+        event: AstrMessageEvent,
+        *,
+        ignore_ambiguous_legacy: bool = False,
+    ) -> SteamAccountBinding | None:
+        platform_instance, chat_user_id = account_identity_from_event(event)
+        binding = await self.cache.get_steam_account_binding(
+            platform_instance,
+            chat_user_id,
+        )
+        if binding is not None:
+            return binding
+
+        legacy_platform = platform_name_from_event(event)
+        if legacy_platform == platform_instance:
+            return None
+        legacy = await self.cache.get_steam_account_binding(
+            legacy_platform,
+            chat_user_id,
+        )
+        if legacy is None:
+            return None
+        claimed_by = str(
+            legacy.metadata.get("migrated_to_platform_instance") or ""
+        ).strip()
+        if claimed_by and claimed_by != platform_instance:
+            if ignore_ambiguous_legacy:
+                return None
+            raise AccountBindingError(
+                "检测到旧版账号绑定，但无法确认唯一的平台实例；"
+                "请使用 /accountbind 重新绑定。",
+                code="legacy_binding_ambiguous",
+            )
+        instance_ids = platform_instance_ids_for_name(
+            self.context,
+            legacy_platform,
+        )
+        if instance_ids != [platform_instance]:
+            if ignore_ambiguous_legacy:
+                return None
+            raise AccountBindingError(
+                "检测到旧版账号绑定，但无法确认唯一的平台实例；"
+                "请使用 /accountbind 重新绑定。",
+                code="legacy_binding_ambiguous",
+            )
+        migrated = await self.cache.migrate_steam_account_binding(
+            legacy_platform,
+            platform_instance,
+            chat_user_id,
+        )
+        if migrated is not None:
+            return migrated
+        if ignore_ambiguous_legacy:
+            return None
+        raise AccountBindingError(
+            "检测到旧版账号绑定，但无法确认唯一的平台实例；"
+            "请使用 /accountbind 重新绑定。",
+            code="legacy_binding_ambiguous",
+        )
 
     async def _prepare_recommendation(
         self,
@@ -549,7 +741,8 @@ class SteamGameRecommenderPlugin(Star):
         text = region_query.query
         if not text:
             raise LibraryFilterModeError(
-                "请输入游戏需求，例如：/gamerec 排除已有 Steam 双人合作解谜"
+                "请输入游戏需求，例如：/gamerec 排除已有 Steam 双人合作解谜",
+                code="query_required",
             )
         text_filter_mode = detect_library_filter_mode(text)
         parse_outcome = await self.preference_parser.parse_preference(event, text)
@@ -604,6 +797,11 @@ class SteamGameRecommenderPlugin(Star):
                 event,
                 required=bool(preference.library_filter_mode),
             )
+            preferred_edition_appids = (
+                [owned.appid for owned in owned_games if owned.appid]
+                if preference.library_filter_mode == LIBRARY_FILTER_ONLY_OWNED
+                else []
+            )
             profile_tag_weights = await self._user_profile_tag_weights(event, owned_games)
             finish_phase("profile")
             ranked_games = await self._recommend_with_steam_index(
@@ -613,11 +811,7 @@ class SteamGameRecommenderPlugin(Star):
                 profile_tag_weights=profile_tag_weights,
                 excluded_appids=excluded_appids,
                 excluded_titles=excluded_titles,
-                preferred_appids=(
-                    [owned.appid for owned in owned_games if owned.appid]
-                    if preference.library_filter_mode == LIBRARY_FILTER_ONLY_OWNED
-                    else None
-                ),
+                preferred_appids=preferred_edition_appids or None,
             )
             if STEAM_TAG_RECALL_DEGRADED_WARNING in preference.parse_warnings:
                 degradation_reason = "steam_tag_recall"
@@ -666,18 +860,26 @@ class SteamGameRecommenderPlugin(Star):
                     verifier,
                     result_limit=result_limit,
                     quality_intent=preference.quality_intent,
+                    downstream_rerank=True,
                 )
                 ranked_games = list(semantic_outcome.games)
                 semantic_feature_notices = semantic_outcome.notices
                 semantic_feature_candidate_count = semantic_outcome.candidate_count
                 finish_phase("semantic_features")
-            if preference.budget is None:
-                ranked_games = ranked_games[:result_limit]
             ranked_games = await self.price_bridge.enrich_ranked_games(
                 ranked_games,
                 preference,
             )
+            ranked_games = deduplicate_game_editions(
+                ranked_games,
+                preferred_appids=preferred_edition_appids,
+            )
             ranked_games = ranked_games[:result_limit]
+            if preference.budget is None:
+                ranked_games = await self.price_bridge.enrich_ranked_games(
+                    ranked_games,
+                    preference,
+                )
             finish_phase("final_selection")
             ranked_games = await generate_recommendation_reasons(
                 self.context,
@@ -714,6 +916,22 @@ class SteamGameRecommenderPlugin(Star):
                 *(
                     RunNotice(notice.code, "warning", notice.message)
                     for notice in semantic_feature_notices
+                ),
+                *(
+                    (
+                        RunNotice(
+                            "steam_metadata_stale",
+                            "warning",
+                            "部分结果使用了较旧的 Steam 资料；刷新失败后，"
+                            "插件保留了仍在安全期限内的旧资料。",
+                        ),
+                    )
+                    if any(
+                        STEAM_METADATA_STALE_MARKER
+                        in game.internal_source_markers
+                        for game in ranked_games
+                    )
+                    else ()
                 ),
             ]
         )
@@ -793,9 +1011,10 @@ class SteamGameRecommenderPlugin(Star):
         event: AstrMessageEvent,
         supplement: str = "",
     ) -> list[str]:
-        chat_platform, chat_user_id = chat_identity_from_event(event)
+        chat_platform, _account_user_id = account_identity_from_event(event)
+        conversation_scope, chat_user_id = recommendation_scope_from_event(event)
         memory = await load_recommendation_memory(
-            chat_platform,
+            conversation_scope,
             chat_user_id,
             self.cache,
         )
@@ -851,15 +1070,27 @@ class SteamGameRecommenderPlugin(Star):
             excluded_appids=list(dict.fromkeys([*memory.shown_appids, *patch_excluded_appids])),
             excluded_titles=list(dict.fromkeys([*memory.shown_titles, *patch_excluded_titles])),
         )
+        messages = list(run.messages)
         if not run.used_unverified_fallback:
-            await self._save_retry_memory(
-                chat_platform,
-                chat_user_id,
-                memory,
-                run,
-                patch if supplement else None,
-            )
-        return run.messages
+            try:
+                saved = await self._save_retry_memory(
+                    chat_platform,
+                    chat_user_id,
+                    memory,
+                    run,
+                    patch if supplement else None,
+                )
+                if saved is False:
+                    messages.append(MEMORY_SAVE_WARNING)
+            except Exception as exc:
+                log_external_failure(
+                    logger,
+                    "retry_memory_save_failed",
+                    stage="retry_memory_save",
+                    exc=exc,
+                )
+                messages.append(MEMORY_SAVE_WARNING)
+        return messages
 
     async def _save_recent_recommendation(
         self,
@@ -868,7 +1099,8 @@ class SteamGameRecommenderPlugin(Star):
     ) -> None:
         if not run.ranked_games:
             return
-        chat_platform, chat_user_id = chat_identity_from_event(event)
+        chat_platform, chat_user_id = account_identity_from_event(event)
+        conversation_scope, _scope_user_id = recommendation_scope_from_event(event)
         memory = build_recommendation_memory(
             chat_platform=chat_platform,
             chat_user_id=chat_user_id,
@@ -876,6 +1108,7 @@ class SteamGameRecommenderPlugin(Star):
             preference=run.preference,
             result_limit=run.result_limit,
             games=run.ranked_games[: run.result_limit],
+            conversation_scope=conversation_scope,
         )
         await save_recommendation_memory(self.cache, memory)
 
@@ -886,7 +1119,7 @@ class SteamGameRecommenderPlugin(Star):
         memory: RecommendationMemory,
         run: RecommendationRun,
         patch: PreferencePatch | None = None,
-    ) -> None:
+    ) -> bool:
         updated = RecommendationMemory(
             chat_platform=chat_platform,
             chat_user_id=chat_user_id,
@@ -902,18 +1135,24 @@ class SteamGameRecommenderPlugin(Star):
                 else list(memory.last_results)
             ),
             feedback=list(memory.feedback),
+            conversation_scope=memory.conversation_scope,
+            storage_revision=memory.storage_revision,
         )
         if patch is not None:
             updated = append_feedback(updated, patch)
         if run.ranked_games:
             updated = append_shown_games(updated, run.ranked_games[: run.result_limit])
-        await save_recommendation_memory(self.cache, updated)
+        return await save_recommendation_memory(self.cache, updated)
 
-    def _recommendation_result(self, event: AstrMessageEvent, messages: list[str]):
-        forward_chain = build_forward_message_chain(messages)
-        if forward_chain and hasattr(event, "chain_result"):
-            return event.chain_result(forward_chain)
-        return event.plain_result("\n\n".join(messages))
+    def _recommendation_results(
+        self,
+        event: AstrMessageEvent,
+        messages: list[str],
+    ) -> list[Any]:
+        delivery = prepare_message_delivery(event, messages)
+        if delivery.forward_chain and hasattr(event, "chain_result"):
+            return [event.chain_result(delivery.forward_chain)]
+        return [event.plain_result(block) for block in delivery.plain_blocks]
 
     async def _filter_library_games(
         self,

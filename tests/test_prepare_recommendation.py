@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import sys
 import time
 import types
 import unittest
-import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -54,18 +55,19 @@ try:
     from astrbot_plugin_steam_game_recommender import main as main_module
     from astrbot_plugin_steam_game_recommender.clients.steam import SteamApiError
     from astrbot_plugin_steam_game_recommender.main import (
+        MEMORY_SAVE_WARNING,
         PreparedRecommendation,
         RecommendationRun,
         SteamGameRecommenderPlugin,
         safe_bounded_float,
         safe_bounded_int,
     )
+    from astrbot_plugin_steam_game_recommender.services.llm_fallback import (
+        UnverifiedGameSuggestion,
+    )
     from astrbot_plugin_steam_game_recommender.services.played_filter import (
         LIBRARY_FILTER_EXCLUDE_OWNED,
         LibraryFilterModeError,
-    )
-    from astrbot_plugin_steam_game_recommender.services.llm_fallback import (
-        UnverifiedGameSuggestion,
     )
     from astrbot_plugin_steam_game_recommender.services.preference_parser import ParseOutcome
     from astrbot_plugin_steam_game_recommender.services.recommendation_memory import (
@@ -75,6 +77,10 @@ try:
         recommendation_memory_key,
     )
     from astrbot_plugin_steam_game_recommender.services.run_notices import RunNotice
+    from astrbot_plugin_steam_game_recommender.services.semantic_feature_verifier import (
+        RankedFeatureVerificationOutcome,
+        verdict_cache_key,
+    )
     from astrbot_plugin_steam_game_recommender.services.steam_index import (
         STEAM_INDEX_FALLBACK_WARNING,
         STEAM_ONLY_SCOPE_WARNING,
@@ -84,13 +90,10 @@ try:
         RecallHealth,
         RecallUnavailableError,
     )
-    from astrbot_plugin_steam_game_recommender.services.semantic_feature_verifier import (
-        RankedFeatureVerificationOutcome,
-        verdict_cache_key,
-    )
     from astrbot_plugin_steam_game_recommender.storage.models import (
         GameCandidate,
         GamePreference,
+        GamePriceSummary,
         RankedGame,
         ScoreBreakdown,
         SteamAccountBinding,
@@ -300,6 +303,35 @@ class PluginDashboardConfigTest(unittest.TestCase):
 
 
 class PrepareRecommendationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_periodic_cache_cleanup_runs_and_stops_with_plugin(self) -> None:
+        plugin = object.__new__(SteamGameRecommenderPlugin)
+        plugin.cache = SimpleNamespace(cleanup=AsyncMock())
+        plugin.http_client = SimpleNamespace(aclose=AsyncMock())
+
+        sleep_calls = 0
+        cleanup_called = asyncio.Event()
+
+        async def cleanup() -> None:
+            cleanup_called.set()
+
+        plugin.cache.cleanup.side_effect = cleanup
+
+        async def one_interval(_seconds: float) -> None:
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls > 1:
+                await asyncio.Future()
+
+        with patch.object(main_module.asyncio, "sleep", one_interval):
+            task = asyncio.create_task(plugin._cache_cleanup_loop())
+            plugin._cache_cleanup_task = task
+            await cleanup_called.wait()
+            await plugin.terminate()
+
+        plugin.cache.cleanup.assert_awaited_once_with()
+        plugin.http_client.aclose.assert_awaited_once_with()
+        self.assertTrue(task.cancelled())
+
     async def test_prepare_applies_query_region_and_region_local_budget_currency(self) -> None:
         preference = GamePreference(platforms=["steam"], budget=50, result_count=3)
         parser = FakePreferenceParser(preference)
@@ -466,6 +498,54 @@ class PrepareRecommendationTest(unittest.IsolatedAsyncioTestCase):
 
 
 class RecommendationPipelineTest(unittest.IsolatedAsyncioTestCase):
+    async def test_non_onebot_delivery_yields_each_message_block_separately(self) -> None:
+        plugin = object.__new__(SteamGameRecommenderPlugin)
+        preference = GamePreference(platforms=["steam"])
+        plugin._prepare_recommendation = AsyncMock(
+            return_value=PreparedRecommendation("query", preference, 2)
+        )
+        plugin._run_recommendation = AsyncMock(
+            return_value=RecommendationRun(
+                messages=["提示", "推荐结果"],
+                ranked_games=[],
+                preference=preference,
+                result_limit=2,
+                raw_query="query",
+            )
+        )
+        plugin._save_recent_recommendation = AsyncMock()
+
+        results = [
+            item
+            async for item in plugin.recommend_games(PlainResultEvent(), "query")
+        ]
+
+        self.assertEqual(
+            results,
+            [("plain", "提示"), ("plain", "推荐结果")],
+        )
+
+    async def test_non_onebot_retry_uses_the_same_plain_delivery_strategy(
+        self,
+    ) -> None:
+        plugin = object.__new__(SteamGameRecommenderPlugin)
+        plugin._retry_recommendation_messages = AsyncMock(
+            return_value=["提示", "重新推荐结果"]
+        )
+
+        results = [
+            item
+            async for item in plugin.retry_recommend_games(
+                PlainResultEvent(),
+                "换成解谜游戏",
+            )
+        ]
+
+        self.assertEqual(
+            results,
+            [("plain", "提示"), ("plain", "重新推荐结果")],
+        )
+
     async def test_healthy_empty_result_stays_a_normal_empty_result(self) -> None:
         context = RaisingLlmContext()
         plugin = empty_pipeline_plugin(context)
@@ -506,8 +586,8 @@ class RecommendationPipelineTest(unittest.IsolatedAsyncioTestCase):
                         2,
                     )
 
-                async def execute(_event, _prepared):
-                    raise error
+                async def execute(_event, _prepared, raised_error=error):
+                    raise raised_error
 
                 plugin._prepare_recommendation = prepare
                 plugin._run_recommendation = execute
@@ -562,6 +642,25 @@ class RecommendationPipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("error_type=%s", logged)
         self.assertIn("RuntimeError", logged)
 
+    async def test_typed_library_error_text_is_not_reflected_to_chat(self) -> None:
+        secret = "provider-token-secret /private/provider/path?token=abcdef"
+        plugin = object.__new__(SteamGameRecommenderPlugin)
+        plugin._prepare_recommendation = AsyncMock(
+            side_effect=LibraryFilterModeError(secret)
+        )
+
+        results = [
+            result
+            async for result in plugin.recommend_games(
+                PlainResultEvent(),
+                "Steam query",
+            )
+        ]
+
+        self.assertEqual(len(results), 1)
+        self.assertNotIn(secret, results[0][1])
+        self.assertNotIn("/private", results[0][1])
+
     async def test_memory_write_failure_keeps_the_generated_recommendation(self) -> None:
         secret = "sqlite path=/private/data token=secret-key"
         plugin = object.__new__(SteamGameRecommenderPlugin)
@@ -596,7 +695,7 @@ class RecommendationPipelineTest(unittest.IsolatedAsyncioTestCase):
                 )
             ]
 
-        rendered = results[0][1]
+        rendered = "\n".join(item[1] for item in results)
         logged = " ".join(str(value) for call in warnings for value in call)
         self.assertIn("《Verified Game》", rendered)
         self.assertIn("本次结果无法用于“换一批”", rendered)
@@ -1114,6 +1213,7 @@ class LlmFallbackMemoryIsolationTest(unittest.IsolatedAsyncioTestCase):
         memory = RecommendationMemory(
             chat_platform="qq",
             chat_user_id="test",
+            conversation_scope="qq:test",
             raw_query="verified query",
             preference=GamePreference(platforms=["steam"], genres_like=["action"]),
             result_limit=2,
@@ -1129,7 +1229,7 @@ class LlmFallbackMemoryIsolationTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
         cache = SemanticMemoryCache()
-        key = recommendation_memory_key("qq", "test")
+        key = recommendation_memory_key("qq:test", "test")
         original_payload = dump_memory(memory)
         cache.payloads[key] = original_payload
         plugin = object.__new__(SteamGameRecommenderPlugin)
@@ -1165,6 +1265,84 @@ class LlmFallbackMemoryIsolationTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Fallback Game", excluded_calls[1][1])
         self.assertEqual(cache.payloads[key], original_payload)
         self.assertEqual(cache.writes, [])
+
+    async def test_retry_uses_umo_and_sender_and_keeps_results_on_save_failure(
+        self,
+    ) -> None:
+        memory = RecommendationMemory(
+            chat_platform="qq-instance",
+            chat_user_id="test",
+            conversation_scope="qq:test",
+            raw_query="verified query",
+            preference=GamePreference(platforms=["steam"]),
+            result_limit=1,
+            shown_appids=[],
+            shown_titles=[],
+            created_at=time.time(),
+        )
+        plugin = object.__new__(SteamGameRecommenderPlugin)
+        plugin.cache = object()
+        plugin._run_recommendation = AsyncMock(
+            return_value=RecommendationRun(
+                messages=["《Verified Game》"],
+                ranked_games=[RankedGame(appid=1, title="Verified Game")],
+                preference=memory.preference,
+                result_limit=1,
+                raw_query=memory.raw_query,
+            )
+        )
+        plugin._save_retry_memory = AsyncMock(
+            side_effect=RuntimeError("sqlite path=/private/data token=secret")
+        )
+
+        with patch.object(
+            main_module,
+            "load_recommendation_memory",
+            AsyncMock(return_value=memory),
+        ) as load_memory:
+            messages = await plugin._retry_recommendation_messages(FakeEvent())
+
+        load_memory.assert_awaited_once_with("qq:test", "test", plugin.cache)
+        self.assertIn("《Verified Game》", messages)
+        self.assertIn(MEMORY_SAVE_WARNING, messages)
+
+    async def test_retry_keeps_results_when_loaded_memory_was_invalidated(
+        self,
+    ) -> None:
+        memory = RecommendationMemory(
+            chat_platform="qq-instance",
+            chat_user_id="test",
+            conversation_scope="qq:test",
+            raw_query="verified query",
+            preference=GamePreference(platforms=["steam"]),
+            result_limit=1,
+            shown_appids=[],
+            shown_titles=[],
+            created_at=time.time(),
+            storage_revision="loaded-revision",
+        )
+        plugin = object.__new__(SteamGameRecommenderPlugin)
+        plugin.cache = object()
+        plugin._run_recommendation = AsyncMock(
+            return_value=RecommendationRun(
+                messages=["《Verified Game》"],
+                ranked_games=[RankedGame(appid=1, title="Verified Game")],
+                preference=memory.preference,
+                result_limit=1,
+                raw_query=memory.raw_query,
+            )
+        )
+        plugin._save_retry_memory = AsyncMock(return_value=False)
+
+        with patch.object(
+            main_module,
+            "load_recommendation_memory",
+            AsyncMock(return_value=memory),
+        ):
+            messages = await plugin._retry_recommendation_messages(FakeEvent())
+
+        self.assertIn("《Verified Game》", messages)
+        self.assertIn(MEMORY_SAVE_WARNING, messages)
 
 
 class SemanticFeatureMainPipelineTest(unittest.IsolatedAsyncioTestCase):
@@ -1203,6 +1381,174 @@ class SemanticFeatureMainPipelineTest(unittest.IsolatedAsyncioTestCase):
             await plugin._run_recommendation(FakeEvent(), prepared)
 
         self.assertEqual(semantic_verify.await_args.kwargs["result_limit"], 7)
+        self.assertIs(semantic_verify.await_args.kwargs["downstream_rerank"], True)
+
+    async def test_edition_deduplication_refills_no_budget_results(self) -> None:
+        plugin = empty_pipeline_plugin(
+            RaisingLlmContext(),
+            games=[
+                RankedGame(
+                    appid=1,
+                    title="Example Game",
+                    app_type="game",
+                    score=95,
+                ),
+                RankedGame(
+                    appid=2,
+                    title="Example Game Complete Edition",
+                    app_type="game",
+                    score=90,
+                ),
+                RankedGame(
+                    appid=3,
+                    title="Different Game",
+                    app_type="game",
+                    score=85,
+                ),
+            ],
+        )
+        plugin.fallback_provider_id = ""
+
+        async def identity_reasons(_context, _event, _provider_id, ranked_games):
+            return ranked_games
+
+        with patch.object(
+            main_module,
+            "generate_recommendation_reasons",
+            identity_reasons,
+        ):
+            run = await plugin._run_recommendation(
+                FakeEvent(),
+                PreparedRecommendation(
+                    "动作游戏",
+                    GamePreference(platforms=["steam"]),
+                    2,
+                ),
+            )
+
+        self.assertEqual([game.appid for game in run.ranked_games], [1, 3])
+
+    async def test_edition_refill_receives_display_price_without_duplicate_lookup(
+        self,
+    ) -> None:
+        plugin = empty_pipeline_plugin(
+            RaisingLlmContext(),
+            games=[
+                RankedGame(
+                    appid=1,
+                    title="Example Game",
+                    app_type="game",
+                    score=95,
+                ),
+                RankedGame(
+                    appid=2,
+                    title="Example Game Complete Edition",
+                    app_type="game",
+                    score=90,
+                ),
+                RankedGame(
+                    appid=3,
+                    title="Different Game",
+                    app_type="game",
+                    score=85,
+                ),
+            ],
+        )
+        plugin.fallback_provider_id = ""
+        plugin.price_bridge = CappedDisplayPriceBridge()
+
+        async def identity_reasons(_context, _event, _provider_id, ranked_games):
+            return ranked_games
+
+        with patch.object(
+            main_module,
+            "generate_recommendation_reasons",
+            identity_reasons,
+        ):
+            run = await plugin._run_recommendation(
+                FakeEvent(),
+                PreparedRecommendation(
+                    "动作游戏",
+                    GamePreference(platforms=["steam"]),
+                    2,
+                ),
+            )
+
+        self.assertEqual([game.appid for game in run.ranked_games], [1, 3])
+        self.assertTrue(all(game.price_summary for game in run.ranked_games))
+        self.assertEqual(plugin.price_bridge.lookup_appids, [1, 2, 3])
+
+    async def test_stale_steam_metadata_is_visible_to_users(self) -> None:
+        stale_game = RankedGame(
+            appid=1,
+            title="Older Game Data",
+            app_type="game",
+            score=90,
+            internal_source_markers=["metadata_stale:steam_detail"],
+        )
+        plugin = empty_pipeline_plugin(RaisingLlmContext(), games=[stale_game])
+        plugin.fallback_provider_id = ""
+
+        async def identity_reasons(_context, _event, _provider_id, ranked_games):
+            return ranked_games
+
+        with patch.object(
+            main_module,
+            "generate_recommendation_reasons",
+            identity_reasons,
+        ):
+            run = await plugin._run_recommendation(
+                FakeEvent(),
+                PreparedRecommendation(
+                    "动作游戏",
+                    GamePreference(platforms=["steam"]),
+                    1,
+                ),
+            )
+
+        self.assertTrue(
+            any("较旧的 Steam 资料" in message for message in run.messages)
+        )
+
+    async def test_edition_deduplication_runs_after_price_ranking(self) -> None:
+        plugin = empty_pipeline_plugin(
+            RaisingLlmContext(),
+            games=[
+                RankedGame(
+                    appid=1,
+                    title="Example Game",
+                    app_type="game",
+                    score=90,
+                ),
+                RankedGame(
+                    appid=2,
+                    title="Example Game Complete Edition",
+                    app_type="game",
+                    score=80,
+                ),
+            ],
+        )
+        plugin.fallback_provider_id = ""
+        plugin.price_bridge = PricePromotesEditionBridge()
+
+        async def identity_reasons(_context, _event, _provider_id, ranked_games):
+            return ranked_games
+
+        with patch.object(
+            main_module,
+            "generate_recommendation_reasons",
+            identity_reasons,
+        ):
+            run = await plugin._run_recommendation(
+                FakeEvent(),
+                PreparedRecommendation(
+                    "预算内的动作游戏",
+                    GamePreference(platforms=["steam"], budget=100),
+                    2,
+                ),
+            )
+
+        self.assertEqual([game.appid for game in run.ranked_games], [2])
 
     async def test_main_passes_identical_query_cache_policy_to_semantic_verifier(
         self,
@@ -1249,7 +1595,9 @@ class SemanticFeatureMainPipelineTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(verifier_class.call_args.kwargs["reuse_cache"], False)
 
-    async def test_current_session_provider_verifies_top_twenty_and_keys_cache(self) -> None:
+    async def test_current_session_provider_verifies_full_candidate_pool_and_keys_cache(
+        self,
+    ) -> None:
         feature = {
             "constraint_id": "branching",
             "source_span": "必须有分支剧情",
@@ -1274,7 +1622,7 @@ class SemanticFeatureMainPipelineTest(unittest.IsolatedAsyncioTestCase):
                         "status": "satisfied",
                         "evidence_quote": "branching choices",
                     }
-                    for appid in range(1, 21)
+                    for appid in range(1, 22)
                 ]
             },
         )
@@ -1296,7 +1644,7 @@ class SemanticFeatureMainPipelineTest(unittest.IsolatedAsyncioTestCase):
             run = await plugin._run_recommendation(FakeEvent(), prepared)
 
         self.assertEqual(context.provider_requests, ["qq:test"])
-        self.assertEqual(len(context.calls), 4)
+        self.assertEqual(len(context.calls), 5)
         payloads = [
             json.loads(call["prompt"].split("INPUT=", 1)[1])
             for call in context.calls
@@ -1311,6 +1659,7 @@ class SemanticFeatureMainPipelineTest(unittest.IsolatedAsyncioTestCase):
                 list(range(6, 11)),
                 list(range(11, 16)),
                 list(range(16, 21)),
+                [21],
             ],
         )
         self.assertTrue(
@@ -1330,12 +1679,12 @@ class SemanticFeatureMainPipelineTest(unittest.IsolatedAsyncioTestCase):
                 provider_id="provider/session-model",
                 locale="schinese",
             )
-            for game in games[:20]
+            for game in games
         }
         self.assertEqual({key for key, _payload in cache.writes}, expected_keys)
         log_args = debug_log.call_args.args
         rendered_log = log_args[0] % log_args[1:]
-        self.assertIn("semantic_candidates=20", rendered_log)
+        self.assertIn("semantic_candidates=21", rendered_log)
         self.assertIn("semantic_notices=none", rendered_log)
         self.assertIn("semantic_features_ms=", rendered_log)
 
@@ -1427,7 +1776,10 @@ class SemanticFeatureMainPipelineTest(unittest.IsolatedAsyncioTestCase):
 
         results = [item async for item in plugin.recommend_games(event, "query")]
 
-        self.assertEqual(results, [("plain", "notice\n\nrecommendations")])
+        self.assertEqual(
+            results,
+            [("plain", "notice"), ("plain", "recommendations")],
+        )
         self.assertEqual(saved, [run])
         self.assertEqual(preference.parse_warnings, [])
 
@@ -1640,6 +1992,51 @@ class EmptyPriceBridge:
         return []
 
 
+class PricePromotesEditionBridge:
+    async def enrich_ranked_games(self, _games, _preference):
+        return [
+            RankedGame(
+                appid=2,
+                title="Example Game Complete Edition",
+                app_type="game",
+                score=95,
+            ),
+            RankedGame(
+                appid=1,
+                title="Example Game",
+                app_type="game",
+                score=90,
+            ),
+        ]
+
+
+class CappedDisplayPriceBridge:
+    def __init__(self) -> None:
+        self.lookup_appids: list[int] = []
+
+    async def enrich_ranked_games(self, games, _preference):
+        remaining = 2
+        enriched = []
+        for game in games:
+            if game.price_summary is not None or remaining <= 0:
+                enriched.append(game)
+                continue
+            self.lookup_appids.append(game.appid)
+            remaining -= 1
+            enriched.append(
+                game.copy(
+                    update={
+                        "price_summary": GamePriceSummary(
+                            current_price="¥ 10",
+                            current_amount=10,
+                            current_currency="CNY",
+                        )
+                    }
+                )
+            )
+        return enriched
+
+
 class BoundAccountCache:
     async def get_steam_account_binding(self, _platform, _user_id):
         return SteamAccountBinding(
@@ -1660,7 +2057,8 @@ class CountingOwnedGamesClient:
     def has_web_api_key(self) -> bool:
         return True
 
-    async def get_owned_games(self, _account_id):
+    async def get_owned_games(self, _account_id, *, binding_identity=None):
+        del binding_identity
         self.owned_calls += 1
         return self.games
 
