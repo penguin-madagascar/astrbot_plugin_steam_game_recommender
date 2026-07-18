@@ -8,7 +8,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import httpx
-
 from astrbot_plugin_steam_game_recommender.clients.steam import (
     SteamApiError,
     SteamClient,
@@ -25,7 +24,6 @@ from astrbot_plugin_steam_game_recommender.services.recommendation_intent import
 from astrbot_plugin_steam_game_recommender.services.reference_matching import (
     match_reference_query,
 )
-from astrbot_plugin_steam_game_recommender.services.tag_normalizer import normalize_tag
 from astrbot_plugin_steam_game_recommender.services.steam_index import (
     STEAM_INDEX_CACHE_KEY,
     STEAM_INDEX_SCHEMA_VERSION,
@@ -34,12 +32,12 @@ from astrbot_plugin_steam_game_recommender.services.steam_index import (
 from astrbot_plugin_steam_game_recommender.services.steam_recall import (
     RecallUnavailableError,
 )
+from astrbot_plugin_steam_game_recommender.services.tag_normalizer import normalize_tag
 from astrbot_plugin_steam_game_recommender.storage.models import (
     GameCandidate,
     GamePreference,
     SteamSearchHit,
 )
-
 
 VALID_STORE_HTML = """
 <html><body><div class="game_page_background">
@@ -264,8 +262,8 @@ class SteamReadRetryRegressionTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(header=header):
                 sleeps: list[float] = []
 
-                async def sleeper(delay: float) -> None:
-                    sleeps.append(delay)
+                async def sleeper(delay: float, sleep_log=sleeps) -> None:
+                    sleep_log.append(delay)
 
                 http_client = QueueHttpClient(
                     [
@@ -284,8 +282,8 @@ class SteamReadRetryRegressionTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(header=header):
                 sleeps: list[float] = []
 
-                async def sleeper(delay: float) -> None:
-                    sleeps.append(delay)
+                async def sleeper(delay: float, sleep_log=sleeps) -> None:
+                    sleep_log.append(delay)
 
                 http_client = QueueHttpClient(
                     [
@@ -600,7 +598,10 @@ class BootstrapAndMigrationRegressionTest(unittest.IsolatedAsyncioTestCase):
                 await bootstrap()
                 snapshot = await service.load_snapshot()
 
-                self.assertEqual([entry.candidate.appid for entry in snapshot.entries], [legacy_version])
+                self.assertEqual(
+                    [entry.candidate.appid for entry in snapshot.entries],
+                    [legacy_version],
+                )
                 self.assertTrue(snapshot.entries[0].needs_revalidation)
                 self.assertEqual(
                     cache.payloads[STEAM_INDEX_CACHE_KEY]["schema_version"],
