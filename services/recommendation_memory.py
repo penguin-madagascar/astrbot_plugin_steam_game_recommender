@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import inspect
+import math
 import re
 import time
 from dataclasses import dataclass, field, replace
@@ -9,6 +12,7 @@ from ..storage.models import GamePreference, RankedGame
 
 MEMORY_TTL_MINUTES = 30
 MAX_FEEDBACK_ENTRIES = 10
+MEMORY_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,7 @@ class RecommendationMemory:
     created_at: float
     last_results: list[RecommendationResultSummary] = field(default_factory=list)
     feedback: list[RecommendationFeedback] = field(default_factory=list)
+    conversation_scope: str = ""
 
 
 def build_recommendation_memory(
@@ -57,6 +62,8 @@ def build_recommendation_memory(
     result_limit: int,
     games: list[RankedGame],
     now: float | None = None,
+    *,
+    conversation_scope: str | None = None,
 ) -> RecommendationMemory:
     memory = RecommendationMemory(
         chat_platform=chat_platform or "default",
@@ -68,14 +75,22 @@ def build_recommendation_memory(
         shown_titles=[],
         created_at=now if now is not None else time.time(),
         last_results=summarize_games(games),
+        conversation_scope=str(conversation_scope or chat_platform or "default").strip(),
     )
     return append_shown_games(memory, games)
 
 
 async def save_recommendation_memory(cache: Any, memory: RecommendationMemory) -> None:
-    await cache.set_json(
-        recommendation_memory_key(memory.chat_platform, memory.chat_user_id),
+    scope = memory.conversation_scope or memory.chat_platform
+    await cache_set_json(
+        cache,
+        recommendation_memory_key(scope, memory.chat_user_id),
         dump_memory(memory),
+        ttl_seconds=MEMORY_TTL_MINUTES * 60,
+        owner_scope=recommendation_owner_scope(
+            memory.chat_platform,
+            memory.chat_user_id,
+        ),
     )
 
 
@@ -86,12 +101,17 @@ async def load_recommendation_memory(
     ttl_minutes: int = MEMORY_TTL_MINUTES,
     now: float | None = None,
 ) -> RecommendationMemory | None:
-    payload = await cache.get_json(
+    payload = await cache_get_json(
+        cache,
         recommendation_memory_key(chat_platform, chat_user_id),
-        24,
     )
     memory = parse_memory(payload)
     if memory is None:
+        return None
+    if (
+        memory.conversation_scope != str(chat_platform or "").strip()
+        or memory.chat_user_id != str(chat_user_id or "").strip()
+    ):
         return None
     current = now if now is not None else time.time()
     if current - memory.created_at > max(ttl_minutes, 0) * 60:
@@ -145,13 +165,33 @@ def append_feedback(
 
 
 def recommendation_memory_key(chat_platform: str, chat_user_id: str) -> str:
-    return f"recommendation_memory:{chat_platform or 'default'}:{chat_user_id}"
+    identity = f"{str(chat_platform or '').strip()}\0{str(chat_user_id or '').strip()}"
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return f"recommendation_memory:v2:{digest}"
+
+
+def recommendation_owner_scope(chat_platform: str, chat_user_id: str) -> str:
+    identity = f"{str(chat_platform or 'default').strip()}\0{str(chat_user_id or '').strip()}"
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return f"steam-user:v1:{digest}"
+
+
+async def delete_recommendation_memories(
+    cache: Any,
+    chat_platform: str,
+    chat_user_id: str,
+) -> None:
+    await cache.delete_owner_scope(
+        recommendation_owner_scope(chat_platform, chat_user_id)
+    )
 
 
 def dump_memory(memory: RecommendationMemory) -> dict[str, Any]:
     return {
+        "schema_version": MEMORY_SCHEMA_VERSION,
         "chat_platform": memory.chat_platform,
         "chat_user_id": memory.chat_user_id,
+        "conversation_scope": memory.conversation_scope or memory.chat_platform,
         "raw_query": memory.raw_query,
         "preference": dump_model(memory.preference),
         "result_limit": memory.result_limit,
@@ -185,33 +225,83 @@ def dump_memory(memory: RecommendationMemory) -> dict[str, Any]:
 
 
 def parse_memory(payload: Any) -> RecommendationMemory | None:
-    if not isinstance(payload, dict):
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != MEMORY_SCHEMA_VERSION
+    ):
         return None
     preference_data = payload.get("preference")
     if not isinstance(preference_data, dict):
         return None
-    validator = getattr(GamePreference, "model_validate", None)
-    preference = (
-        validator(preference_data) if validator else GamePreference.parse_obj(preference_data)
-    )
-    return RecommendationMemory(
-        chat_platform=str(payload.get("chat_platform") or "default"),
-        chat_user_id=str(payload.get("chat_user_id") or ""),
-        raw_query=str(payload.get("raw_query") or ""),
-        preference=preference,
-        result_limit=max(int(payload.get("result_limit") or 1), 1),
-        shown_appids=[
-            int(appid) for appid in payload.get("shown_appids") or [] if safe_int(appid) is not None
-        ],
-        shown_titles=[
-            title
-            for title in (normalize_title(value) for value in payload.get("shown_titles") or [])
-            if title
-        ],
-        created_at=float(payload.get("created_at") or 0),
-        last_results=parse_result_summaries(payload.get("last_results")),
-        feedback=parse_feedback(payload.get("feedback")),
-    )
+    try:
+        validator = getattr(GamePreference, "model_validate", None)
+        preference = (
+            validator(preference_data)
+            if validator
+            else GamePreference.parse_obj(preference_data)
+        )
+        created_at = float(payload.get("created_at") or 0)
+        if not math.isfinite(created_at):
+            return None
+        return RecommendationMemory(
+            chat_platform=str(payload.get("chat_platform") or "default"),
+            chat_user_id=str(payload.get("chat_user_id") or ""),
+            raw_query=str(payload.get("raw_query") or ""),
+            preference=preference,
+            result_limit=max(int(payload.get("result_limit") or 1), 1),
+            shown_appids=[
+                int(appid)
+                for appid in payload.get("shown_appids") or []
+                if safe_int(appid) is not None
+            ],
+            shown_titles=[
+                title
+                for title in (
+                    normalize_title(value)
+                    for value in payload.get("shown_titles") or []
+                )
+                if title
+            ],
+            created_at=created_at,
+            last_results=parse_result_summaries(payload.get("last_results")),
+            feedback=[
+                item
+                for item in parse_feedback(payload.get("feedback"))
+                if math.isfinite(item.created_at)
+            ],
+            conversation_scope=str(
+                payload.get("conversation_scope") or ""
+            ).strip(),
+        )
+    except (OverflowError, TypeError, ValueError):
+        return None
+
+
+async def cache_get_json(cache: Any, key: str) -> Any | None:
+    getter = cache.get_json
+    if "allow_stale_seconds" in inspect.signature(getter).parameters:
+        return await getter(key, 24, allow_stale_seconds=0)
+    return await getter(key, 24)
+
+
+async def cache_set_json(
+    cache: Any,
+    key: str,
+    payload: Any,
+    *,
+    ttl_seconds: int,
+    owner_scope: str,
+) -> None:
+    setter = cache.set_json
+    if "ttl_seconds" in inspect.signature(setter).parameters:
+        await setter(
+            key,
+            payload,
+            ttl_seconds=ttl_seconds,
+            owner_scope=owner_scope,
+        )
+        return
+    await setter(key, payload)
 
 
 def parse_result_summaries(value: Any) -> list[RecommendationResultSummary]:
