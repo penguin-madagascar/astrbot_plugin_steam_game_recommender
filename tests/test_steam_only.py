@@ -49,9 +49,22 @@ class SteamOnlyMetadataTest(unittest.TestCase):
     def test_readme_documents_only_current_steam_interfaces(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
-        for command in ("/gamerec", "/gamerec_retry", "/accountbind", "/randomrec"):
+        for command in (
+            "/gamerec",
+            "/gamerec_retry",
+            "/accountbind",
+            "/accountunbind",
+            "/randomrec",
+        ):
             self.assertIn(command, readme)
-        for alias in ("/游戏推荐", "/重新推荐", "/换一批", "/账号绑定", "/随机推荐"):
+        for alias in (
+            "/游戏推荐",
+            "/重新推荐",
+            "/换一批",
+            "/账号绑定",
+            "/解除绑定",
+            "/随机推荐",
+        ):
             self.assertIn(alias, readme)
         self.assertNotIn("/unplayedrec", readme)
         self.assertNotIn("/未玩推荐", readme)
@@ -111,6 +124,12 @@ class SteamOnlyMetadataTest(unittest.TestCase):
             "暂时没有找到满足当前条件的游戏",
             "只会在 Steam 查询正常但没有合适结果时出现",
             "显示样式取决于当前聊天平台",
+            "OneBot v11 通常显示为合并转发",
+            "QQ 官方、Telegram、Discord",
+            "随机抽样最多 50 款",
+            "约 20 秒",
+            "近期推荐记录会保留 30 分钟",
+            "解绑时会删除当前平台实例的绑定",
         ):
             self.assertIn(user_visible_behavior, readme)
 
