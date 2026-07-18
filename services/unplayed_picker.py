@@ -141,8 +141,9 @@ async def pick_random_unplayed_game(
             ]
             task_order = {task: index for index, task in enumerate(tasks)}
             pending = set(tasks)
+            selected: UnplayedRecommendation | None = None
             try:
-                while pending:
+                while pending and selected is None:
                     done, pending = await asyncio.wait(
                         pending,
                         return_when=asyncio.FIRST_COMPLETED,
@@ -151,11 +152,17 @@ async def pick_random_unplayed_game(
                         succeeded, result = task.result()
                         review_success_count += int(succeeded)
                         if result is not None:
-                            return result
+                            selected = result
+                            break
             finally:
                 for task in pending:
                     task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+                outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+                for outcome in outcomes:
+                    if isinstance(outcome, Exception):
+                        raise outcome
+            if selected is not None:
+                return selected
         return None
 
     parsed_timeout = optional_float(timeout_seconds)

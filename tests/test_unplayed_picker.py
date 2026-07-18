@@ -298,6 +298,23 @@ class UnplayedPickerTest(unittest.IsolatedAsyncioTestCase):
                 rng=NoShuffleRandom(),
             )
 
+    async def test_ready_result_does_not_hide_peer_programming_error(self) -> None:
+        from astrbot_plugin_steam_game_recommender.services.unplayed_picker import (
+            pick_random_unplayed_game,
+        )
+
+        client = ReadyAndProgrammingErrorClient()
+
+        with self.assertRaisesRegex(RuntimeError, "decoder bug in peer"):
+            await pick_random_unplayed_game(
+                [
+                    SteamOwnedGame(appid=1, name="Ready", playtime_forever=0),
+                    SteamOwnedGame(appid=2, name="Broken", playtime_forever=0),
+                ],
+                client,
+                rng=NoShuffleRandom(),
+            )
+
     async def test_samples_at_most_fifty_games_from_a_large_library(self) -> None:
         from astrbot_plugin_steam_game_recommender.services.unplayed_picker import (
             UnplayedRecommendationError,
@@ -496,6 +513,22 @@ class ProgrammingErrorReviewClient:
 
     async def get_game_detail(self, _appid: int) -> GameCandidate:
         raise AssertionError("review failure must not load details")
+
+
+class ReadyAndProgrammingErrorClient:
+    async def get_review_summary(self, appid: int) -> FakeReview:
+        if appid == 2:
+            raise RuntimeError("decoder bug in peer")
+        return FakeReview(total_reviews=500, positive_ratio=0.9)
+
+    async def get_game_detail(self, appid: int) -> GameCandidate:
+        return GameCandidate(
+            title=game_title(appid),
+            appid=appid,
+            app_type="game",
+            platforms=["PC"],
+            stores=["Steam"],
+        )
 
 
 class NoShuffleRandom:
