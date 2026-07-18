@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
 from astrbot_plugin_steam_game_recommender.services.account_binding import (
+    STEAM_ACCOUNT_ID_MAX,
     STEAMID64_BASE,
     AccountBindingError,
+    account_identity_from_event,
     parse_account_binding_command,
+    platform_instance_ids_for_name,
+    platform_name_from_event,
+    recommendation_scope_from_event,
 )
+from astrbot_plugin_steam_game_recommender.storage import repository as repository_module
 from astrbot_plugin_steam_game_recommender.storage.models import SteamAccountBinding
 from astrbot_plugin_steam_game_recommender.storage.repository import SQLiteCacheRepository
 
@@ -41,6 +48,99 @@ class AccountBindingParserTest(unittest.TestCase):
 
         with self.assertRaises(AccountBindingError):
             parse_account_binding_command("not-a-number")
+
+    def test_steam_id64_must_represent_a_personal_account(self) -> None:
+        for value in (
+            str(STEAMID64_BASE),
+            str(STEAMID64_BASE + STEAM_ACCOUNT_ID_MAX + 1),
+        ):
+            with self.subTest(value=value), self.assertRaises(AccountBindingError):
+                parse_account_binding_command(value)
+
+        lower = parse_account_binding_command(str(STEAMID64_BASE + 1))
+        upper = parse_account_binding_command(
+            str(STEAMID64_BASE + STEAM_ACCOUNT_ID_MAX)
+        )
+
+        self.assertEqual(lower.account_kind, "steam_id64")
+        self.assertEqual(upper.account_kind, "steam_id64")
+
+
+class ChatIdentityTest(unittest.TestCase):
+    def test_separates_platform_capability_account_and_retry_identities(self) -> None:
+        event = IdentityEvent()
+
+        self.assertEqual(platform_name_from_event(event), "aiocqhttp")
+        self.assertEqual(
+            account_identity_from_event(event),
+            ("onebot-instance-2", "user-7"),
+        )
+        self.assertEqual(
+            recommendation_scope_from_event(event),
+            ("onebot-instance-2:GroupMessage:group-9", "user-7"),
+        )
+
+    def test_account_identity_falls_back_to_umo_platform_instance(self) -> None:
+        event = IdentityEvent()
+        event.get_platform_id = None
+
+        self.assertEqual(
+            account_identity_from_event(event),
+            ("onebot-instance-2", "user-7"),
+        )
+
+    def test_retry_identity_requires_a_session_origin(self) -> None:
+        event = IdentityEvent()
+        event.unified_msg_origin = ""
+
+        with self.assertRaisesRegex(AccountBindingError, "会话"):
+            recommendation_scope_from_event(event)
+
+    def test_platform_instance_inventory_requires_matching_adapter_type(self) -> None:
+        context = PlatformContext(
+            FakePlatform("onebot-instance-2", "aiocqhttp"),
+            FakePlatform("telegram-instance-1", "telegram"),
+        )
+
+        self.assertEqual(
+            platform_instance_ids_for_name(context, "aiocqhttp"),
+            ["onebot-instance-2"],
+        )
+        self.assertEqual(
+            platform_instance_ids_for_name(object(), "aiocqhttp"),
+            None,
+        )
+
+
+class IdentityEvent:
+    unified_msg_origin = "onebot-instance-2:GroupMessage:group-9"
+
+    def get_platform_name(self) -> str:
+        return "aiocqhttp"
+
+    def get_platform_id(self) -> str:
+        return "onebot-instance-2"
+
+    def get_sender_id(self) -> str:
+        return "user-7"
+
+
+class FakePlatform:
+    def __init__(self, platform_id: str, name: str) -> None:
+        self.platform_id = platform_id
+        self.name = name
+
+    def meta(self):
+        return type("Meta", (), {"id": self.platform_id, "name": self.name})()
+
+
+class PlatformContext:
+    def __init__(self, *platforms: FakePlatform) -> None:
+        self.platform_manager = type(
+            "PlatformManager",
+            (),
+            {"get_insts": lambda _self: list(platforms)},
+        )()
 
 
 class AccountBindingRepositoryTest(unittest.IsolatedAsyncioTestCase):
@@ -94,6 +194,197 @@ class AccountBindingRepositoryTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(steam)
             assert steam is not None
             self.assertEqual(steam.steam_id64, "76561198012345678")
+
+    async def test_lazy_migration_preserves_a_marked_legacy_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = SQLiteCacheRepository(Path(tmpdir) / "cache.sqlite3")
+            await repo.upsert_steam_account_binding(
+                SteamAccountBinding(
+                    chat_platform="aiocqhttp",
+                    chat_user_id="user-1",
+                    steam_id64="76561198000000000",
+                    account_kind="steam_id64",
+                    display_value="76561198000000000",
+                )
+            )
+
+            migrated = await repo.migrate_steam_account_binding(
+                "aiocqhttp",
+                "onebot-instance-2",
+                "user-1",
+            )
+            legacy = await repo.get_steam_account_binding("aiocqhttp", "user-1")
+            current = await repo.get_steam_account_binding(
+                "onebot-instance-2",
+                "user-1",
+            )
+
+            self.assertEqual(migrated, current)
+            self.assertIsNotNone(legacy)
+            assert legacy is not None
+            self.assertEqual(
+                legacy.metadata["migrated_to_platform_instance"],
+                "onebot-instance-2",
+            )
+            self.assertEqual(
+                current.metadata["migrated_from_platform"],
+                "aiocqhttp",
+            )
+
+    async def test_binding_family_delete_atomically_removes_migrated_pair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = SQLiteCacheRepository(Path(tmpdir) / "cache.sqlite3")
+            await repo.upsert_steam_account_binding(
+                SteamAccountBinding(
+                    chat_platform="aiocqhttp",
+                    chat_user_id="user-1",
+                    steam_id64="76561198000000000",
+                    account_kind="steam_id64",
+                    display_value="76561198000000000",
+                )
+            )
+            await repo.migrate_steam_account_binding(
+                "aiocqhttp",
+                "onebot-instance-2",
+                "user-1",
+            )
+
+            deleted = await repo.delete_steam_account_binding_family(
+                "onebot-instance-2",
+                "user-1",
+            )
+
+            self.assertEqual(
+                [binding.chat_platform for binding in deleted],
+                ["onebot-instance-2", "aiocqhttp"],
+            )
+            self.assertTrue(
+                all(
+                    binding.steam_id64 == "76561198000000000"
+                    for binding in deleted
+                )
+            )
+            self.assertIsNone(
+                await repo.get_steam_account_binding("onebot-instance-2", "user-1")
+            )
+            self.assertIsNone(
+                await repo.get_steam_account_binding("aiocqhttp", "user-1")
+            )
+
+    async def test_binding_family_delete_keeps_unrelated_legacy_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = SQLiteCacheRepository(Path(tmpdir) / "cache.sqlite3")
+            await repo.upsert_steam_account_binding(
+                SteamAccountBinding(
+                    chat_platform="aiocqhttp",
+                    chat_user_id="user-1",
+                    steam_id64="76561198000000001",
+                    account_kind="steam_id64",
+                    display_value="76561198000000001",
+                )
+            )
+            await repo.upsert_steam_account_binding(
+                SteamAccountBinding(
+                    chat_platform="onebot-instance-2",
+                    chat_user_id="user-1",
+                    steam_id64="76561198000000000",
+                    account_kind="steam_id64",
+                    display_value="76561198000000000",
+                    metadata={"migrated_from_platform": "aiocqhttp"},
+                )
+            )
+
+            deleted = await repo.delete_steam_account_binding_family(
+                "onebot-instance-2",
+                "user-1",
+            )
+
+            self.assertEqual(
+                [binding.chat_platform for binding in deleted],
+                ["onebot-instance-2"],
+            )
+            self.assertIsNotNone(
+                await repo.get_steam_account_binding("aiocqhttp", "user-1")
+            )
+
+    async def test_binding_family_delete_removes_rebound_migrated_pair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = SQLiteCacheRepository(Path(tmpdir) / "cache.sqlite3")
+            await repo.upsert_steam_account_binding(
+                SteamAccountBinding(
+                    chat_platform="aiocqhttp",
+                    chat_user_id="user-1",
+                    steam_id64="76561198000000000",
+                    account_kind="steam_id64",
+                    display_value="76561198000000000",
+                    metadata={
+                        "migrated_to_platform_instance": "onebot-instance-2"
+                    },
+                )
+            )
+            await repo.upsert_steam_account_binding(
+                SteamAccountBinding(
+                    chat_platform="onebot-instance-2",
+                    chat_user_id="user-1",
+                    steam_id64="76561198000000001",
+                    account_kind="steam_id64",
+                    display_value="76561198000000001",
+                    metadata={"migrated_from_platform": "aiocqhttp"},
+                )
+            )
+
+            deleted = await repo.delete_steam_account_binding_family(
+                "onebot-instance-2",
+                "user-1",
+            )
+
+            self.assertEqual(
+                [binding.chat_platform for binding in deleted],
+                ["onebot-instance-2", "aiocqhttp"],
+            )
+
+    async def test_binding_family_delete_rolls_back_when_any_delete_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "cache.sqlite3"
+            repo = SQLiteCacheRepository(db_path)
+            await repo.upsert_steam_account_binding(
+                SteamAccountBinding(
+                    chat_platform="aiocqhttp",
+                    chat_user_id="user-1",
+                    steam_id64="76561198000000000",
+                    account_kind="steam_id64",
+                    display_value="76561198000000000",
+                )
+            )
+            await repo.migrate_steam_account_binding(
+                "aiocqhttp",
+                "onebot-instance-2",
+                "user-1",
+            )
+            with sqlite3.connect(db_path) as connection:
+                connection.execute(
+                    """
+                    CREATE TRIGGER reject_legacy_binding_delete
+                    BEFORE DELETE ON steam_account_bindings
+                    WHEN OLD.chat_platform = 'aiocqhttp'
+                    BEGIN
+                        SELECT RAISE(ABORT, 'synthetic delete failure');
+                    END
+                    """
+                )
+
+            with self.assertRaises(repository_module.CacheStorageError):
+                await repo.delete_steam_account_binding_family(
+                    "onebot-instance-2",
+                    "user-1",
+                )
+
+            self.assertIsNotNone(
+                await repo.get_steam_account_binding("onebot-instance-2", "user-1")
+            )
+            self.assertIsNotNone(
+                await repo.get_steam_account_binding("aiocqhttp", "user-1")
+            )
 
 
 if __name__ == "__main__":

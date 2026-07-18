@@ -767,6 +767,77 @@ class SQLiteCacheRepository:
                 connection.close()
                 self._secure_database_files()
 
+    async def delete_steam_account_binding_family(
+        self,
+        chat_platform: str,
+        chat_user_id: str,
+    ) -> list[SteamAccountBinding]:
+        return await asyncio.to_thread(
+            self._delete_steam_account_binding_family_sync,
+            chat_platform,
+            chat_user_id,
+        )
+
+    def _delete_steam_account_binding_family_sync(
+        self,
+        chat_platform: str,
+        chat_user_id: str,
+    ) -> list[SteamAccountBinding]:
+        current_platform = chat_platform or "default"
+        with self._lock:
+            connection = self._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                current = steam_account_binding_from_row(
+                    self._select_steam_account_binding_row(
+                        connection,
+                        current_platform,
+                        chat_user_id,
+                    )
+                )
+                if current is None:
+                    connection.commit()
+                    return []
+
+                deleted = [current]
+                legacy_platform = current.metadata.get("migrated_from_platform")
+                if isinstance(legacy_platform, str) and legacy_platform:
+                    legacy = steam_account_binding_from_row(
+                        self._select_steam_account_binding_row(
+                            connection,
+                            legacy_platform,
+                            chat_user_id,
+                        )
+                    )
+                    if (
+                        legacy is not None
+                        and legacy.metadata.get("migrated_to_platform_instance")
+                        == current_platform
+                    ):
+                        deleted.append(legacy)
+
+                connection.executemany(
+                    """
+                    DELETE FROM steam_account_bindings
+                    WHERE chat_platform = ? AND chat_user_id = ?
+                    """,
+                    [
+                        (binding.chat_platform, binding.chat_user_id)
+                        for binding in deleted
+                    ],
+                )
+                connection.commit()
+                return deleted
+            except sqlite3.Error:
+                if connection.in_transaction:
+                    connection.rollback()
+                raise CacheStorageError(
+                    "account_binding_family_delete_failure"
+                ) from None
+            finally:
+                connection.close()
+                self._secure_database_files()
+
     async def delete_steam_account_binding(
         self,
         chat_platform: str,
@@ -809,28 +880,40 @@ class SQLiteCacheRepository:
         with self._lock:
             connection = self._connect()
             try:
-                row = connection.execute(
-                    """
-                    SELECT
-                        chat_platform,
-                        chat_user_id,
-                        steam_id64,
-                        account_kind,
-                        display_value,
-                        metadata_json,
-                        created_at,
-                        updated_at
-                    FROM steam_account_bindings
-                    WHERE chat_platform = ? AND chat_user_id = ?
-                    """,
-                    (chat_platform or "default", chat_user_id),
-                ).fetchone()
+                row = self._select_steam_account_binding_row(
+                    connection,
+                    chat_platform or "default",
+                    chat_user_id,
+                )
             except sqlite3.Error:
                 raise CacheStorageError("account_binding_read_failure") from None
             finally:
                 connection.close()
                 self._secure_database_files()
         return steam_account_binding_from_row(row)
+
+    @staticmethod
+    def _select_steam_account_binding_row(
+        connection: sqlite3.Connection,
+        chat_platform: str,
+        chat_user_id: str,
+    ) -> Any:
+        return connection.execute(
+            """
+            SELECT
+                chat_platform,
+                chat_user_id,
+                steam_id64,
+                account_kind,
+                display_value,
+                metadata_json,
+                created_at,
+                updated_at
+            FROM steam_account_bindings
+            WHERE chat_platform = ? AND chat_user_id = ?
+            """,
+            (chat_platform, chat_user_id),
+        ).fetchone()
 
 
 def _validated_ttl_hours(value: int | float) -> float:
