@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -135,7 +136,12 @@ class SteamGameRecommenderPlugin(Star):
         )
         cache_config = config_section(self.config, "cache_and_network")
 
-        timeout = safe_int(cache_config.get("timeout_seconds"), 15)
+        timeout = safe_bounded_int(
+            cache_config.get("timeout_seconds"),
+            15,
+            minimum=1,
+            maximum=120,
+        )
         self.reuse_identical_query_cache = safe_bool(
             cache_config.get("reuse_identical_query_cache"),
             False,
@@ -178,7 +184,12 @@ class SteamGameRecommenderPlugin(Star):
         self.steam_client = SteamClient(
             client=self.http_client,
             cache=self.cache,
-            cache_ttl_hours=safe_int(cache_config.get("cache_ttl_hours"), 24),
+            cache_ttl_hours=safe_bounded_int(
+                cache_config.get("cache_ttl_hours"),
+                24,
+                minimum=1,
+                maximum=8760,
+            ),
             default_country=self.default_region,
             language="schinese",
             steam_api_key=str(model_config.get("steam_api_key") or ""),
@@ -187,9 +198,11 @@ class SteamGameRecommenderPlugin(Star):
         self.steam_index = SteamGameIndexService(
             steam_client=self.steam_client,
             cache=self.cache,
-            ttl_hours=safe_int(
+            ttl_hours=safe_bounded_int(
                 self.recommendation_config.get("steam_index_ttl_hours"),
                 168,
+                minimum=1,
+                maximum=8760,
             ),
             reuse_cache=self.reuse_identical_query_cache,
         )
@@ -342,13 +355,17 @@ class SteamGameRecommenderPlugin(Star):
                 yield event.plain_result("Steam 游戏库为空或不可见，无法进行随机推荐。")
                 return
 
-            min_review_count = safe_int(
+            min_review_count = safe_bounded_int(
                 self.recommendation_config.get("steam_min_review_count"),
                 50,
+                minimum=0,
+                maximum=1_000_000,
             )
-            min_positive_ratio = safe_float(
+            min_positive_ratio = safe_bounded_float(
                 self.recommendation_config.get("steam_min_positive_ratio"),
                 0.65,
+                minimum=0.0,
+                maximum=1.0,
             )
             recommendation = await pick_random_unplayed_game(
                 owned_games,
@@ -855,7 +872,7 @@ class SteamGameRecommenderPlugin(Star):
 def safe_int(value: Any, default: int) -> int:
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (OverflowError, TypeError, ValueError):
         return default
 
 
@@ -876,8 +893,32 @@ def safe_bool(value: Any, default: bool) -> bool:
 def safe_float(value: Any, default: float) -> float:
     try:
         return float(value)
-    except (TypeError, ValueError):
+    except (OverflowError, TypeError, ValueError):
         return default
+
+
+def safe_bounded_int(
+    value: Any,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    parsed = safe_int(value, default)
+    return min(max(parsed, minimum), maximum)
+
+
+def safe_bounded_float(
+    value: Any,
+    default: float,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
+    parsed = safe_float(value, default)
+    if not math.isfinite(parsed):
+        parsed = default
+    return min(max(parsed, minimum), maximum)
 
 
 def config_section(config: Mapping[str, Any], name: str) -> Mapping[str, Any]:

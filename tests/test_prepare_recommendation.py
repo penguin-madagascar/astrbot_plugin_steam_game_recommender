@@ -57,6 +57,8 @@ try:
         PreparedRecommendation,
         RecommendationRun,
         SteamGameRecommenderPlugin,
+        safe_bounded_float,
+        safe_bounded_int,
     )
     from astrbot_plugin_steam_game_recommender.services.played_filter import (
         LIBRARY_FILTER_EXCLUDE_OWNED,
@@ -117,6 +119,23 @@ class FakePreferenceParser:
 
 
 class PluginDashboardConfigTest(unittest.TestCase):
+    def test_numeric_config_helpers_reject_non_finite_and_clamp_extremes(self) -> None:
+        self.assertEqual(safe_bounded_int("invalid", 15, minimum=1, maximum=120), 15)
+        self.assertEqual(safe_bounded_int(-99, 15, minimum=1, maximum=120), 1)
+        self.assertEqual(safe_bounded_int(999, 15, minimum=1, maximum=120), 120)
+        self.assertEqual(
+            safe_bounded_float(float("nan"), 0.65, minimum=0.0, maximum=1.0),
+            0.65,
+        )
+        self.assertEqual(
+            safe_bounded_float(float("inf"), 0.65, minimum=0.0, maximum=1.0),
+            0.65,
+        )
+        self.assertEqual(
+            safe_bounded_float(-1, 0.65, minimum=0.0, maximum=1.0),
+            0.0,
+        )
+
     def test_nested_dashboard_config_is_wired_to_runtime_services(self) -> None:
         config = {
             "model_and_access": {
