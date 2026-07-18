@@ -19,11 +19,11 @@ from astrbot_plugin_steam_game_recommender.services.recommendation_intent import
     WeightedIntentTag,
 )
 from astrbot_plugin_steam_game_recommender.services.run_notices import RunNotice
-from astrbot_plugin_steam_game_recommender.services.similarity_ranker import (
-    rank_steam_candidates,
-)
 from astrbot_plugin_steam_game_recommender.services.semantic_feature_verifier import (
     copy_score_breakdown as copy_semantic_score_breakdown,
+)
+from astrbot_plugin_steam_game_recommender.services.similarity_ranker import (
+    rank_steam_candidates,
 )
 from astrbot_plugin_steam_game_recommender.services.steam_price_bridge import (
     attach_missing_price_warning,
@@ -42,6 +42,9 @@ from astrbot_plugin_steam_game_recommender.storage.models import (
 
 UNRELEASED_CAUTION = (
     "使用 60/100 未发售质量先验，仅用于排序，不代表玩家实评或实际知名度"
+)
+PLAIN_UNRELEASED_CAUTION = (
+    "游戏尚未发售，暂无足够玩家评价，推荐分仅供参考"
 )
 
 
@@ -279,10 +282,14 @@ class RecommendationOutputTest(unittest.IsolatedAsyncioTestCase):
             [game],
         )
 
-        self.assertIn("核心", generated[0].recommendation_reason)
-        self.assertEqual(generated[0].caution_reason, f"{UNRELEASED_CAUTION}。")
+        self.assertIn("最看重", generated[0].recommendation_reason)
+        self.assertEqual(
+            generated[0].caution_reason,
+            f"{PLAIN_UNRELEASED_CAUTION}。",
+        )
         block = format_recommendation_messages(GamePreference(), generated)[1]
-        self.assertIn(f"不推荐理由：{UNRELEASED_CAUTION}。", block)
+        self.assertIn(f"不推荐理由：{PLAIN_UNRELEASED_CAUTION}。", block)
+        self.assertNotRegex(block, r"60/100|先验|玩家实评")
 
     async def test_llm_caution_cannot_mix_fabricated_risk_into_output(self) -> None:
         game = RankedGame(
@@ -300,7 +307,7 @@ class RecommendationOutputTest(unittest.IsolatedAsyncioTestCase):
                     evidence_id="core_missing",
                     category="core",
                     sentiment="uncertain",
-                    text="部分核心特征证据不足",
+                    text="宽松匹配：部分核心特征缺失或证据不足",
                     important=True,
                 ),
             ],
@@ -320,11 +327,15 @@ class RecommendationOutputTest(unittest.IsolatedAsyncioTestCase):
             [game],
         )
 
-        self.assertIn("命中核心玩法特征：类魂", generated[0].recommendation_reason)
-        self.assertEqual(generated[0].caution_reason, "部分核心特征证据不足。")
+        self.assertIn("符合你最看重的玩法：类魂", generated[0].recommendation_reason)
+        self.assertEqual(
+            generated[0].caution_reason,
+            "你最看重的部分玩法暂时无法确认。",
+        )
         block = format_recommendation_messages(GamePreference(), generated)[1]
         self.assertNotIn("性能", block)
         self.assertNotIn("崩溃", block)
+        self.assertNotRegex(block, r"宽松匹配|核心特征|证据")
 
     async def test_unreleased_prior_does_not_authorize_review_or_popularity_claims(
         self,
@@ -366,7 +377,10 @@ class RecommendationOutputTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("口碑", generated[0].recommendation_reason)
         self.assertNotIn("知名度", generated[0].recommendation_reason)
-        self.assertEqual(generated[0].caution_reason, f"{UNRELEASED_CAUTION}。")
+        self.assertEqual(
+            generated[0].caution_reason,
+            f"{PLAIN_UNRELEASED_CAUTION}。",
+        )
 
     async def test_unreleased_prior_always_uses_deterministic_positive_reason(self) -> None:
         game = RankedGame(
@@ -405,10 +419,10 @@ class RecommendationOutputTest(unittest.IsolatedAsyncioTestCase):
         )
         block = format_recommendation_messages(GamePreference(), generated)[1]
 
-        self.assertIn("核心", generated[0].recommendation_reason)
+        self.assertIn("最看重", generated[0].recommendation_reason)
         self.assertNotIn("广受好评", block)
         self.assertNotIn("庞大玩家群体", block)
-        self.assertIn(f"不推荐理由：{UNRELEASED_CAUTION}。", block)
+        self.assertIn(f"不推荐理由：{PLAIN_UNRELEASED_CAUTION}。", block)
 
     def test_notices_then_summary_then_game_and_blank_line_fields(self) -> None:
         game = RankedGame(

@@ -475,8 +475,12 @@ class RegionalBudgetAndFormattingTest(unittest.TestCase):
         text = "\n".join(format_game_block(1, relaxed))
 
         self.assertIn("推荐理由：Steam 口碑表现较稳定。", text)
-        self.assertIn("不推荐理由：宽松匹配：", text)
-        self.assertIn("核心特征为类魂", text)
+        self.assertIn(
+            "不推荐理由：你最看重的部分玩法暂时无法确认：类魂。",
+            text,
+        )
+        self.assertNotIn("宽松匹配", text)
+        self.assertNotIn("核心特征", text)
 
     def test_relaxed_tier_without_core_evidence_still_discloses_limited_match(self) -> None:
         relaxed = RankedGame(

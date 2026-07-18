@@ -17,9 +17,14 @@ logger = logging.getLogger(__name__)
 MAX_REASON_CONCURRENCY = 5
 MAX_REASON_LENGTH = 180
 MAX_REASON_EVIDENCE = 8
+PLAIN_LANGUAGE_RULE = (
+    "面向普通玩家，使用自然、日常的中文；直接说明符合需求的地方和需要留意的地方，"
+    "避免统计学、推荐算法、模型或系统内部术语。"
+)
 SYSTEM_PROMPT = (
     "你是 Steam 游戏推荐理由编辑器。只能使用输入的可信证据，不得补充未提供的玩法、"
     "语言、价格、口碑或平台事实。大作意图只能表述为高知名度/大作倾向，不得声称 AAA 制作预算。"
+    f"{PLAIN_LANGUAGE_RULE}"
     "输出 2 至 3 句简短中文理由，并只返回指定 JSON。"
 )
 
@@ -178,6 +183,7 @@ def reason_prompt(
         f"TITLE={title}\n"
         f"{focus}\n"
         f"{mainstream_rule}"
+        f"{PLAIN_LANGUAGE_RULE}\n"
         "从下面编号证据中选择通常 2 至 4 条来写 2 至 3 句理由，总长度不超过 180 字。\n"
         f"重要风险 ID（必须全部保留）：{json.dumps(important_ids, ensure_ascii=False)}\n"
         f"可信证据：\n{numbered}\n"
@@ -210,6 +216,7 @@ def recommendation_reason_prompt(
         f"APPID={appid if appid is not None else 'null'}\n"
         f"TITLE={title}\n"
         f"{mainstream_rule}"
+        f"{PLAIN_LANGUAGE_RULE}\n"
         "推荐理由只能概括 positive 证据，写 2 至 3 句中文，总长度不超过 180 字。\n"
         "不推荐理由只能概括下列允许的风险证据；不得创造风险。"
         "有风险时必须覆盖全部风险 ID，无风险时返回 null。\n"
@@ -436,7 +443,9 @@ def caution_evidence(
 
 
 def fallback_unplayed_reason(evidence: list[RecommendationEvidence]) -> str:
-    by_id = {item.evidence_id: item.text for item in evidence}
+    by_id = {
+        item.evidence_id: user_facing_evidence_text(item.text) for item in evidence
+    }
     sentences = [
         short_sentence(by_id[evidence_id], 55)
         for evidence_id in ("gameplay", "reviews", "popularity")
@@ -452,22 +461,39 @@ def important_risk_is_mentioned(item: RecommendationEvidence, reason: str) -> bo
     if item.category == "core":
         return any(word in text for word in ("宽松", "缺失")) or (
             "核心" in text
-            and any(word in text for word in ("不足", "未命中", "证据", "未确认", "未知"))
+            and any(
+                word in text
+                for word in (
+                    "不足",
+                    "未命中",
+                    "证据",
+                    "未确认",
+                    "无法确认",
+                    "未知",
+                )
+            )
+        ) or (
+            "最看重" in text
+            and any(word in text for word in ("缺失", "未确认", "无法确认", "未知"))
         )
     if item.category == "language":
         return any(word in text for word in ("语言", "中文", "英文", "日语", "韩语")) and any(
-            word in text for word in ("未确认", "不支持", "缺失", "未知")
+            word in text for word in ("未确认", "无法确认", "不支持", "缺失", "未知")
         )
     if item.category == "budget":
         return "预算" in text or "价格" in text
     if item.category == "reference":
         return "参考" in text or "相似" in text
     if item.category == "constraint":
-        return any(word in text for word in ("硬条件", "未确认", "不支持", "缺失", "未知"))
+        return any(
+            word in text
+            for word in ("硬条件", "未确认", "无法确认", "不支持", "缺失", "未知")
+        )
     return any(
         word in text
         for word in (
             "未确认",
+            "无法确认",
             "不支持",
             "高于",
             "不一致",
@@ -497,10 +523,123 @@ def positive_reason_claims_are_supported(
 
 
 def user_facing_evidence_text(value: str) -> str:
-    return sanitize_user_facing_tag_text(str(value or "")).replace(
-        "Wilson 置信下界",
-        "95% Wilson 好评率下界",
+    raw_text = str(value or "")
+    quoted_evidence = _simplify_quoted_evidence_text(raw_text)
+    if quoted_evidence is not None:
+        return quoted_evidence
+    text = sanitize_user_facing_tag_text(raw_text)
+    return _simplify_known_evidence_text(text)
+
+
+def _simplify_quoted_evidence_text(text: str) -> str | None:
+    semantic_failure = re.fullmatch(
+        r"用户原文特性“(?P<requirement>.+)”因(?:核验服务异常|响应契约异常)尚未确认满足",
+        text,
     )
+    if semantic_failure:
+        return (
+            f"检查“{semantic_failure.group('requirement')}”时暂时出错，"
+            "尚未确认是否符合要求"
+        )
+
+    semantic_match = re.fullmatch(
+        r"用户原文特性“(?P<requirement>.+)”已由 Steam 描述核验(?P<quote>：.*)?",
+        text,
+    )
+    if semantic_match:
+        return (
+            f"Steam 商店介绍显示这款游戏符合“{semantic_match.group('requirement')}”"
+            f"{semantic_match.group('quote') or ''}"
+        )
+
+    semantic_unknown = re.fullmatch(
+        r"用户原文(?:可选)?特性“(?P<requirement>.+)”缺少可核验证据",
+        text,
+    )
+    if semantic_unknown:
+        return (
+            "Steam 商店介绍没有足够信息确认"
+            f"“{semantic_unknown.group('requirement')}”"
+        )
+
+    semantic_mismatch = re.fullmatch(
+        r"用户原文可选特性“(?P<requirement>.+)”与 Steam 描述不符",
+        text,
+    )
+    if semantic_mismatch:
+        return (
+            "Steam 商店介绍显示这款游戏不符合"
+            f"“{semantic_mismatch.group('requirement')}”"
+        )
+
+    company_match = re.fullmatch(
+        r"公司偏好“(?P<company>.+)”(?P<status>"
+        r"已由 Steam 开发商/发行商字段精确匹配|"
+        r"缺少可核验的 Steam 公司字段|"
+        r"未在 Steam 开发商/发行商字段中匹配)",
+        text,
+    )
+    if company_match:
+        company = company_match.group("company")
+        status = company_match.group("status")
+        if status == "已由 Steam 开发商/发行商字段精确匹配":
+            return f"Steam 显示该游戏与“{company}”有关"
+        if status == "缺少可核验的 Steam 公司字段":
+            return f"Steam 暂未提供足够信息确认是否与“{company}”有关"
+        return f"Steam 公布的信息中没有找到“{company}”"
+
+    return None
+
+
+def _simplify_known_evidence_text(text: str) -> str:
+    exact_replacements = {
+        "已从解析成功的参考游戏提取核心与辅助标签": "与参考游戏的部分玩法相近",
+        "Steam 评测缺失或为零，口碑置信度不足": "Steam 评测太少，暂时无法判断玩家评价",
+        "按高知名度/大作倾向提高成熟口碑在层内的权重": (
+            "根据你的要求，本次更看重游戏的知名度和玩家评价"
+        ),
+        "使用 60/100 未发售质量先验，仅用于排序，不代表玩家实评或实际知名度": (
+            "游戏尚未发售，暂无足够玩家评价，推荐分仅供参考"
+        ),
+        "宽松匹配：部分核心特征缺失或证据不足": (
+            "你最看重的部分玩法暂时无法确认"
+        ),
+    }
+    if text in exact_replacements:
+        return exact_replacements[text]
+
+    prefix_templates = (
+        (r"命中核心玩法特征(?P<details>：.*)?", "符合你最看重的玩法"),
+        (r"命中辅助玩法特征(?P<details>：.*)?", "也符合你提到的玩法"),
+        (
+            r"命中游戏库辅助(?:玩法)?偏好(?P<details>：.*)?",
+            "与游戏库中常玩的玩法相近",
+        ),
+    )
+    for pattern, replacement in prefix_templates:
+        match = re.fullmatch(pattern, text)
+        if match:
+            return f"{replacement}{match.group('details') or ''}"
+
+    review_match = re.fullmatch(
+        r"(?P<summary>Steam 好评率 \d+%，共 \d+ 条评测)；Wilson 置信下界 \d+%",
+        text,
+    )
+    if review_match:
+        return review_match.group("summary")
+    if re.fullmatch(r"与负向参考的玩法标签相似度为 \d+%", text):
+        return "与不喜欢的参考游戏有部分相似玩法"
+    if re.fullmatch(r"评测规模对应的知名度指标为 \d+%", text):
+        return "在 Steam 上有一定关注度"
+
+    missing_core_match = re.fullmatch(
+        r"宽松匹配：缺失或证据不足的核心特征为(?P<labels>.+)",
+        text,
+    )
+    if missing_core_match:
+        return f"你最看重的部分玩法暂时无法确认：{missing_core_match.group('labels')}"
+
+    return text
 
 
 def build_unplayed_evidence(game: GameCandidate) -> list[RecommendationEvidence]:

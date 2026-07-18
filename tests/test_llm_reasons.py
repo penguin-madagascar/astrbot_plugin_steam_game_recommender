@@ -6,12 +6,16 @@ import re
 import unittest
 
 from astrbot_plugin_steam_game_recommender.services.explanation_builder import (
+    SYSTEM_PROMPT,
     build_unplayed_evidence,
+    fallback_caution_reason,
     fallback_reason,
     generate_recommendation_reasons,
     generate_unplayed_reason,
     reason_prompt,
+    recommendation_reason_prompt,
     select_reason_evidence,
+    user_facing_evidence_text,
     validate_reason_response,
 )
 from astrbot_plugin_steam_game_recommender.storage.models import (
@@ -86,6 +90,7 @@ class ReasonValidationTest(unittest.TestCase):
                         evidence=self.evidence,
                     )
                 )
+
     def test_rejects_wrong_sentence_count_and_overlong_reason(self) -> None:
         one_sentence = {
             "appid": 123,
@@ -162,6 +167,7 @@ class ReasonValidationTest(unittest.TestCase):
             "核心特征证据仍不足。",
             "这是宽松匹配结果。",
             "关键玩法存在缺失。",
+            "最看重的玩法暂时无法确认。",
         )
 
         for risk_sentence in risk_sentences:
@@ -181,7 +187,7 @@ class ReasonValidationTest(unittest.TestCase):
 
                 self.assertIsNotNone(result)
 
-    def test_wilson_evidence_uses_statistically_precise_user_facing_wording(self) -> None:
+    def test_review_evidence_keeps_player_facts_without_statistical_terms(self) -> None:
         reviews = evidence(
             "review_confidence",
             "reviews",
@@ -192,9 +198,171 @@ class ReasonValidationTest(unittest.TestCase):
         prompt = reason_prompt(123, "Test Game", [reviews])
         fallback = fallback_reason([reviews])
 
-        self.assertIn("95% Wilson 好评率下界 88%", prompt)
-        self.assertIn("95% Wilson 好评率下界 88%", fallback)
-        self.assertNotIn("Wilson 置信下界", prompt)
+        for text in (prompt, fallback):
+            self.assertIn("Steam 好评率 90%，共 1000 条评测", text)
+            self.assertNotIn("Wilson", text)
+            self.assertNotIn("置信", text)
+            self.assertNotIn("下界", text)
+
+    def test_reason_prompts_require_plain_everyday_language(self) -> None:
+        values = [
+            evidence(
+                "core_match",
+                "core",
+                "positive",
+                "命中核心玩法特征：类魂",
+            ),
+            evidence(
+                "semantic_feature:1:technical_failure",
+                "constraint",
+                "uncertain",
+                "用户原文特性“可以自由建造”因响应契约异常尚未确认满足",
+                important=True,
+            ),
+        ]
+
+        prompts = (
+            SYSTEM_PROMPT,
+            reason_prompt(123, "Test Game", values),
+            recommendation_reason_prompt(123, "Test Game", values),
+        )
+
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                self.assertIn("面向普通玩家", prompt)
+                self.assertIn("自然、日常的中文", prompt)
+                self.assertIn("直接说明符合需求的地方和需要留意的地方", prompt)
+                self.assertIn("避免统计学、推荐算法、模型或系统内部术语", prompt)
+
+    def test_known_internal_evidence_templates_use_everyday_wording(self) -> None:
+        cases = (
+            (
+                "命中核心玩法特征：类魂",
+                "符合你最看重的玩法：类魂",
+            ),
+            (
+                "命中辅助玩法特征：建造",
+                "也符合你提到的玩法：建造",
+            ),
+            (
+                "命中游戏库辅助偏好：合作",
+                "与游戏库中常玩的玩法相近：合作",
+            ),
+            (
+                "已从解析成功的参考游戏提取核心与辅助标签",
+                "与参考游戏的部分玩法相近",
+            ),
+            (
+                "与负向参考的玩法标签相似度为 37%",
+                "与不喜欢的参考游戏有部分相似玩法",
+            ),
+            (
+                "Steam 好评率 90%，共 1000 条评测；Wilson 置信下界 88%",
+                "Steam 好评率 90%，共 1000 条评测",
+            ),
+            (
+                "Steam 评测缺失或为零，口碑置信度不足",
+                "Steam 评测太少，暂时无法判断玩家评价",
+            ),
+            (
+                "按高知名度/大作倾向提高成熟口碑在层内的权重",
+                "根据你的要求，本次更看重游戏的知名度和玩家评价",
+            ),
+            (
+                "评测规模对应的知名度指标为 75%",
+                "在 Steam 上有一定关注度",
+            ),
+            (
+                "使用 60/100 未发售质量先验，仅用于排序，不代表玩家实评或实际知名度",
+                "游戏尚未发售，暂无足够玩家评价，推荐分仅供参考",
+            ),
+            (
+                "宽松匹配：部分核心特征缺失或证据不足",
+                "你最看重的部分玩法暂时无法确认",
+            ),
+            (
+                "用户原文特性“可以自由建造”因核验服务异常尚未确认满足",
+                "检查“可以自由建造”时暂时出错，尚未确认是否符合要求",
+            ),
+            (
+                "用户原文特性“可以自由建造”因响应契约异常尚未确认满足",
+                "检查“可以自由建造”时暂时出错，尚未确认是否符合要求",
+            ),
+            (
+                "用户原文特性“可以自由建造”缺少可核验证据",
+                "Steam 商店介绍没有足够信息确认“可以自由建造”",
+            ),
+            (
+                "用户原文可选特性“支持多人合作”与 Steam 描述不符",
+                "Steam 商店介绍显示这款游戏不符合“支持多人合作”",
+            ),
+            (
+                "公司偏好“ConcernedApe”已由 Steam 开发商/发行商字段精确匹配",
+                "Steam 显示该游戏与“ConcernedApe”有关",
+            ),
+            (
+                "公司偏好“ConcernedApe”缺少可核验的 Steam 公司字段",
+                "Steam 暂未提供足够信息确认是否与“ConcernedApe”有关",
+            ),
+            (
+                "公司偏好“ConcernedApe”未在 Steam 开发商/发行商字段中匹配",
+                "Steam 公布的信息中没有找到“ConcernedApe”",
+            ),
+        )
+
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                self.assertEqual(user_facing_evidence_text(raw), expected)
+
+    def test_semantic_match_keeps_user_requirement_and_steam_quote(self) -> None:
+        raw = (
+            "用户原文特性“想要 co_op”已由 Steam 描述核验："
+            "商店原文包含 story_rich"
+        )
+
+        converted = user_facing_evidence_text(raw)
+
+        self.assertEqual(
+            converted,
+            "Steam 商店介绍显示这款游戏符合“想要 co_op”："
+            "商店原文包含 story_rich",
+        )
+
+    def test_unknown_free_text_is_not_rewritten_as_an_internal_template(self) -> None:
+        text = "玩家原文提到了 Wilson、先验和响应契约这些作品名"
+
+        self.assertEqual(user_facing_evidence_text(text), text)
+
+    def test_fallback_recommendation_and_caution_use_everyday_wording(self) -> None:
+        values = [
+            evidence(
+                "core_match",
+                "core",
+                "positive",
+                "命中核心玩法特征：类魂",
+            ),
+            evidence(
+                "semantic_feature:1:technical_failure",
+                "constraint",
+                "uncertain",
+                "用户原文特性“可以自由建造”因响应契约异常尚未确认满足",
+                important=True,
+            ),
+        ]
+
+        recommendation = fallback_reason(values)
+        caution = fallback_caution_reason(values)
+
+        self.assertIn("符合你最看重的玩法：类魂", recommendation)
+        self.assertEqual(
+            caution,
+            "检查“可以自由建造”时暂时出错，尚未确认是否符合要求。",
+        )
+        for text in (recommendation, caution or ""):
+            self.assertNotRegex(
+                text,
+                r"Wilson|置信下界|先验|层内权重|响应契约|核验|可核验证据",
+            )
 
     def test_mainstream_prompt_forbids_claiming_aaa_budget(self) -> None:
         mainstream = evidence(
@@ -412,7 +580,12 @@ class UnplayedReasonTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("类型", reason)
         self.assertIn("好评率", reason)
-        self.assertIn("知名度", reason)
+        self.assertIn("共 20000 条评测", reason)
+        self.assertIn("关注度", reason)
+        self.assertNotRegex(
+            reason,
+            r"Wilson|置信下界|先验|层内权重|相似度|指标|响应契约|核验|可核验证据",
+        )
 
 
 def ranked_game(appid: int) -> RankedGame:
