@@ -9,13 +9,12 @@ from typing import Any
 from unittest.mock import patch
 
 import httpx
-
 from astrbot_plugin_steam_game_recommender.clients.steam import (
     SteamApiError,
     SteamClient,
     optional_int,
-    parse_storefront_tag_ids,
     parse_steam_game,
+    parse_storefront_tag_ids,
 )
 from astrbot_plugin_steam_game_recommender.storage import repository as repository_module
 from astrbot_plugin_steam_game_recommender.storage.models import (
@@ -310,10 +309,22 @@ class SteamClientTest(unittest.IsolatedAsyncioTestCase):
             )
 
             first = await client.get_game_detail(123)
-            age_sqlite_cache_rows(cache, ":fresh", 60 * 60 - 1, now=now)
+            age_sqlite_cache_rows(
+                cache,
+                "appdetails:v1",
+                60 * 60 - 1,
+                now=now,
+                retention_seconds=6 * 60 * 60,
+            )
             still_fresh = await client.get_game_detail(123)
             http_client.payload = released
-            age_sqlite_cache_rows(cache, ":fresh", 60 * 60 + 1, now=now)
+            age_sqlite_cache_rows(
+                cache,
+                "appdetails:v1",
+                60 * 60 + 1,
+                now=now,
+                retention_seconds=6 * 60 * 60,
+            )
             refreshed = await client.get_game_detail(123)
 
         self.assertTrue(first.coming_soon)
@@ -346,18 +357,29 @@ class SteamClientTest(unittest.IsolatedAsyncioTestCase):
 
             await client.get_game_detail(123)
             http_client.failure = httpx.ConnectError("offline")
-            age_sqlite_cache_rows(cache, ":fresh", 60 * 60 + 1, now=now)
-            age_sqlite_cache_rows(cache, ":stale", 60 * 60 + 1, now=now)
+            age_sqlite_cache_rows(
+                cache,
+                "appdetails:v1",
+                60 * 60 + 1,
+                now=now,
+                retention_seconds=6 * 60 * 60,
+            )
             stale = await client.get_game_detail(123)
 
             self.assertTrue(stale.coming_soon)
             self.assertEqual(http_client.call_count, 3)
 
-            age_sqlite_cache_rows(cache, ":stale", 6 * 60 * 60 + 1, now=now)
+            age_sqlite_cache_rows(
+                cache,
+                "appdetails:v1",
+                6 * 60 * 60 + 1,
+                now=now,
+                retention_seconds=6 * 60 * 60,
+            )
             with self.assertRaises(SteamApiError):
                 await client.get_game_detail(123)
             self.assertEqual(http_client.call_count, 5)
-            self.assertEqual(sqlite_cache_row_count(cache, ":stale"), 0)
+            self.assertEqual(sqlite_cache_row_count(cache, "appdetails:v1"), 0)
 
     async def test_search_games_skips_non_games_and_failed_details(self) -> None:
         http_client = FakeHttpClient(
@@ -493,6 +515,45 @@ class SteamClientTest(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(SteamApiError):
                     await client.get_review_summary(123)
 
+    async def test_review_summary_retries_temporary_contract_failure_once(self) -> None:
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            payload = (
+                {"success": 1, "query_summary": {"total_reviews": "invalid"}}
+                if calls == 1
+                else {
+                    "success": 1,
+                    "query_summary": {
+                        "total_reviews": 100,
+                        "total_positive": 80,
+                    },
+                }
+            )
+            return httpx.Response(200, json=payload, request=request)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            summary = await SteamClient(http, MemoryCache()).get_review_summary(123)
+
+        self.assertEqual(summary.positive_ratio, 0.8)
+        self.assertEqual(calls, 2)
+
+    async def test_review_summary_explicit_failure_is_permanent(self) -> None:
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(200, json={"success": 0}, request=request)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            with self.assertRaises(SteamApiError):
+                await SteamClient(http, MemoryCache()).get_review_summary(123)
+
+        self.assertEqual(calls, 1)
+
     async def test_owned_games_use_web_api_key_and_cache_playtime(self) -> None:
         cache = MemoryCache()
         http_client = FakeHttpClient(
@@ -520,7 +581,9 @@ class SteamClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([game.appid for game in games], [123, 456])
         self.assertEqual(games[0].name, "Played Game")
         self.assertEqual(games[0].playtime_forever, 90)
-        self.assertEqual(http_client.last_params["key"], "STEAM_KEY")
+        self.assertNotIn("key", http_client.last_params)
+        self.assertEqual(http_client.last_headers["x-webapi-key"], "STEAM_KEY")
+        self.assertIs(http_client.last_follow_redirects, False)
         self.assertEqual(http_client.last_params["steamid"], "76561198000000000")
         self.assertEqual(http_client.last_params["include_appinfo"], 1)
         self.assertEqual(http_client.last_params["include_played_free_games"], 1)
@@ -528,6 +591,396 @@ class SteamClientTest(unittest.IsolatedAsyncioTestCase):
         await client.get_owned_games("76561198000000000")
 
         self.assertEqual(http_client.call_count, 1)
+
+    async def test_owned_games_cache_varies_by_api_key_fingerprint(self) -> None:
+        cache = MemoryCache()
+        response = {
+            "https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/": {
+                "response": {"games": []}
+            }
+        }
+        first_http = FakeHttpClient(response)
+        second_http = FakeHttpClient(response)
+
+        await SteamClient(
+            first_http,
+            cache,
+            steam_api_key="FIRST_PRIVATE_KEY",
+        ).get_owned_games("76561198000000000")
+        await SteamClient(
+            second_http,
+            cache,
+            steam_api_key="SECOND_PRIVATE_KEY",
+        ).get_owned_games("76561198000000000")
+
+        self.assertEqual(first_http.call_count, 1)
+        self.assertEqual(second_http.call_count, 1)
+        self.assertEqual(len(cache.payloads), 2)
+        self.assertTrue(
+            all(
+                secret not in key
+                for key in cache.payloads
+                for secret in ("FIRST_PRIVATE_KEY", "SECOND_PRIVATE_KEY")
+            )
+        )
+
+    async def test_owned_games_rejects_redirect_without_disclosing_key(self) -> None:
+        secret = "VERY_PRIVATE_STEAM_KEY"
+        requests: list[httpx.Request] = []
+
+        def redirect_handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                302,
+                headers={"Location": "https://attacker.invalid/collect"},
+                request=request,
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(redirect_handler)
+        ) as http_client:
+            client = SteamClient(
+                http_client,
+                MemoryCache(),
+                steam_api_key=secret,
+            )
+            with self.assertRaises(SteamApiError) as raised:
+                await client.get_owned_games("76561198000000000")
+
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0].url.host, "api.steampowered.com")
+        self.assertNotIn(secret, str(requests[0].url))
+        self.assertNotIn(secret, str(raised.exception))
+
+    async def test_owned_games_http_error_never_contains_key_or_keyed_url(self) -> None:
+        secret = "VERY_PRIVATE_STEAM_KEY"
+        requests: list[httpx.Request] = []
+
+        def forbidden_handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(403, request=request)
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(forbidden_handler)
+        ) as http_client:
+            client = SteamClient(
+                http_client,
+                MemoryCache(),
+                steam_api_key=secret,
+            )
+            with self.assertRaises(SteamApiError) as raised:
+                await client.get_owned_games("76561198000000000")
+
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0].headers["x-webapi-key"], secret)
+        self.assertNotIn(secret, str(requests[0].url))
+        self.assertNotIn(secret, str(raised.exception))
+
+    async def test_owned_games_retries_invalid_json_once(self) -> None:
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return httpx.Response(200, text="not-json", request=request)
+            return httpx.Response(
+                200,
+                json={
+                    "response": {
+                        "games": [
+                            {
+                                "appid": 123,
+                                "name": "Recovered Game",
+                                "playtime_forever": 0,
+                            }
+                        ]
+                    }
+                },
+                request=request,
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            games = await SteamClient(
+                http,
+                MemoryCache(),
+                steam_api_key="PRIVATE_KEY",
+            ).get_owned_games("76561198000000000")
+
+        self.assertEqual([game.appid for game in games], [123])
+        self.assertEqual(calls, 2)
+
+    async def test_owned_games_retries_temporary_contract_failure_once(self) -> None:
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            payload = (
+                {"response": {"games": "temporarily-invalid"}}
+                if calls == 1
+                else {
+                    "response": {
+                        "games": [
+                            {
+                                "appid": 123,
+                                "name": "Recovered Game",
+                                "playtime_forever": 0,
+                            }
+                        ]
+                    }
+                }
+            )
+            return httpx.Response(200, json=payload, request=request)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            games = await SteamClient(
+                http,
+                MemoryCache(),
+                steam_api_key="PRIVATE_KEY",
+            ).get_owned_games("76561198000000000")
+
+        self.assertEqual([game.appid for game in games], [123])
+        self.assertEqual(calls, 2)
+
+    async def test_owned_games_uses_stale_after_two_transient_failures(self) -> None:
+        now = [1.0]
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return httpx.Response(
+                    200,
+                    json={
+                        "response": {
+                            "games": [
+                                {
+                                    "appid": 123,
+                                    "name": "Cached Game",
+                                    "playtime_forever": 0,
+                                }
+                            ]
+                        }
+                    },
+                    request=request,
+                )
+            return httpx.Response(503, request=request)
+
+        cache = TimedMemoryCache(lambda: now[0])
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            client = SteamClient(
+                http,
+                cache,
+                cache_ttl_hours=24,
+                steam_api_key="PRIVATE_KEY",
+            )
+            await client.get_owned_games("76561198000000000")
+            now[0] += 24 * 60 * 60 + 1
+            games = await client.get_owned_games("76561198000000000")
+
+        self.assertEqual([game.appid for game in games], [123])
+        self.assertEqual(calls, 3)
+
+    async def test_owned_games_permanent_error_never_uses_stale(self) -> None:
+        now = [1.0]
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return httpx.Response(
+                    200,
+                    json={"response": {"games": []}},
+                    request=request,
+                )
+            return httpx.Response(403, request=request)
+
+        cache = TimedMemoryCache(lambda: now[0])
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            client = SteamClient(
+                http,
+                cache,
+                cache_ttl_hours=24,
+                steam_api_key="PRIVATE_KEY",
+            )
+            await client.get_owned_games("76561198000000000")
+            now[0] += 24 * 60 * 60 + 1
+            with self.assertRaises(SteamApiError) as raised:
+                await client.get_owned_games("76561198000000000")
+
+        self.assertEqual(raised.exception.status_code, 403)
+        self.assertEqual(calls, 2)
+
+    async def test_appdetails_retries_invalid_json_once(self) -> None:
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return httpx.Response(200, text="not-json", request=request)
+            return httpx.Response(
+                200,
+                json={"123": {"success": True, "data": steam_detail_payload()}},
+                request=request,
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            game = await SteamClient(http, MemoryCache()).get_game_detail(123)
+
+        self.assertEqual(game.appid, 123)
+        self.assertEqual(calls, 2)
+
+    async def test_appdetails_retries_transient_contract_failure_once(self) -> None:
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            payload = (
+                {}
+                if calls == 1
+                else {"123": {"success": True, "data": steam_detail_payload()}}
+            )
+            return httpx.Response(200, json=payload, request=request)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            game = await SteamClient(http, MemoryCache()).get_game_detail(123)
+
+        self.assertEqual(game.appid, 123)
+        self.assertEqual(calls, 2)
+
+    async def test_appdetails_uses_one_stale_payload_after_invalid_json_retries(
+        self,
+    ) -> None:
+        now = [1.0]
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return httpx.Response(
+                    200,
+                    json={"123": {"success": True, "data": steam_detail_payload()}},
+                    request=request,
+                )
+            return httpx.Response(200, text="not-json", request=request)
+
+        cache = TimedMemoryCache(lambda: now[0])
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            client = SteamClient(http, cache, clock=lambda: now[0])
+            first = await client.get_game_detail(123)
+            now[0] += 60 * 60 + 1
+            stale = await client.get_game_detail(123)
+
+        self.assertEqual(first.title, stale.title)
+        self.assertEqual(calls, 3)
+        self.assertEqual(len(cache.payloads), 1)
+
+    async def test_appdetails_success_false_is_permanent_and_does_not_use_stale(
+        self,
+    ) -> None:
+        now = [1.0]
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            payload = (
+                {"123": {"success": True, "data": steam_detail_payload()}}
+                if calls == 1
+                else {"123": {"success": False}}
+            )
+            return httpx.Response(200, json=payload, request=request)
+
+        cache = TimedMemoryCache(lambda: now[0])
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            client = SteamClient(http, cache, clock=lambda: now[0])
+            await client.get_game_detail(123)
+            now[0] += 60 * 60 + 1
+            with self.assertRaises(SteamApiError):
+                await client.get_game_detail(123)
+
+        self.assertEqual(calls, 2)
+
+    async def test_appdetails_404_is_permanent_and_does_not_use_stale(self) -> None:
+        now = [1.0]
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return httpx.Response(
+                    200,
+                    json={"123": {"success": True, "data": steam_detail_payload()}},
+                    request=request,
+                )
+            return httpx.Response(404, request=request)
+
+        cache = TimedMemoryCache(lambda: now[0])
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            client = SteamClient(http, cache, clock=lambda: now[0])
+            await client.get_game_detail(123)
+            now[0] += 60 * 60 + 1
+            with self.assertRaises(SteamApiError) as raised:
+                await client.get_game_detail(123)
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(raised.exception.code, "steam_request_rejected")
+
+    async def test_more_like_retries_temporary_contract_failure_once(self) -> None:
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            content = (
+                "<html><body>temporary response</body></html>"
+                if calls == 1
+                else '<section id="released"></section>'
+            )
+            return httpx.Response(200, text=content, request=request)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            result = await SteamClient(http, MemoryCache()).get_more_like(123)
+
+        self.assertEqual(result.hits, ())
+        self.assertEqual(calls, 2)
+
+    async def test_more_like_permanent_error_never_uses_stale(self) -> None:
+        cache = MemoryCache()
+
+        def success_handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                text='<section id="released"></section>',
+                request=request,
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(success_handler)
+        ) as http:
+            await SteamClient(http, cache).get_more_like(123)
+
+        calls = 0
+
+        def missing_handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(404, request=request)
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(missing_handler)
+        ) as http:
+            with self.assertRaises(SteamApiError):
+                await SteamClient(http, cache).get_more_like(123, reuse_cache=False)
+
+        self.assertEqual(calls, 1)
 
     async def test_owned_games_skip_invalid_appids_and_playtime(self) -> None:
         invalid_values = [True, 1.5, float("nan"), float("inf"), -1, "1.0"]
@@ -631,6 +1084,28 @@ class SteamClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cached, tags)
         self.assertEqual(http_client.call_count, 1)
 
+    async def test_store_page_tags_retries_temporary_page_contract_failure(self) -> None:
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            text = (
+                "<html><body>temporary response</body></html>"
+                if calls == 1
+                else (
+                    "<html><body>Popular user-defined tags for this product:"
+                    '<a class="app_tag">Puzzle</a></body></html>'
+                )
+            )
+            return httpx.Response(200, text=text, request=request)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            tags = await SteamClient(http, MemoryCache()).get_store_page_tags(123)
+
+        self.assertEqual(tags, ["Puzzle"])
+        self.assertEqual(calls, 2)
+
     async def test_owned_games_requires_steam_web_api_key(self) -> None:
         client = SteamClient(FakeHttpClient({}), MemoryCache(), cache_ttl_hours=24)
 
@@ -669,15 +1144,19 @@ class FakeHttpClient:
         self.responses = responses
         self.call_count = 0
         self.last_params: dict[str, Any] = {}
+        self.last_headers: dict[str, Any] = {}
+        self.last_follow_redirects: bool | None = None
 
     async def get(
         self,
         url: str,
         params: dict[str, Any],
-        **_kwargs: Any,
+        **kwargs: Any,
     ) -> FakeResponse:
         self.call_count += 1
         self.last_params = dict(params)
+        self.last_headers = dict(kwargs.get("headers") or {})
+        self.last_follow_redirects = kwargs.get("follow_redirects")
         return FakeResponse(self.responses[url])
 
 
@@ -718,13 +1197,24 @@ def age_sqlite_cache_rows(
     seconds: float,
     *,
     now: float | None = None,
+    retention_seconds: float | None = None,
 ) -> None:
     created_at = (time.time() if now is None else now) - seconds
     with sqlite3.connect(repository.db_path) as connection:
-        cursor = connection.execute(
-            "UPDATE cache SET created_at = ? WHERE key LIKE ?",
-            (created_at, f"%{suffix}"),
-        )
+        if retention_seconds is None:
+            cursor = connection.execute(
+                "UPDATE cache SET created_at = ? WHERE key LIKE ?",
+                (created_at, f"%{suffix}"),
+            )
+        else:
+            cursor = connection.execute(
+                """
+                UPDATE cache
+                SET created_at = ?, expires_at = ?
+                WHERE key LIKE ?
+                """,
+                (created_at, created_at + retention_seconds, f"%{suffix}"),
+            )
     if cursor.rowcount <= 0:
         raise AssertionError(f"no SQLite cache row matched suffix {suffix}")
 

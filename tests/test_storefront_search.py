@@ -5,7 +5,6 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import httpx
-
 from astrbot_plugin_steam_game_recommender.clients.steam import (
     STEAM_POPULAR_TAGS_URL,
     SteamApiError,
@@ -19,7 +18,6 @@ from astrbot_plugin_steam_game_recommender.storage.models import (
     GameCandidate,
     SteamSearchHit,
 )
-
 
 RESULTS_HTML = """
 <a class="search_result_row ds_collapse_flag" data-ds-appid="10">
@@ -54,7 +52,7 @@ def storefront_payload() -> dict[str, Any]:
 
 
 class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
-    async def test_storesearch_reuse_false_skips_fresh_and_overwrites_both_snapshots(
+    async def test_storesearch_reuse_false_overwrites_the_single_snapshot(
         self,
     ) -> None:
         cache = MemoryCache()
@@ -72,15 +70,8 @@ class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([hit.appid for hit in first], [10])
         self.assertEqual([hit.appid for hit in second], [11])
         self.assertEqual(http_client.call_count, 2)
-        snapshots = {
-            key: payload
-            for key, payload in cache.payloads.items()
-            if key.endswith((":fresh", ":stale"))
-        }
-        self.assertEqual(len(snapshots), 2)
-        self.assertTrue(
-            all(snapshot["items"][0]["id"] == 11 for snapshot in snapshots.values())
-        )
+        self.assertEqual(len(cache.payloads), 1)
+        self.assertEqual(next(iter(cache.payloads.values()))["items"][0]["id"], 11)
 
     async def test_storesearch_default_policy_reuses_fresh_snapshot(self) -> None:
         cache = MemoryCache()
@@ -113,13 +104,51 @@ class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(hits, [])
         self.assertEqual(http_client.call_count, 2)
-        self.assertTrue(
-            all(
-                payload == {"items": []}
-                for key, payload in cache.payloads.items()
-                if key.endswith((":fresh", ":stale"))
+        self.assertEqual(len(cache.payloads), 1)
+        self.assertEqual(next(iter(cache.payloads.values())), {"items": []})
+
+    async def test_storesearch_retries_invalid_json_once(self) -> None:
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return httpx.Response(200, text="not-json", request=request)
+            return httpx.Response(
+                200,
+                json={"items": [{"type": "app", "id": 10, "name": "Portal"}]},
+                request=request,
             )
-        )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            hits = await SteamClient(http, MemoryCache()).search_game_refs(
+                search="portal"
+            )
+
+        self.assertEqual([hit.appid for hit in hits], [10])
+        self.assertEqual(calls, 2)
+
+    async def test_storesearch_retries_temporary_contract_failure_once(self) -> None:
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            payload = (
+                {"unexpected": []}
+                if calls == 1
+                else {"items": [{"type": "app", "id": 10, "name": "Portal"}]}
+            )
+            return httpx.Response(200, json=payload, request=request)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            hits = await SteamClient(http, MemoryCache()).search_game_refs(
+                search="portal"
+            )
+
+        self.assertEqual([hit.appid for hit in hits], [10])
+        self.assertEqual(calls, 2)
 
     async def test_storesearch_reuse_false_falls_back_to_seven_day_stale(self) -> None:
         cache = MemoryCache()
@@ -166,6 +195,30 @@ class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(cache.requested_ttls[-1], 168)
 
+    async def test_storesearch_permanent_http_error_never_uses_stale(self) -> None:
+        cache = MemoryCache()
+        await SteamClient(
+            FakeHttpClient(
+                {"items": [{"type": "app", "id": 10, "name": "Cached Result"}]}
+            ),
+            cache,
+        ).search_game_refs(search="portal")
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(404, request=request)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            with self.assertRaises(SteamApiError):
+                await SteamClient(http, cache).search_game_refs(
+                    search="portal",
+                    reuse_cache=False,
+                )
+
+        self.assertEqual(calls, 1)
+
     async def test_search_games_only_forwards_reuse_policy_to_search_refs(self) -> None:
         client = SteamClient(FakeHttpClient({"items": []}), MemoryCache())
         candidate = GameCandidate(appid=10, title="Portal", app_type="game")
@@ -186,8 +239,8 @@ class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
         cache = MemoryCache()
         http_client = FakeHttpClient([{"tagid": 999, "name": "unexpected"}])
         client = SteamClient(http_client, cache, clock=lambda: now)
-        fresh_key = f"{client._cache_key(STEAM_POPULAR_TAGS_URL, {})}:v2:fresh"
-        cache.payloads[fresh_key] = {
+        cache_key = f"{client._cache_key(STEAM_POPULAR_TAGS_URL, {})}:v2"
+        cache.payloads[cache_key] = {
             "fetched_at": now,
             "tags": [{"tagid": 29482, "name": "Souls-like"}],
         }
@@ -198,7 +251,7 @@ class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(http_client.call_count, 0)
         self.assertEqual(cache.requested_ttls, [24])
 
-    async def test_popular_tags_network_success_writes_fresh_and_stale_cache(self) -> None:
+    async def test_popular_tags_network_success_writes_one_snapshot(self) -> None:
         now = 1_234.0
         payload = [{"tagid": 29482, "name": "Souls-like", "count": 123}]
         cache = MemoryCache()
@@ -212,8 +265,7 @@ class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
         expected_snapshot = {"fetched_at": now, "tags": expected}
         self.assertEqual(tags, expected)
         self.assertEqual(http_client.call_count, 1)
-        self.assertEqual(cache.payloads[f"{base_key}:fresh"], expected_snapshot)
-        self.assertEqual(cache.payloads[f"{base_key}:stale"], expected_snapshot)
+        self.assertEqual(cache.payloads, {base_key: expected_snapshot})
 
     async def test_popular_tag_optional_counts_are_preserved_by_the_contract(self) -> None:
         payload = [
@@ -244,8 +296,8 @@ class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
         now = 1_000_000.0
         cache = MemoryCache()
         client = SteamClient(FailingHttpClient(), cache, clock=lambda: now)
-        stale_key = f"{client._cache_key(STEAM_POPULAR_TAGS_URL, {})}:v2:stale"
-        cache.payloads[stale_key] = {
+        cache_key = f"{client._cache_key(STEAM_POPULAR_TAGS_URL, {})}:v2"
+        cache.payloads[cache_key] = {
             "fetched_at": now - 6 * 24 * 60 * 60,
             "tags": [{"tagid": 29482, "name": "Souls-like"}],
         }
@@ -260,8 +312,8 @@ class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
         cache = MemoryCache()
         http_client = FakeHttpClient([{"tagid": 0, "name": "invalid"}])
         client = SteamClient(http_client, cache, clock=lambda: now)
-        stale_key = f"{client._cache_key(STEAM_POPULAR_TAGS_URL, {})}:v2:stale"
-        cache.payloads[stale_key] = {
+        cache_key = f"{client._cache_key(STEAM_POPULAR_TAGS_URL, {})}:v2"
+        cache.payloads[cache_key] = {
             "fetched_at": now - 6 * 24 * 60 * 60,
             "tags": [{"tagid": 29482, "name": "Souls-like"}],
         }
@@ -269,15 +321,60 @@ class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
         tags = await client.get_popular_tags()
 
         self.assertEqual(tags, [{"tagid": 29482, "name": "Souls-like"}])
-        self.assertEqual(http_client.call_count, 1)
+        self.assertEqual(http_client.call_count, 2)
         self.assertIn(168, cache.requested_ttls)
+
+    async def test_popular_tags_retries_temporary_contract_failure_once(self) -> None:
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            payload = (
+                [{"tagid": 0, "name": "invalid"}]
+                if calls == 1
+                else [{"tagid": 29482, "name": "Souls-like"}]
+            )
+            return httpx.Response(200, json=payload, request=request)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            tags = await SteamClient(http, MemoryCache()).get_popular_tags()
+
+        self.assertEqual(tags, [{"tagid": 29482, "name": "Souls-like"}])
+        self.assertEqual(calls, 2)
+
+    async def test_popular_tags_permanent_http_error_never_uses_stale(self) -> None:
+        now = 1_000_000.0
+        cache = MemoryCache()
+        seeded = SteamClient(
+            FakeHttpClient([{"tagid": 29482, "name": "Souls-like"}]),
+            cache,
+            clock=lambda: now,
+        )
+        await seeded.get_popular_tags()
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(403, request=request)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            with self.assertRaises(SteamApiError):
+                await SteamClient(
+                    http,
+                    cache,
+                    clock=lambda: now + 24 * 60 * 60 + 1,
+                ).get_popular_tags()
+
+        self.assertEqual(calls, 1)
 
     async def test_popular_tags_invalid_stale_cache_raises(self) -> None:
         now = 1_000_000.0
         cache = MemoryCache()
         client = SteamClient(FailingHttpClient(), cache, clock=lambda: now)
-        stale_key = f"{client._cache_key(STEAM_POPULAR_TAGS_URL, {})}:v2:stale"
-        cache.payloads[stale_key] = {
+        cache_key = f"{client._cache_key(STEAM_POPULAR_TAGS_URL, {})}:v2"
+        cache.payloads[cache_key] = {
             "fetched_at": now,
             "tags": [{"tagid": True, "name": "invalid"}],
         }
@@ -294,10 +391,6 @@ class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
             clock=lambda: now[0],
         )
         original = await first.get_popular_tags_snapshot()
-        fresh_key = next(
-            key for key in cache.payloads if key.endswith(":v2:fresh")
-        )
-        cache.payloads.pop(fresh_key)
 
         now[0] += 6 * 24 * 60 * 60
         offline = SteamClient(FailingHttpClient(), cache, clock=lambda: now[0])
@@ -376,13 +469,8 @@ class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page.hits, ())
         self.assertFalse(page.stale)
         self.assertEqual(http_client.call_count, 2)
-        self.assertTrue(
-            all(
-                payload["results_html"] == ""
-                for key, payload in cache.payloads.items()
-                if key.endswith((":fresh", ":stale"))
-            )
-        )
+        self.assertEqual(len(cache.payloads), 1)
+        self.assertEqual(next(iter(cache.payloads.values()))["results_html"], "")
 
     async def test_top_sellers_use_browse_filter_without_tag_or_sort(self) -> None:
         http_client = FakeHttpClient(storefront_payload())
@@ -396,7 +484,9 @@ class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("tags", http_client.last_params)
         self.assertNotIn("sort_by", http_client.last_params)
 
-    async def test_company_search_uses_exact_role_filter_and_caps_each_alias_at_twenty(self) -> None:
+    async def test_company_search_uses_exact_role_filter_and_caps_each_alias_at_twenty(
+        self,
+    ) -> None:
         for role in ("developer", "publisher"):
             with self.subTest(role=role):
                 http_client = FakeHttpClient(storefront_payload())
@@ -430,6 +520,37 @@ class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SteamApiError):
             await client.search_storefront_tag(29482)
 
+    async def test_storefront_retries_invalid_json_once(self) -> None:
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return httpx.Response(200, text="not-json", request=request)
+            return httpx.Response(200, json=storefront_payload(), request=request)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            page = await SteamClient(http, MemoryCache()).search_storefront_tag(29482)
+
+        self.assertEqual([hit.appid for hit in page.hits], [10, 11])
+        self.assertEqual(calls, 2)
+
+    async def test_storefront_retries_temporary_contract_failure_once(self) -> None:
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            payload = {"success": 1} if calls == 1 else storefront_payload()
+            return httpx.Response(200, json=payload, request=request)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            page = await SteamClient(http, MemoryCache()).search_storefront_tag(29482)
+
+        self.assertEqual([hit.appid for hit in page.hits], [10, 11])
+        self.assertEqual(calls, 2)
+
     async def test_contract_rejects_boolean_fractional_and_non_finite_integers(self) -> None:
         invalid_values = (True, 1.5, float("inf"), "1.5")
         for value in invalid_values:
@@ -441,12 +562,12 @@ class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(SteamApiError):
                     await client.search_storefront_tag(29482)
 
-    async def test_live_failure_uses_separate_seven_day_stale_cache(self) -> None:
-        cache = MemoryCache()
+    async def test_live_failure_uses_single_seven_day_snapshot_as_stale(self) -> None:
+        now = [1_000.0]
+        cache = ExpiringMemoryCache(lambda: now[0])
         first = SteamClient(FakeHttpClient(storefront_payload()), cache)
         expected = await first.search_storefront_tag(29482)
-        fresh_key = next(key for key in cache.payloads if key.endswith(":fresh"))
-        cache.payloads.pop(fresh_key)
+        now[0] += 24 * 60 * 60 + 1
         failing = SteamClient(FailingHttpClient(), cache)
 
         actual = await failing.search_storefront_tag(29482)
@@ -467,6 +588,27 @@ class StorefrontSearchTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(actual.hits, expected.hits)
         self.assertTrue(actual.stale)
         self.assertEqual(cache.requested_ttls[-1], 168)
+
+    async def test_storefront_permanent_http_error_never_uses_stale(self) -> None:
+        cache = MemoryCache()
+        await SteamClient(FakeHttpClient(storefront_payload()), cache).search_storefront_tag(
+            29482
+        )
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(404, request=request)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            with self.assertRaises(SteamApiError):
+                await SteamClient(http, cache).search_storefront_tag(
+                    29482,
+                    reuse_cache=False,
+                )
+
+        self.assertEqual(calls, 1)
 
     async def test_live_failure_without_stale_cache_raises(self) -> None:
         cache = MemoryCache()

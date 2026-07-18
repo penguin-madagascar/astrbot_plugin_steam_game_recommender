@@ -16,8 +16,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from ..storage.cache_access import set_json_with_ttl
 from ..storage.models import GameCandidate, SteamOwnedGame, SteamSearchHit
-from ..storage.repository import SQLiteCacheRepository
 
 STEAM_STORE_SEARCH_URL = "https://store.steampowered.com/api/storesearch/"
 STEAM_APP_DETAILS_URL = "https://store.steampowered.com/api/appdetails"
@@ -86,7 +86,16 @@ STEAM_TAG_TERMS = {
 
 
 class SteamApiError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "steam_api_failure",
+        status_code: int | None = None,
+    ) -> None:
+        self.code = code
+        self.status_code = status_code
+        super().__init__(message)
 
 
 class SteamTransientError(SteamApiError):
@@ -132,7 +141,7 @@ class SteamClient:
     def __init__(
         self,
         client: httpx.AsyncClient,
-        cache: SQLiteCacheRepository,
+        cache: Any,
         cache_ttl_hours: int = 24,
         default_country: str = "CN",
         language: str = "schinese",
@@ -383,6 +392,10 @@ class SteamClient:
                 "purchase_type": "all",
                 "num_per_page": 0,
             },
+            validator=lambda payload: validate_review_summary_payload(
+                resolved_appid,
+                payload,
+            ),
         )
         summary = data.get("query_summary") if isinstance(data, dict) else None
         if not isinstance(summary, dict):
@@ -422,9 +435,7 @@ class SteamClient:
         resolved_language = str(language or "english").strip() or "english"
         url = popular_tags_url(resolved_language)
         cache_key = f"{self._cache_key(url, {})}:v2"
-        fresh_key = f"{cache_key}:fresh"
-        stale_key = f"{cache_key}:stale"
-        fresh = await self.cache.get_json(fresh_key, STOREFRONT_FRESH_TTL_HOURS)
+        fresh = await self.cache.get_json(cache_key, STOREFRONT_FRESH_TTL_HOURS)
         if fresh is not None:
             try:
                 snapshot = parse_popular_tag_snapshot(fresh)
@@ -435,23 +446,29 @@ class SteamClient:
 
         error: SteamApiError
         try:
-            response = await self._request_get(url, {})
-            tags = parse_popular_tags(response.json())
-        except ValueError:
-            error = SteamApiError("Steam 热门标签返回了无法解析的 JSON。")
-        except SteamApiError as exc:
+            _, tags = await self._request_json_contract(
+                url,
+                {},
+                parse_popular_tags,
+            )
+        except SteamTransientError as exc:
             error = exc
+        except SteamApiError:
+            raise
         else:
             snapshot = SteamTagVocabularySnapshot(
                 tags=tuple(tags),
                 fetched_at=float(self.clock()),
             )
             payload = popular_tag_snapshot_payload(snapshot)
-            await self.cache.set_json(fresh_key, payload)
-            await self.cache.set_json(stale_key, payload)
+            await self._set_cache_json(
+                cache_key,
+                payload,
+                ttl_hours=STOREFRONT_STALE_TTL_HOURS,
+            )
             return snapshot
 
-        stale = await self.cache.get_json(stale_key, STOREFRONT_STALE_TTL_HOURS)
+        stale = await self.cache.get_json(cache_key, STOREFRONT_STALE_TTL_HOURS)
         if stale is not None:
             try:
                 snapshot = parse_popular_tag_snapshot(stale)
@@ -476,10 +493,8 @@ class SteamClient:
             raise ValueError("Steam AppID must be positive.")
         url = STEAM_MORE_LIKE_URL.format(appid=resolved_appid)
         cache_key = f"{self._cache_key(url, {'l': 'english'})}:v1"
-        fresh_key = f"{cache_key}:fresh"
-        stale_key = f"{cache_key}:stale"
         if reuse_cache:
-            fresh = await self.cache.get_json(fresh_key, STOREFRONT_FRESH_TTL_HOURS)
+            fresh = await self.cache.get_json(cache_key, STOREFRONT_FRESH_TTL_HOURS)
             if fresh is not None:
                 try:
                     sections, fetched_at = parse_more_like_snapshot(fresh)
@@ -494,31 +509,33 @@ class SteamClient:
 
         error: SteamApiError
         try:
-            response = await self._request_get(
+            html_text, sections = await self._request_text_contract(
                 url,
                 {"l": "english"},
+                parse_more_like_html,
                 cookies=STEAM_AGE_COOKIES,
             )
-            html_text = response.text
-            sections = parse_more_like_html(html_text)
-        except SteamApiError as exc:
+        except SteamTransientError as exc:
             error = exc
-        except (AttributeError, TypeError):
-            error = SteamApiError("Steam 相似游戏页面返回了无效内容。")
+        except SteamApiError:
+            raise
         else:
             snapshot = {
                 "html": html_text,
                 "fetched_at": float(self.clock()),
             }
-            await self.cache.set_json(fresh_key, snapshot)
-            await self.cache.set_json(stale_key, snapshot)
+            await self._set_cache_json(
+                cache_key,
+                snapshot,
+                ttl_hours=STOREFRONT_STALE_TTL_HOURS,
+            )
             return select_more_like_hits(
                 sections,
                 resolved_appid,
                 allow_unreleased=allow_unreleased,
             )
 
-        stale = await self.cache.get_json(stale_key, STOREFRONT_STALE_TTL_HOURS)
+        stale = await self.cache.get_json(cache_key, STOREFRONT_STALE_TTL_HOURS)
         if stale is not None:
             try:
                 sections, fetched_at = parse_more_like_snapshot(stale)
@@ -551,13 +568,29 @@ class SteamClient:
             return parse_cached_store_page_tags(cached)
 
         expected_url = f"{STEAM_STORE_BASE_URL}/{resolved_appid}/"
-        response = await self._request_get(
-            expected_url,
-            {"l": "english"},
-            cookies=STEAM_AGE_COOKIES,
+        tags: list[str] | None = None
+        for _attempt in range(2):
+            try:
+                response = await self._request_get(
+                    expected_url,
+                    {"l": "english"},
+                    max_attempts=1,
+                    cookies=STEAM_AGE_COOKIES,
+                )
+                tags = validated_store_page_tags(resolved_appid, response)
+            except SteamTransientError:
+                continue
+            break
+        if tags is None:
+            raise SteamTransientError(
+                "Steam 商店页暂时返回了无效内容。",
+                code="steam_store_page_contract_failure",
+            )
+        await self._set_cache_json(
+            cache_key,
+            tags,
+            ttl_hours=self.cache_ttl_hours,
         )
-        tags = validated_store_page_tags(resolved_appid, response)
-        await self.cache.set_json(cache_key, tags)
         return tags
 
     def has_web_api_key(self) -> bool:
@@ -567,15 +600,22 @@ class SteamClient:
         if not self.steam_api_key:
             raise SteamApiError("未配置 steam_api_key，无法查询 Steam 游戏库。")
 
+        key_fingerprint = hashlib.sha256(
+            self.steam_api_key.encode("utf-8")
+        ).hexdigest()
         data = await self._get_json(
             STEAM_OWNED_GAMES_URL,
             {
-                "key": self.steam_api_key,
                 "steamid": steam_id64,
                 "include_appinfo": 1,
                 "include_played_free_games": 1,
                 "format": "json",
             },
+            request_headers={"x-webapi-key": self.steam_api_key},
+            follow_redirects=False,
+            cache_identity={"api_key_fingerprint": key_fingerprint},
+            owner_scope=f"steam-account:{steam_id64}",
+            validator=validate_owned_games_payload,
         )
         response = data.get("response") if isinstance(data, dict) else None
         games = response.get("games") if isinstance(response, dict) else None
@@ -605,8 +645,19 @@ class SteamClient:
         params: dict[str, Any],
         validator: Callable[[Any], None] | None = None,
         bypass_cache: bool = False,
+        *,
+        request_headers: dict[str, str] | None = None,
+        follow_redirects: bool | None = None,
+        cache_identity: dict[str, Any] | None = None,
+        owner_scope: str = "",
     ) -> Any:
-        cache_key = self._cache_key(url, params)
+        cache_key = self._cache_key(
+            url,
+            {
+                **params,
+                **({"cache_identity": cache_identity} if cache_identity else {}),
+            },
+        )
         cached = (
             None
             if bypass_cache
@@ -621,15 +672,40 @@ class SteamClient:
             else:
                 return cached
 
+        contract = validator or (lambda _payload: None)
+        stale_ttl_hours = max(
+            float(self.cache_ttl_hours),
+            float(STOREFRONT_STALE_TTL_HOURS),
+        )
         try:
-            response = await self._request_get(url, params)
-            data = response.json()
-        except ValueError as exc:
-            raise SteamApiError("Steam 返回了无法解析的 JSON。") from exc
+            data, _ = await self._request_json_contract(
+                url,
+                params,
+                contract,
+                headers=request_headers,
+                **(
+                    {"follow_redirects": follow_redirects}
+                    if follow_redirects is not None
+                    else {}
+                ),
+            )
+        except SteamTransientError as error:
+            stale = await self.cache.get_json(cache_key, stale_ttl_hours)
+            if stale is not None:
+                try:
+                    contract(stale)
+                except SteamApiError:
+                    pass
+                else:
+                    return stale
+            raise error
 
-        if validator is not None:
-            validator(data)
-        await self.cache.set_json(cache_key, data)
+        await self._set_cache_json(
+            cache_key,
+            data,
+            ttl_hours=stale_ttl_hours,
+            owner_scope=owner_scope,
+        )
         return data
 
     async def _get_store_search_payload(
@@ -639,10 +715,8 @@ class SteamClient:
         reuse_cache: bool,
     ) -> dict[str, Any]:
         cache_key = self._cache_key(STEAM_STORE_SEARCH_URL, params)
-        fresh_key = f"{cache_key}:fresh"
-        stale_key = f"{cache_key}:stale"
         if reuse_cache:
-            fresh = await self.cache.get_json(fresh_key, STOREFRONT_FRESH_TTL_HOURS)
+            fresh = await self.cache.get_json(cache_key, STOREFRONT_FRESH_TTL_HOURS)
             if fresh is not None:
                 try:
                     validate_store_search_payload(fresh)
@@ -651,21 +725,26 @@ class SteamClient:
                 else:
                     return fresh
 
-        error: SteamApiError
+        error: SteamTransientError
         try:
-            response = await self._request_get(STEAM_STORE_SEARCH_URL, params)
-            payload = response.json()
-            validate_store_search_payload(payload)
-        except ValueError:
-            error = SteamApiError("Steam 返回了无法解析的 JSON。")
-        except SteamApiError as exc:
+            payload, _ = await self._request_json_contract(
+                STEAM_STORE_SEARCH_URL,
+                params,
+                validate_store_search_payload,
+            )
+        except SteamTransientError as exc:
             error = exc
+        except SteamApiError:
+            raise
         else:
-            await self.cache.set_json(fresh_key, payload)
-            await self.cache.set_json(stale_key, payload)
+            await self._set_cache_json(
+                cache_key,
+                payload,
+                ttl_hours=STOREFRONT_STALE_TTL_HOURS,
+            )
             return payload
 
-        stale = await self.cache.get_json(stale_key, STOREFRONT_STALE_TTL_HOURS)
+        stale = await self.cache.get_json(cache_key, STOREFRONT_STALE_TTL_HOURS)
         if stale is not None:
             try:
                 validate_store_search_payload(stale)
@@ -686,11 +765,9 @@ class SteamClient:
             f"{self._cache_key(STEAM_APP_DETAILS_URL, params)}:"
             f"appdetails:v{APPDETAILS_CACHE_VERSION}"
         )
-        fresh_key = f"{cache_key}:fresh"
-        stale_key = f"{cache_key}:stale"
         if not bypass_cache:
             fresh = await self.cache.get_json(
-                fresh_key,
+                cache_key,
                 APPDETAILS_RELEASE_FRESH_TTL_HOURS,
             )
             if fresh is not None:
@@ -702,33 +779,51 @@ class SteamClient:
                 else:
                     return payload, fetched_at
 
-        try:
-            response = await self._request_get(STEAM_APP_DETAILS_URL, params)
-        except SteamTransientError as error:
-            stale = await self.cache.get_json(
-                stale_key,
-                APPDETAILS_RELEASE_STALE_TTL_HOURS,
-            )
-            if stale is not None:
-                try:
-                    payload, fetched_at = parse_appdetails_snapshot(stale)
-                    validate_appdetails_payload(appid, payload)
-                except SteamApiError:
-                    pass
-                else:
-                    return payload, fetched_at
-            raise error
+        error: SteamTransientError | None = None
+        for attempt in range(2):
+            try:
+                response = await self._request_get(
+                    STEAM_APP_DETAILS_URL,
+                    params,
+                    max_attempts=1,
+                )
+                payload = response.json()
+                validate_appdetails_payload(appid, payload)
+            except ValueError:
+                error = SteamTransientError(
+                    "Steam 暂时返回了无法解析的数据。",
+                    code="steam_invalid_json",
+                )
+            except SteamTransientError as exc:
+                error = exc
+            except SteamApiError:
+                raise
+            else:
+                fetched_at = max(float(self.clock()), 0.0)
+                snapshot = appdetails_snapshot_payload(payload, fetched_at)
+                await self._set_cache_json(
+                    cache_key,
+                    snapshot,
+                    ttl_hours=APPDETAILS_RELEASE_STALE_TTL_HOURS,
+                )
+                return payload, fetched_at
+            if attempt == 0:
+                continue
 
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise SteamApiError("Steam 返回了无法解析的 JSON。") from exc
-        validate_appdetails_payload(appid, payload)
-        fetched_at = max(float(self.clock()), 0.0)
-        snapshot = appdetails_snapshot_payload(payload, fetched_at)
-        await self.cache.set_json(fresh_key, snapshot)
-        await self.cache.set_json(stale_key, snapshot)
-        return payload, fetched_at
+        stale = await self.cache.get_json(
+            cache_key,
+            APPDETAILS_RELEASE_STALE_TTL_HOURS,
+        )
+        if stale is not None:
+            try:
+                payload, fetched_at = parse_appdetails_snapshot(stale)
+                validate_appdetails_payload(appid, payload)
+            except SteamApiError:
+                pass
+            else:
+                return payload, fetched_at
+        assert error is not None
+        raise error
 
     async def _get_storefront_page(
         self,
@@ -737,31 +832,34 @@ class SteamClient:
         reuse_cache: bool,
     ) -> SteamStorefrontPage:
         cache_key = self._cache_key(STEAM_STOREFRONT_SEARCH_URL, params)
-        fresh_key = f"{cache_key}:fresh"
-        stale_key = f"{cache_key}:stale"
         if reuse_cache:
-            fresh = await self.cache.get_json(fresh_key, STOREFRONT_FRESH_TTL_HOURS)
+            fresh = await self.cache.get_json(cache_key, STOREFRONT_FRESH_TTL_HOURS)
             if fresh is not None:
                 try:
                     return parse_storefront_page(fresh)
                 except SteamApiError:
                     pass
 
-        error: SteamApiError
+        error: SteamTransientError
         try:
-            response = await self._request_get(STEAM_STOREFRONT_SEARCH_URL, params)
-            payload = response.json()
-            page = parse_storefront_page(payload)
-        except ValueError as exc:
-            error = SteamApiError("Steam 商店筛选返回了无法解析的 JSON。")
-        except SteamApiError as exc:
+            payload, page = await self._request_json_contract(
+                STEAM_STOREFRONT_SEARCH_URL,
+                params,
+                parse_storefront_page,
+            )
+        except SteamTransientError as exc:
             error = exc
+        except SteamApiError:
+            raise
         else:
-            await self.cache.set_json(fresh_key, payload)
-            await self.cache.set_json(stale_key, payload)
+            await self._set_cache_json(
+                cache_key,
+                payload,
+                ttl_hours=STOREFRONT_STALE_TTL_HOURS,
+            )
             return page
 
-        stale = await self.cache.get_json(stale_key, STOREFRONT_STALE_TTL_HOURS)
+        stale = await self.cache.get_json(cache_key, STOREFRONT_STALE_TTL_HOURS)
         if stale is not None:
             try:
                 return replace(parse_storefront_page(stale), stale=True)
@@ -769,27 +867,133 @@ class SteamClient:
                 pass
         raise error
 
+    async def _request_json_contract(
+        self,
+        url: str,
+        params: dict[str, Any],
+        contract: Callable[[Any], Any],
+        **kwargs: Any,
+    ) -> tuple[Any, Any]:
+        last_error: SteamTransientError | None = None
+        for _attempt in range(2):
+            try:
+                response = await self._request_get(
+                    url,
+                    params,
+                    max_attempts=1,
+                    **kwargs,
+                )
+                try:
+                    payload = response.json()
+                except ValueError:
+                    raise SteamTransientError(
+                        "Steam 暂时返回了无法解析的数据。",
+                        code="steam_invalid_json",
+                    ) from None
+                parsed = contract(payload)
+            except SteamTransientError as exc:
+                last_error = exc
+                continue
+            except SteamApiError:
+                raise
+            return payload, parsed
+        assert last_error is not None
+        raise last_error
+
+    async def _request_text_contract(
+        self,
+        url: str,
+        params: dict[str, Any],
+        contract: Callable[[str], Any],
+        **kwargs: Any,
+    ) -> tuple[str, Any]:
+        last_error: SteamTransientError | None = None
+        for _attempt in range(2):
+            try:
+                response = await self._request_get(
+                    url,
+                    params,
+                    max_attempts=1,
+                    **kwargs,
+                )
+                try:
+                    payload = response.text
+                except (AttributeError, TypeError):
+                    raise SteamTransientError(
+                        "Steam 暂时返回了无法解析的数据。",
+                        code="steam_invalid_content",
+                    ) from None
+                parsed = contract(payload)
+            except SteamTransientError as exc:
+                last_error = exc
+                continue
+            except SteamApiError:
+                raise
+            return payload, parsed
+        assert last_error is not None
+        raise last_error
+
     async def _request_get(
         self,
         url: str,
         params: dict[str, Any],
+        *,
+        max_attempts: int = 2,
         **kwargs: Any,
     ) -> Any:
-        for attempt in range(2):
+        attempts = min(max(int(max_attempts), 1), 2)
+        for attempt in range(attempts):
             try:
                 response = await self.client.get(url, params=params, **kwargs)
+                status_code = getattr(response, "status_code", None)
+                if isinstance(status_code, int) and 300 <= status_code <= 399:
+                    raise SteamApiError(
+                        "Steam 请求被重定向，已为保护凭据而中止。",
+                        code="steam_redirect_rejected",
+                        status_code=status_code,
+                    )
                 response.raise_for_status()
                 return response
+            except SteamApiError:
+                raise
             except httpx.HTTPError as exc:
                 retryable = is_retryable_steam_read_error(exc)
-                if attempt == 0 and retryable:
+                if attempt + 1 < attempts and retryable:
                     retry_after = retry_after_seconds(exc)
                     if retry_after is not None:
                         await self._sleeper(retry_after)
                     continue
                 error_type = SteamTransientError if retryable else SteamApiError
-                raise error_type(f"Steam 请求失败：{exc}") from exc
+                response = getattr(exc, "response", None)
+                status_code = getattr(response, "status_code", None)
+                raise error_type(
+                    "Steam 服务暂时不可用，请稍后重试。"
+                    if retryable
+                    else "Steam 请求未成功。",
+                    code=(
+                        "steam_request_transient"
+                        if retryable
+                        else "steam_request_rejected"
+                    ),
+                    status_code=(status_code if isinstance(status_code, int) else None),
+                ) from None
         raise AssertionError("unreachable")
+
+    async def _set_cache_json(
+        self,
+        key: str,
+        payload: Any,
+        *,
+        ttl_hours: int | float,
+        owner_scope: str = "",
+    ) -> None:
+        await set_json_with_ttl(
+            self.cache,
+            key,
+            payload,
+            ttl_hours=ttl_hours,
+            owner_scope=owner_scope,
+        )
 
     @staticmethod
     def _cache_key(url: str, params: dict[str, Any]) -> str:
@@ -811,8 +1015,16 @@ def build_search_query(search: str | None, genres: list[str], tags: list[str]) -
 
 
 def validate_store_search_payload(payload: Any) -> None:
+    if response_explicitly_failed(payload):
+        raise SteamApiError(
+            "Steam 搜索请求未成功。",
+            code="steam_store_search_rejected",
+        )
     if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
-        raise SteamApiError("Steam 搜索返回了无效数据。")
+        raise SteamTransientError(
+            "Steam 搜索响应结构暂时无效。",
+            code="steam_store_search_contract_failure",
+        )
 
 
 def popular_tags_url(language: str) -> str:
@@ -851,11 +1063,28 @@ def retry_after_seconds(exc: httpx.HTTPError) -> float | None:
 
 
 def parse_storefront_page(payload: Any) -> SteamStorefrontPage:
-    if not isinstance(payload, dict) or not payload.get("success"):
-        raise SteamApiError("Steam 商店筛选返回了无效状态。")
+    if not isinstance(payload, dict):
+        raise SteamTransientError(
+            "Steam 商店筛选响应结构暂时无效。",
+            code="steam_storefront_contract_failure",
+        )
+    success = payload.get("success")
+    if success is False or (type(success) is int and success == 0):
+        raise SteamApiError(
+            "Steam 商店筛选未返回结果。",
+            code="steam_storefront_rejected",
+        )
+    if success is not True and not (type(success) is int and success == 1):
+        raise SteamTransientError(
+            "Steam 商店筛选响应结构暂时无效。",
+            code="steam_storefront_contract_failure",
+        )
     results_html = payload.get("results_html")
     if not isinstance(results_html, str):
-        raise SteamApiError("Steam 商店筛选缺少结果 HTML。")
+        raise SteamTransientError(
+            "Steam 商店筛选响应结构暂时无效。",
+            code="steam_storefront_contract_failure",
+        )
     total_count = storefront_non_negative_int(payload.get("total_count"), "total_count")
     start = storefront_non_negative_int(payload.get("start"), "start")
     return SteamStorefrontPage(
@@ -867,18 +1096,30 @@ def parse_storefront_page(payload: Any) -> SteamStorefrontPage:
 
 def parse_popular_tags(payload: Any) -> list[dict[str, Any]]:
     if not isinstance(payload, list) or not payload:
-        raise SteamApiError("Steam 热门标签返回了无效数据。")
+        raise SteamTransientError(
+            "Steam 热门标签响应结构暂时无效。",
+            code="steam_popular_tags_contract_failure",
+        )
 
     tags: list[dict[str, Any]] = []
     for item in payload:
         if not isinstance(item, dict):
-            raise SteamApiError("Steam 热门标签返回了无效数据。")
+            raise SteamTransientError(
+                "Steam 热门标签响应结构暂时无效。",
+                code="steam_popular_tags_contract_failure",
+            )
         tagid = item.get("tagid")
         name = item.get("name")
         if type(tagid) is not int or tagid <= 0:
-            raise SteamApiError("Steam 热门标签包含无效 tagid。")
+            raise SteamTransientError(
+                "Steam 热门标签响应结构暂时无效。",
+                code="steam_popular_tags_contract_failure",
+            )
         if not isinstance(name, str) or not name.strip():
-            raise SteamApiError("Steam 热门标签包含无效名称。")
+            raise SteamTransientError(
+                "Steam 热门标签响应结构暂时无效。",
+                code="steam_popular_tags_contract_failure",
+            )
         tag = {"tagid": tagid, "name": name.strip()}
         raw_count = item.get("total_count", item.get("count"))
         if raw_count is not None:
@@ -912,7 +1153,10 @@ def popular_tag_snapshot_payload(
 
 
 def storefront_non_negative_int(value: Any, field_name: str) -> int:
-    invalid = SteamApiError(f"Steam 商店筛选字段 {field_name} 无效。")
+    invalid = SteamTransientError(
+        f"Steam 商店筛选字段 {field_name} 暂时无效。",
+        code="steam_storefront_contract_failure",
+    )
     if isinstance(value, bool):
         raise invalid
     if isinstance(value, int):
@@ -955,15 +1199,80 @@ def parse_more_like_snapshot(
 
 def parse_more_like_html(value: str) -> SteamMoreLikeSections:
     if not isinstance(value, str):
-        raise SteamApiError("Steam 相似游戏页面返回了无效内容。")
+        raise SteamTransientError(
+            "Steam 相似游戏页面响应结构暂时无效。",
+            code="steam_more_like_contract_failure",
+        )
     parser = _MoreLikeParser()
     parser.feed(value)
     parser.close()
     if "released" not in parser.seen_sections:
-        raise SteamApiError("Steam 相似游戏页面缺少 released 区段。")
+        raise SteamTransientError(
+            "Steam 相似游戏页面响应结构暂时无效。",
+            code="steam_more_like_contract_failure",
+        )
     return SteamMoreLikeSections(
         released=tuple(parser.hits["released"]),
         upcoming=tuple(parser.hits["upcoming"]),
+    )
+
+
+def validate_owned_games_payload(payload: Any) -> None:
+    if response_explicitly_failed(payload):
+        raise SteamApiError(
+            "Steam 游戏库请求未成功。",
+            code="steam_owned_games_rejected",
+        )
+    if not isinstance(payload, dict) or not isinstance(payload.get("response"), dict):
+        raise SteamTransientError(
+            "Steam 游戏库响应结构暂时无效。",
+            code="steam_owned_games_contract_failure",
+        )
+    games = payload["response"].get("games")
+    if games is not None and not isinstance(games, list):
+        raise SteamTransientError(
+            "Steam 游戏库响应结构暂时无效。",
+            code="steam_owned_games_contract_failure",
+        )
+
+
+def validate_review_summary_payload(appid: int, payload: Any) -> None:
+    if response_explicitly_failed(payload):
+        raise SteamApiError(
+            "Steam 评测请求未成功。",
+            code="steam_reviews_rejected",
+        )
+    summary = payload.get("query_summary") if isinstance(payload, dict) else None
+    if not isinstance(summary, dict):
+        raise SteamTransientError(
+            "Steam 评测摘要响应结构暂时无效。",
+            code="steam_reviews_contract_failure",
+        )
+    total = optional_int(summary.get("total_reviews"))
+    positive = optional_int(summary.get("total_positive"))
+    if (
+        total is None
+        or positive is None
+        or total < 0
+        or positive < 0
+        or positive > total
+    ):
+        raise SteamTransientError(
+            f"Steam 评测摘要计数暂时无效：appid={appid}",
+            code="steam_reviews_contract_failure",
+        )
+
+
+def response_explicitly_failed(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    containers = [payload]
+    if isinstance(payload.get("response"), dict):
+        containers.append(payload["response"])
+    return any(
+        container.get("success") is False
+        or (type(container.get("success")) is int and container.get("success") == 0)
+        for container in containers
     )
 
 
@@ -1165,12 +1474,34 @@ def section_name(attributes: dict[str, str | None]) -> str | None:
 
 
 def validate_appdetails_payload(appid: int, payload: Any) -> dict[str, Any]:
-    entry = payload.get(str(appid)) if isinstance(payload, dict) else None
-    if not isinstance(entry, dict) or not entry.get("success"):
-        raise SteamApiError(f"Steam 商店没有返回 appid={appid} 的游戏资料。")
+    if not isinstance(payload, dict):
+        raise SteamTransientError(
+            "Steam 游戏资料响应结构暂时无效。",
+            code="steam_appdetails_contract_failure",
+        )
+    entry = payload.get(str(appid))
+    if not isinstance(entry, dict):
+        raise SteamTransientError(
+            "Steam 游戏资料响应结构暂时无效。",
+            code="steam_appdetails_contract_failure",
+        )
+    success = entry.get("success")
+    if success is False:
+        raise SteamApiError(
+            f"Steam 商店没有返回 appid={appid} 的游戏资料。",
+            code="steam_app_not_found",
+        )
+    if success is not True:
+        raise SteamTransientError(
+            "Steam 游戏资料响应结构暂时无效。",
+            code="steam_appdetails_contract_failure",
+        )
     data = entry.get("data")
     if not isinstance(data, dict):
-        raise SteamApiError(f"Steam 商店返回了无效的游戏资料：appid={appid}")
+        raise SteamTransientError(
+            "Steam 游戏资料响应结构暂时无效。",
+            code="steam_appdetails_contract_failure",
+        )
     return data
 
 
@@ -1353,12 +1684,18 @@ def validated_store_page_tags(appid: int, response: Any) -> list[str]:
         "glance_tags popular_tags",
     )
     if not any(marker in lower for marker in main_markers):
-        raise SteamApiError(f"Steam 商店页缺少游戏主内容：appid={appid}")
+        raise SteamTransientError(
+            f"Steam 商店页暂时缺少游戏主内容：appid={appid}",
+            code="steam_store_page_contract_failure",
+        )
 
     tags = parse_store_page_tags(text)
     descriptor_only = {tag.casefold() for tag in tags} <= {"violent", "gore"}
     if tags and descriptor_only:
-        raise SteamApiError(f"Steam 商店页只包含内容描述符：appid={appid}")
+        raise SteamTransientError(
+            f"Steam 商店页暂时只包含内容描述符：appid={appid}",
+            code="steam_store_page_contract_failure",
+        )
     return tags
 
 
