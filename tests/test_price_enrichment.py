@@ -8,7 +8,6 @@ import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT.parent))
@@ -18,14 +17,14 @@ from astrbot_plugin_steam_game_recommender.services.formatter import (  # noqa: 
     format_recommendation_messages,
     format_recommendation_messages_with_llm,
 )
+from astrbot_plugin_steam_game_recommender.services.similarity_ranker import (  # noqa: E402
+    ranked_game_sort_key,
+)
 from astrbot_plugin_steam_game_recommender.services.steam_price_bridge import (  # noqa: E402
     SteamPriceBridge,
     attach_missing_price_warning,
     attach_price_summary,
     load_price_plugin_symbols,
-)
-from astrbot_plugin_steam_game_recommender.services.similarity_ranker import (  # noqa: E402
-    ranked_game_sort_key,
 )
 from astrbot_plugin_steam_game_recommender.storage.models import (  # noqa: E402
     GamePreference,
@@ -383,6 +382,26 @@ class PriceBridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary.historic_low_amount, 50)
         self.assertEqual(summary.recent_sale_price, "¥50")
         self.assertIn("已开始", summary.sale_time_status or "")
+
+    async def test_lookup_failure_does_not_log_provider_exception_text(self) -> None:
+        secret = "token=secret-key /private/price-provider/path"
+        bridge = SteamPriceBridge(
+            client=object(),
+            config={"default_region": "CN"},
+            service_factory=lambda _config, _client: FailingPriceService(secret),
+        )
+
+        with self.assertLogs(
+            "astrbot_plugin_steam_game_recommender.services.steam_price_bridge",
+            level="WARNING",
+        ) as captured:
+            summary = await bridge.lookup("Test Game", appid=123)
+
+        output = "\n".join(captured.output)
+        self.assertIsNone(summary)
+        self.assertNotIn(secret, output)
+        self.assertNotIn("secret-key", output)
+        self.assertIn("error_type=RuntimeError", output)
 
     async def test_budget_enrichment_softly_penalizes_games_over_budget(self) -> None:
         bridge = FixedPriceBridge(
@@ -807,8 +826,14 @@ class FixedPriceBridge(SteamPriceBridge):
         self.summaries = summaries
         self.lookup_calls: list[str] = []
 
-    async def lookup(self, title: str, country: str | None = None) -> GamePriceSummary | None:
-        del country
+    async def lookup(
+        self,
+        title: str,
+        country: str | None = None,
+        *,
+        appid: int | None = None,
+    ) -> GamePriceSummary | None:
+        del country, appid
         self.lookup_calls.append(title)
         return self.summaries.get(title)
 
@@ -819,8 +844,14 @@ class ConcurrentPriceBridge(FixedPriceBridge):
         self.active = 0
         self.max_active = 0
 
-    async def lookup(self, title: str, country: str | None = None) -> GamePriceSummary | None:
-        del title, country
+    async def lookup(
+        self,
+        title: str,
+        country: str | None = None,
+        *,
+        appid: int | None = None,
+    ) -> GamePriceSummary | None:
+        del title, country, appid
         self.active += 1
         self.max_active = max(self.max_active, self.active)
         await asyncio.sleep(0)
@@ -905,6 +936,16 @@ class FakePriceService:
                 "lowest_info_v2": {"currency": "CNY"},
             }
         )
+
+
+class FailingPriceService:
+    default_language = "schinese"
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+    async def resolve_game(self, _title: str, _country: str):
+        raise RuntimeError(self.message)
 
 
 def history_point(recorded_on: str, price: str, discount: int) -> dict:

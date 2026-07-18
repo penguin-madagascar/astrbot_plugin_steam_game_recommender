@@ -54,6 +54,43 @@ class RegionQueryTest(unittest.TestCase):
 
 
 class RegionalPriceBridgeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_known_appid_uses_exact_identity_instead_of_title_search(self) -> None:
+        service = TrackingPriceService(
+            history=active_history(),
+            resolved_appid=456,
+            details_appid=456,
+        )
+        bridge = SteamPriceBridge(
+            client=object(),
+            config={"default_region": "US"},
+            service_factory=lambda _config, _client: service,
+        )
+
+        summary = await bridge.lookup(
+            "Control Ultimate Edition",
+            country="US",
+            appid=456,
+        )
+
+        self.assertEqual(service.resolve_queries, ["456"])
+        self.assertEqual(service.detail_appids, [456])
+        self.assertIsNotNone(summary)
+
+    async def test_known_appid_rejects_mismatched_resolved_identity(self) -> None:
+        service = TrackingPriceService(history=active_history(), resolved_appid=999)
+        bridge = SteamPriceBridge(
+            client=object(),
+            config={"default_region": "US"},
+            service_factory=lambda _config, _client: service,
+        )
+
+        summary = await bridge.lookup("Control", country="US", appid=456)
+
+        self.assertIsNone(summary)
+        self.assertEqual(service.resolve_queries, ["456"])
+        self.assertEqual(service.detail_appids, [])
+        self.assertEqual(service.history_countries, [])
+
     async def test_lookup_requests_only_selected_region_and_never_global_prices(self) -> None:
         service = TrackingPriceService(history=active_history())
         bridge = SteamPriceBridge(
@@ -108,7 +145,7 @@ class RegionalPriceBridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(summary.recent_sale_price)
         self.assertIsNone(summary.sale_time_status)
 
-    def test_price_summary_contains_only_single_region_price_fields(self) -> None:
+    def test_price_summary_tracks_each_component_currency(self) -> None:
         fields = getattr(GamePriceSummary, "model_fields", None) or GamePriceSummary.__fields__
 
         self.assertEqual(
@@ -118,16 +155,45 @@ class RegionalPriceBridgeTest(unittest.IsolatedAsyncioTestCase):
                 "currency",
                 "current_price",
                 "current_amount",
+                "current_currency",
                 "historic_low",
                 "historic_low_amount",
+                "historic_low_currency",
                 "recent_sale_price",
                 "recent_sale_amount",
+                "recent_sale_currency",
                 "sale_time_status",
             },
         )
 
 
 class RegionalBudgetAndFormattingTest(unittest.TestCase):
+    def test_historic_low_in_different_currency_is_not_compared_to_budget(self) -> None:
+        game = RankedGame(title="Mixed Currency Game", appid=123, score=80)
+        summary = GamePriceSummary(
+            region="US",
+            currency="USD",
+            current_price="$60",
+            current_amount=60,
+            current_currency="USD",
+            historic_low="ARS 20",
+            historic_low_amount=20,
+            historic_low_currency="ARS",
+        )
+
+        enriched = attach_price_summary(
+            game,
+            summary,
+            GamePreference(budget=50, budget_currency="USD", region="US"),
+        )
+
+        self.assertEqual(enriched.score_breakdown.budget_adjustment, -2)
+        evidence = next(
+            item for item in enriched.recommendation_evidence if item.category == "budget"
+        )
+        self.assertEqual(evidence.evidence_id, "budget_currency_mismatch")
+        self.assertNotIn("史低曾低于预算", evidence.text)
+
     def test_currency_mismatch_uses_unknown_budget_penalty(self) -> None:
         game = RankedGame(title="US Game", appid=123, score=80)
         summary = GamePriceSummary(
@@ -307,20 +373,38 @@ class RegionalBudgetAndFormattingTest(unittest.TestCase):
 class TrackingPriceService:
     default_language = "schinese"
 
-    def __init__(self, history: PriceHistory | None) -> None:
+    def __init__(
+        self,
+        history: PriceHistory | None,
+        *,
+        resolved_appid: int = 123,
+        details_appid: int = 123,
+    ) -> None:
         self.history = history
+        self.resolved_appid = resolved_appid
+        self.details_appid = details_appid
+        self.resolve_queries: list[str] = []
+        self.detail_appids: list[int] = []
         self.detail_countries: list[str] = []
         self.history_countries: list[str] = []
         self.global_price_calls = 0
         self.steam_client = self
         self.heybox_client = self
 
-    async def resolve_game(self, _title: str, country: str) -> tuple[GameIdentity, str]:
-        return GameIdentity(123, "Test Game / appid=123"), country
+    async def resolve_game(self, query: str, country: str) -> tuple[GameIdentity, str]:
+        self.resolve_queries.append(query)
+        return (
+            GameIdentity(
+                self.resolved_appid,
+                f"Test Game / appid={self.resolved_appid}",
+            ),
+            country,
+        )
 
-    async def details(self, _appid: int, country: str, _language: str) -> SteamGameDetails:
+    async def details(self, appid: int, country: str, _language: str) -> SteamGameDetails:
+        self.detail_appids.append(appid)
         self.detail_countries.append(country)
-        return steam_details()
+        return steam_details(appid=self.details_appid)
 
     async def load_history(self, _appid: int, country: str) -> PriceHistory | None:
         self.history_countries.append(country)
@@ -331,9 +415,9 @@ class TrackingPriceService:
         raise AssertionError("global_prices must not be called")
 
 
-def steam_details() -> SteamGameDetails:
+def steam_details(appid: int = 123) -> SteamGameDetails:
     return SteamGameDetails(
-        appid=123,
+        appid=appid,
         name="Test Game",
         game_type="game",
         is_free=False,

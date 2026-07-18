@@ -1099,13 +1099,23 @@ class GamePriceSummary(BaseModel):
     currency: str | None = None
     current_price: str | None = None
     current_amount: float | None = None
+    current_currency: str | None = None
     historic_low: str | None = None
     historic_low_amount: float | None = None
+    historic_low_currency: str | None = None
     recent_sale_price: str | None = None
     recent_sale_amount: float | None = None
+    recent_sale_currency: str | None = None
     sale_time_status: str | None = None
 
-    @validator("region", "currency", pre=True)
+    @validator(
+        "region",
+        "currency",
+        "current_currency",
+        "historic_low_currency",
+        "recent_sale_currency",
+        pre=True,
+    )
     def _normalize_price_codes(cls, value: Any) -> str | None:
         text = re.sub(r"\s+", "", str(value or "")).strip().upper()
         return text or None

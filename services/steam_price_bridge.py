@@ -17,8 +17,9 @@ from ..storage.models import (
     RecommendationEvidence,
     ScoreBreakdown,
 )
-from .region_query import normalize_region, region_currency
 from .ranking_precedence import effective_score
+from .region_query import normalize_region, region_currency
+from .safe_errors import log_external_failure
 from .similarity_ranker import clamp_score, ranked_game_sort_key
 
 logger = logging.getLogger(__name__)
@@ -119,7 +120,13 @@ class SteamPriceBridge:
         factory = service_factory or default_service_factory()
         if factory is None:
             if PRICE_PLUGIN_IMPORT_ERROR:
-                logger.debug("Steam price bridge disabled: %s", PRICE_PLUGIN_IMPORT_ERROR)
+                log_external_failure(
+                    logger,
+                    "price_bridge_import_failed",
+                    stage="price_bridge_import",
+                    exc=PRICE_PLUGIN_IMPORT_ERROR,
+                    level=logging.DEBUG,
+                )
             return
 
         price_config = {
@@ -161,7 +168,11 @@ class SteamPriceBridge:
             if preference.budget is None and index >= self.lookup_limit:
                 return game
             async with semaphore:
-                summary = await self.lookup(game.title, country)
+                summary = await self.lookup(
+                    game.title,
+                    country,
+                    appid=game.appid,
+                )
             return attach_price_summary(game, summary, preference)
 
         enriched = list(
@@ -173,15 +184,28 @@ class SteamPriceBridge:
             else enriched
         )
 
-    async def lookup(self, title: str, country: str | None = None) -> GamePriceSummary | None:
-        if not self.is_available() or not title.strip():
+    async def lookup(
+        self,
+        title: str,
+        country: str | None = None,
+        *,
+        appid: int | None = None,
+    ) -> GamePriceSummary | None:
+        try:
+            requested_appid = int(appid or 0)
+        except (TypeError, ValueError):
+            requested_appid = 0
+        query = str(requested_appid) if requested_appid > 0 else title.strip()
+        if not self.is_available() or not query:
             return None
 
         symbols = get_price_plugin_symbols()
         lookup_error = symbols.lookup_error_class if symbols else RuntimeError
         try:
             resolved_country = normalize_country(country or self.default_country)
-            identity, resolved_country = await self.service.resolve_game(title, resolved_country)
+            identity, resolved_country = await self.service.resolve_game(query, resolved_country)
+            if requested_appid > 0 and int(identity.appid) != requested_appid:
+                return None
             details_result, history_result = await asyncio.gather(
                 self.service.steam_client.details(
                     identity.appid,
@@ -192,13 +216,26 @@ class SteamPriceBridge:
                 return_exceptions=True,
             )
         except lookup_error as exc:
-            logger.debug("Steam price lookup skipped for %s: %s", title, exc)
+            log_external_failure(
+                logger,
+                "price_lookup_skipped",
+                stage="price_lookup",
+                exc=exc,
+                level=logging.DEBUG,
+            )
             return None
         except Exception as exc:
-            logger.warning("Steam price lookup failed for %s: %s", title, exc)
+            log_external_failure(
+                logger,
+                "price_lookup_failed",
+                stage="price_lookup",
+                exc=exc,
+            )
             return None
 
         details = details_result if is_steam_details(details_result) else None
+        if details is not None and int(details.appid) != int(identity.appid):
+            details = None
         history = history_result if is_price_history(history_result) else None
         if details is None and history is None:
             return None
@@ -234,10 +271,13 @@ def build_price_summary(
         currency=currency,
         current_price=current_price,
         current_amount=current_amount,
+        current_currency=current_currency,
         historic_low=historic_low,
         historic_low_amount=historic_low_amount,
+        historic_low_currency=historic_currency,
         recent_sale_price=recent_price,
         recent_sale_amount=recent_amount,
+        recent_sale_currency=recent_currency,
         sale_time_status=timing,
     )
 
@@ -335,26 +375,13 @@ def attach_price_summary(
         expected_currency = normalize_currency(
             preference.budget_currency or region_currency(preference.region or summary.region) or ""
         )
-        summary_currency = normalize_currency(summary.currency or "")
-        if not expected_currency or not summary_currency:
+        if not expected_currency:
             adjustment = -2.0
             evidence.append(
                 budget_evidence(
                     "budget_currency_unknown",
                     "uncertain",
                     "价格币种未确认，预算匹配无法确认",
-                )
-            )
-        elif expected_currency != summary_currency:
-            adjustment = -2.0
-            evidence.append(
-                budget_evidence(
-                    "budget_currency_mismatch",
-                    "uncertain",
-                    (
-                        f"预算币种 {expected_currency} 与价格币种 {summary_currency} 不一致，"
-                        "预算匹配无法确认"
-                    ),
                 )
             )
         else:
@@ -386,24 +413,56 @@ def evaluate_budget(
     budget_is_required: bool = False,
 ) -> tuple[float, RecommendationEvidence]:
     budget_text = format_money(budget, currency)
-    if summary.current_amount is not None and summary.current_amount <= budget:
+    fallback_currency = normalize_currency(summary.currency or "")
+    current_currency = normalize_currency(
+        summary.current_currency or fallback_currency
+    )
+    historic_currency = normalize_currency(
+        summary.historic_low_currency or fallback_currency
+    )
+    current_comparable = (
+        summary.current_amount is not None and current_currency == currency
+    )
+    historic_comparable = (
+        summary.historic_low_amount is not None and historic_currency == currency
+    )
+    if current_comparable and summary.current_amount <= budget:
         return 5.0, budget_evidence(
             "budget_current_within",
             "positive",
             f"当前价 {summary.current_price} 在预算 {budget_text} 以内",
         )
-    if summary.historic_low_amount is not None and summary.historic_low_amount <= budget:
+    if historic_comparable and summary.historic_low_amount <= budget:
         current_context = (
             f"当前价 {summary.current_price} 高于预算 {budget_text}"
-            if summary.current_amount is not None
+            if current_comparable
             else "当前价格未知"
         )
         return 0.0, budget_evidence(
             "budget_historic_within",
             "negative",
-            f"{current_context}，但史低 {summary.historic_low} 进过预算",
+            f"{current_context}，但史低 {summary.historic_low} 曾低于预算",
         )
-    if summary.current_amount is None or summary.historic_low_amount is None:
+    if not current_comparable or not historic_comparable:
+        mismatched = [
+            component_currency
+            for amount, component_currency in (
+                (summary.current_amount, current_currency),
+                (summary.historic_low_amount, historic_currency),
+            )
+            if amount is not None
+            and component_currency
+            and component_currency != currency
+        ]
+        if mismatched:
+            return -2.0, budget_evidence(
+                "budget_currency_mismatch",
+                "uncertain",
+                (
+                    f"预算币种 {currency} 与部分价格币种"
+                    f" {', '.join(dict.fromkeys(mismatched))} 不一致，预算匹配无法确认"
+                ),
+            )
         return -2.0, budget_evidence(
             "budget_price_unknown",
             "uncertain",
