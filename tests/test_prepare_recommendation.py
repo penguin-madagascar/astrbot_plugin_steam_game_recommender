@@ -491,8 +491,8 @@ class RecommendationPipelineTest(unittest.IsolatedAsyncioTestCase):
     async def test_only_typed_steam_errors_use_the_steam_failure_message(self) -> None:
         errors = [
             RecallUnavailableError(RecallHealth()),
-            SteamApiError("steam failed"),
-            RuntimeError("programming error"),
+            SteamApiError("https://api.steampowered.com?key=secret-key"),
+            RuntimeError("provider token=secret-key /private/provider/path"),
         ]
 
         for error in errors:
@@ -521,13 +521,46 @@ class RecommendationPipelineTest(unittest.IsolatedAsyncioTestCase):
                     )
                 ]
 
-                expected_prefix = (
-                    "Steam 查询失败："
+                expected_message = (
+                    "Steam 查询暂时不可用，请稍后重试。"
                     if isinstance(error, SteamApiError)
-                    else "游戏推荐失败："
+                    else "游戏推荐暂时失败，请稍后重试。"
                 )
-                self.assertEqual(results, [("plain", f"{expected_prefix}{error}")])
+                self.assertEqual(results, [("plain", expected_message)])
+                self.assertNotIn("secret-key", results[0][1])
+                self.assertNotIn("/private/", results[0][1])
                 plugin._save_recent_recommendation.assert_not_awaited()
+
+    async def test_command_failure_log_does_not_include_exception_text(self) -> None:
+        secret = "provider token=secret-key /private/provider/path"
+        plugin = object.__new__(SteamGameRecommenderPlugin)
+        plugin._prepare_recommendation = AsyncMock(
+            side_effect=RuntimeError(secret)
+        )
+        warnings: list[tuple[object, ...]] = []
+
+        with patch.object(
+            main_module.logger,
+            "warning",
+            side_effect=lambda *args, **_kwargs: warnings.append(args),
+        ):
+            results = [
+                result
+                async for result in plugin.recommend_games(
+                    PlainResultEvent(),
+                    "Steam query",
+                )
+            ]
+
+        logged = " ".join(str(value) for call in warnings for value in call)
+        self.assertEqual(
+            results,
+            [("plain", "游戏推荐暂时失败，请稍后重试。")],
+        )
+        self.assertNotIn(secret, logged)
+        self.assertNotIn("secret-key", logged)
+        self.assertIn("error_type=%s", logged)
+        self.assertIn("RuntimeError", logged)
 
     async def test_partial_tag_recall_degradation_keeps_ranked_results(self) -> None:
         context = RaisingLlmContext()

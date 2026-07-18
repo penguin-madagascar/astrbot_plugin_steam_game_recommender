@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections.abc import Mapping
@@ -73,6 +74,7 @@ from .services.semantic_feature_verifier import (
     verify_ranked_features,
 )
 from .services.run_notices import RunNotice, dedupe_run_notices
+from .services.safe_errors import log_external_failure
 from .services.steam_index import (
     STEAM_TAG_RECALL_DEGRADED_WARNING,
     SteamGameIndexService,
@@ -250,15 +252,25 @@ class SteamGameRecommenderPlugin(Star):
                 await self._save_recent_recommendation(event, run)
                 messages = run.messages
         except SteamApiError as exc:
-            logger.warning(f"Steam game recommendation failed: {exc}")
-            yield event.plain_result(f"Steam 查询失败：{exc}")
+            log_external_failure(
+                logger,
+                "recommendation_steam_failed",
+                stage="recommendation_steam",
+                exc=exc,
+            )
+            yield event.plain_result("Steam 查询暂时不可用，请稍后重试。")
             return
         except LibraryFilterModeError as exc:
             yield event.plain_result(f"游戏库过滤参数错误：{exc}")
             return
         except Exception as exc:
-            logger.exception("Game recommendation failed")
-            yield event.plain_result(f"游戏推荐失败：{exc}")
+            log_external_failure(
+                logger,
+                "recommendation_failed",
+                stage="recommendation",
+                exc=exc,
+            )
+            yield event.plain_result("游戏推荐暂时失败，请稍后重试。")
             return
 
         yield self._recommendation_result(event, messages)
@@ -275,15 +287,25 @@ class SteamGameRecommenderPlugin(Star):
                 str(query).strip(),
             )
         except SteamApiError as exc:
-            logger.warning(f"Steam retry recommendation failed: {exc}")
-            yield event.plain_result(f"Steam 查询失败：{exc}")
+            log_external_failure(
+                logger,
+                "retry_steam_failed",
+                stage="retry_steam",
+                exc=exc,
+            )
+            yield event.plain_result("Steam 查询暂时不可用，请稍后重试。")
             return
         except LibraryFilterModeError as exc:
             yield event.plain_result(f"游戏库过滤参数错误：{exc}")
             return
         except Exception as exc:
-            logger.exception("Retry game recommendation failed")
-            yield event.plain_result(f"重新推荐失败：{exc}")
+            log_external_failure(
+                logger,
+                "retry_failed",
+                stage="retry_recommendation",
+                exc=exc,
+            )
+            yield event.plain_result("重新推荐暂时失败，请稍后重试。")
             return
 
         yield self._recommendation_result(event, messages)
@@ -324,8 +346,13 @@ class SteamGameRecommenderPlugin(Star):
             yield event.plain_result(f"账号绑定失败：{exc}")
             return
         except Exception as exc:
-            logger.exception("Account binding failed")
-            yield event.plain_result(f"账号绑定失败：{exc}")
+            log_external_failure(
+                logger,
+                "account_binding_failed",
+                stage="account_binding_storage",
+                exc=exc,
+            )
+            yield event.plain_result("账号绑定暂时失败，请稍后重试。")
             return
 
         yield event.plain_result(
@@ -386,12 +413,22 @@ class SteamGameRecommenderPlugin(Star):
             yield event.plain_result(f"随机推荐失败：{exc}")
             return
         except SteamApiError as exc:
-            logger.warning(f"Steam random recommendation failed: {exc}")
-            yield event.plain_result(f"Steam 查询失败：{exc}")
+            log_external_failure(
+                logger,
+                "random_recommendation_steam_failed",
+                stage="random_recommendation_steam",
+                exc=exc,
+            )
+            yield event.plain_result("Steam 查询暂时不可用，请稍后重试。")
             return
         except Exception as exc:
-            logger.exception("Random game recommendation failed")
-            yield event.plain_result(f"随机推荐失败：{exc}")
+            log_external_failure(
+                logger,
+                "random_recommendation_failed",
+                stage="random_recommendation",
+                exc=exc,
+            )
+            yield event.plain_result("随机推荐暂时失败，请稍后重试。")
             return
 
         yield event.plain_result(
@@ -435,7 +472,13 @@ class SteamGameRecommenderPlugin(Star):
                 games = await self._owned_games_for_recommendation(event, required=False)
             return build_user_tag_weights(games, entries)
         except Exception as exc:
-            logger.debug(f"Steam user profile weights skipped: {exc}")
+            log_external_failure(
+                logger,
+                "user_profile_skipped",
+                stage="user_profile",
+                exc=exc,
+                level=logging.DEBUG,
+            )
             return {}
 
     async def _owned_games_for_recommendation(
@@ -466,9 +509,14 @@ class SteamGameRecommenderPlugin(Star):
             owned_games = await self.steam_client.get_owned_games(binding.steam_id64)
         except SteamApiError as exc:
             if required:
-                logger.warning(f"Steam owned games lookup failed: {exc}")
+                log_external_failure(
+                    logger,
+                    "owned_games_lookup_failed",
+                    stage="owned_games",
+                    exc=exc,
+                )
                 raise LibraryFilterModeError(
-                    f"Steam 游戏库不可读，无法执行游戏库过滤：{exc}"
+                    "Steam 游戏库暂时不可读，无法执行游戏库过滤。"
                 ) from exc
             return []
         if required and not owned_games:
@@ -695,7 +743,12 @@ class SteamGameRecommenderPlugin(Star):
                 LlmFallbackProviderError,
                 LlmFallbackVerificationError,
             ) as exc:
-                logger.warning("LLM empty-result fallback unavailable: %s", exc)
+                log_external_failure(
+                    logger,
+                    "empty_result_fallback_failed",
+                    stage="empty_result_fallback",
+                    exc=exc,
+                )
                 run_notices = dedupe_run_notices(
                     [
                         *run_notices,
